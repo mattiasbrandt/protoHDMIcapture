@@ -747,6 +747,11 @@ v4l2-ctl -d /dev/video2 --get-fmt-video
 - `lib/pick-refresh-mode.py` — picks the focused monitor's mode closest to
   `FPS` and emits the `hyprctl eval` Lua for switching and restoring
 - `config.example` — the settings file, documented
+- `tools/check` — static checks (shellcheck, Lua/Python syntax, banned
+  patterns); the pre-commit hook in `.githooks/` runs it once enabled with
+  `git config core.hooksPath .githooks`
+- `docs/testing.md`, `docs/run-dir.md`, `CODING_STANDARDS.md` — how to verify a
+  change on hardware, the session-file contract, and the review rules
 - `desktop/` — the `.desktop` entry and icon, symlinked into `~/.local/share`
 
 ---
