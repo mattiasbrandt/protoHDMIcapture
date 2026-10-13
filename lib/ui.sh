@@ -88,7 +88,7 @@ confirm_yes() {
 # DEFAULT is marked and taken on a bare Enter. A trailing tag after a second
 # "|" ("value|label|recommended") is shown next to the label.
 choose() {
-    local -n _out="$1"
+    local -n __choose_out="$1"
     local prompt="$2" default="$3"; shift 3
     local -a values=() labels=() tags=()
     local item v rest l t i def_i=""
@@ -126,7 +126,7 @@ choose() {
         read -r reply || reply=""
         [ -z "$reply" ] && [ -n "$def_i" ] && reply="$def_i"
         if [[ "$reply" =~ ^[0-9]+$ ]] && (( reply >= 1 && reply <= ${#values[@]} )); then
-            _out="${values[$((reply - 1))]}"
+            __choose_out="${values[$((reply - 1))]}"
             return 0
         fi
         # EOF with no default: give up rather than loop forever.
@@ -136,14 +136,14 @@ choose() {
 
 # ask VAR PROMPT DEFAULT [REGEX]
 ask() {
-    local -n _ans="$1"
+    local -n __ask_out="$1"
     local prompt="$2" default="$3" re="${4:-}" reply
     while true; do
         ceprompt '%s%s [Enter = "%s"]:%s ' "$BOLD" "$prompt" "$default" "$RESET"
         read -r reply || reply=""
         [ -z "$reply" ] && reply="$default"
         if [ -z "$re" ] || [[ "$reply" =~ $re ]]; then
-            _ans="$reply"
+            __ask_out="$reply"
             return 0
         fi
         center "${YELLOW}\"$reply\" is not valid here${RESET}"

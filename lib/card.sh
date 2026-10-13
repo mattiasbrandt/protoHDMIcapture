@@ -60,12 +60,12 @@ load_config() {
 # config_read ARRAY: the file's own values into an associative array, ignoring
 # the environment, so a caller can tell "set in the file" from "a default".
 config_read() {
-    local -n _cfg="$1"
-    _cfg=()
+    local -n __config_read_out="$1"
+    __config_read_out=()
     [ -r "$CONFIG_FILE" ] || return 0
     local line
     while IFS= read -r line || [ -n "$line" ]; do
-        _config_line "$line" && _cfg[$_CK]="$_CV"
+        _config_line "$line" && __config_read_out[$_CK]="$_CV"
     done <"$CONFIG_FILE"
 }
 

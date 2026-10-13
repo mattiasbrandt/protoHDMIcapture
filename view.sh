@@ -45,6 +45,24 @@ for _arg in "$@"; do
     esac
 done
 
+# --- first run -------------------------------------------------------------
+# No config file yet, and someone at a terminal: offer the wizard. Declining
+# leaves a config file that only says so, so this asks once. The menu path
+# (no terminal) is handled by launch.sh, which opens a terminal for it.
+if [ "$MODE" = play ] && [ ! -e "$CONFIG_FILE" ] && [ -z "${PROTOHDMI_SETUP_CHILD:-}" ] \
+   && [ -z "${NO_SETUP:-}" ] && [ -t 0 ] && [ -t 1 ]; then
+    printf '\033[1mNo settings yet.\033[0m Run the setup wizard now? [Y/n] '
+    read -r _reply || _reply=n
+    if [[ "$_reply" =~ ^[Nn] ]]; then
+        if config_write; then
+            printf '# Setup was skipped; run ./view.sh --setup to choose settings.\n' >>"$CONFIG_FILE"
+        fi
+    else
+        "$HERE/lib/setup.sh" --then-play
+        [ "$(cat "${XDG_RUNTIME_DIR:-/tmp}/protohdmicapture/setup.done" 2>/dev/null)" = saved ] || exit 0
+    fi
+fi
+
 # --- configuration ---------------------------------------------------------
 # Precedence: environment, then the config file (see config.example), then the
 # defaults below.

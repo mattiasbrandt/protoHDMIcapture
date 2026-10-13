@@ -7,10 +7,15 @@
 # on the current value, so Enter keeps it.
 #
 # Options (normally passed by view.sh / launch.sh):
-#   --from-launcher   started from the desktop menu: no test launch at the end,
-#                     the menu launcher starts the feed itself
+#   --from-launcher   started in a terminal opened by the menu launcher, which
+#                     starts the feed itself once this exits: no test launch,
+#                     and a last "press Enter" so the result can be read
+#   --then-play       started by view.sh on first run, which plays right after:
+#                     no test launch
 #
 # Takes no video or audio lock; holds setup.lock so only one wizard runs.
+# On exit it leaves $RUN_DIR/setup.done saying "saved" or "cancelled", which
+# is how a waiting launcher knows whether to start the feed.
 
 set -uo pipefail
 
@@ -22,10 +27,11 @@ HERE=$(dirname "$(dirname "$(readlink -f "$0")")")
 # shellcheck source=lib/ui.sh
 . "$HERE/lib/ui.sh"
 
-FROM_LAUNCHER=""
+FROM_LAUNCHER=""; THEN_PLAY=""
 for arg in "$@"; do
     case "$arg" in
         --from-launcher) FROM_LAUNCHER=1 ;;
+        --then-play) THEN_PLAY=1 ;;
         *) echo "setup: unknown option $arg" >&2; exit 2 ;;
     esac
 done
@@ -40,7 +46,9 @@ fi
 echo $$ >"$RUN_DIR/setup.pid"
 PREVIEW="$RUN_DIR/setup-preview.config"
 
+SAVED=""
 cleanup() {
+    if [ -n "$SAVED" ]; then echo saved; else echo cancelled; fi >"$RUN_DIR/setup.done"
     rm -f "$PREVIEW" "$RUN_DIR/setup.pid"
     ui_restore
 }
@@ -111,7 +119,7 @@ run_child() {
 STAGES=(welcome card usb format signal audio display)
 desktop_can refresh_match && STAGES+=(refresh)
 STAGES+=(backend review)
-[ -z "$FROM_LAUNCHER" ] && STAGES+=(test)
+[ -z "$FROM_LAUNCHER$THEN_PLAY" ] && STAGES+=(test)
 TOTAL_STAGES=$(( ${#STAGES[@]} - 1 ))   # the welcome screen is not numbered
 
 # --- stages ------------------------------------------------------------------
@@ -152,6 +160,13 @@ chip_info() {
         534d:*|345f:*) echo "MacroSilicon family, exact chip unknown|go by the format list" ;;
         *) echo "unknown chip|go by the format list" ;;
     esac
+}
+
+# vid:pid of the USB device behind a video node, or nothing.
+_usb_id() {
+    local d
+    d=$(dirname "$(readlink -f "/sys/class/video4linux/$(basename "$1")/device" 2>/dev/null)")
+    [ -r "$d/idVendor" ] && echo "$(cat "$d/idVendor"):$(cat "$d/idProduct")"
 }
 
 stage_usb() {
@@ -196,7 +211,7 @@ stage_card() {
     stage "🎥 Capture card"
     local -a nodes=() serials=() types=() items=()
     local n serial type
-    while IFS=$'\t' read -r n serial type; do
+    while IFS='|' read -r n serial type; do
         nodes+=("$n"); serials+=("$serial"); types+=("$type")
     done < <(card_list)
     if [ "${#nodes[@]}" -eq 0 ]; then
@@ -213,6 +228,18 @@ stage_card() {
         if [ -n "${serials[$i]}" ] && [ "${serials[$i]}" = "${CUR[CARD_SERIAL]:-}" ]; then def=$i; fi
         [ -z "$def" ] && [ "${nodes[$i]}" = "${CUR[DEV]:-}" ] && def=$i
     done
+    # Nothing chosen before: recommend the first device whose USB id is a
+    # capture chip this wizard knows, rather than whichever camera is first.
+    local rec=""
+    for i in "${!nodes[@]}"; do
+        local vp
+        vp=$(_usb_id "${nodes[$i]}")
+        [[ "$(chip_info "$vp")" == unknown* ]] || { rec=$i; break; }
+    done
+    if [ -n "$rec" ]; then
+        items[rec]="${items[rec]}|capture chip"
+        [ -n "$def" ] || def=$rec
+    fi
     say "Capture devices found (cameras show up here too):"
     center ""
     local pick
@@ -410,7 +437,10 @@ stage_refresh() {
     [ -n "$mon" ] && { center ""; note "Focused monitor now: $mon"; }
     center ""
     local pick
-    choose pick "Refresh" "$(cur REFRESH)" \
+    # With nothing in the file, start on "match": that is what a menu launch
+    # does today, and writing "keep" by default would quietly turn it off.
+    local def="${NEW[REFRESH]:-match}"
+    choose pick "Refresh" "$def" \
         "match|Match the feed while it runs, restore afterwards|recommended" \
         "keep|Leave the display alone" || exit 1
     NEW[REFRESH]="$pick"
@@ -578,7 +608,6 @@ _report_block() {
 }
 
 # --- run ---------------------------------------------------------------------
-SAVED=""
 USB_DIR=""; VIDPID=""; LINK_SPEED=""; CHIP=""; USB_RESULT=""
 REPORT=""
 MEASURED_FPS=""
@@ -607,6 +636,11 @@ if [ -n "$REPORT" ]; then
     command -v wl-copy >/dev/null 2>&1 && note "Copy it for an AI agent or a forum post:  wl-copy < $REPORT"
     center ""
 fi
-note "Play: ./view.sh, or protoHDMIcapture in your app launcher."
 note "Change any of this: ./view.sh --setup"
 center ""
+if [ -n "$FROM_LAUNCHER" ]; then
+    if [ -n "$SAVED" ]; then pause "⏎  Press Enter to start the feed"; else pause "⏎  Press Enter to close"; fi
+elif [ -z "$THEN_PLAY" ]; then
+    note "Play: ./view.sh, or protoHDMIcapture in your app launcher."
+    center ""
+fi
