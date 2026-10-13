@@ -291,10 +291,10 @@ start_audio() {
     [ "$AUDIO" = "loopback" ] || return 0
     take_audio_lock
     stop_audio
-    # -C capture source, -P playback sink (omitted = follow default sink),
-    # --latency = loopback buffer, --delay = deliberate offset to match video.
     # audio.env says the loopback is up, so it is written only once it is.
     rm -f "$RUN_DIR/audio.env" "$RUN_DIR/audio.failed"
+    # -C capture source, -P playback sink (omitted = follow default sink),
+    # --latency = loopback buffer, --delay = deliberate offset to match video.
     ( _close_locks; exec pw-loopback -n protohdmicapture-audio \
         -C "$SRC" ${SINK:+-P "$SINK"} \
         --latency "$LAT_MS" \
