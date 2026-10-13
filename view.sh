@@ -24,6 +24,8 @@ set -uo pipefail
 HERE=$(dirname "$(readlink -f "$0")")
 # shellcheck source=lib/card.sh
 . "$HERE/lib/card.sh"
+# shellcheck source=lib/desktop.sh
+. "$HERE/lib/desktop.sh"
 
 # --- configuration ---------------------------------------------------------
 # Precedence: environment, then the config file (see config.example), then the
@@ -51,7 +53,7 @@ LEVELS="${LEVELS:-auto}"        # auto | limited | full  (fix for crushed/washed
 IPC="${IPC-/tmp/mpv-protohdmicapture.sock}"  # mpv IPC socket; empty to disable
 # keep  = leave the display alone (default)
 # match = for the session only, switch the monitor the window opens on to its
-#         mode closest to FPS, then restore on exit. 60 fps into a 100 Hz panel
+#         mode closest to FPS, then restore on exit (Hyprland only). 60 fps into a 100 Hz panel
 #         holds frames for 1 or 2 refreshes alternately, which judders no matter
 #         how clean the capture path is. No output is hardcoded — whichever
 #         monitor is focused when you launch is the one that changes.
@@ -60,6 +62,7 @@ GST_IO_MODE="${GST_IO_MODE:-mmap}"   # mmap | dmabuf  (dmabuf is zero-copy but n
 
 die() { printf '\033[31m!! %s\033[0m\n' "$*" >&2; exit 1; }
 info() { printf '\033[36m:: %s\033[0m\n' "$*"; }
+warn() { printf '\033[33m** %s\033[0m\n' "$*" >&2; }
 
 # --- resolve the card ------------------------------------------------------
 resolve_card || die "$CARD_ERROR"
@@ -108,43 +111,12 @@ stop_audio() {
     fi
     LOOPBACK_PID=""
 }
-trap 'stop_audio; restore_refresh' EXIT INT TERM
+trap 'stop_audio; desktop_refresh_restore' EXIT INT TERM
 
 # --- display refresh matching ---------------------------------------------
-REFRESH_RESTORE=""   # hyprctl argument string to put the monitor back
-
 start_refresh() {
     [ "$REFRESH" = "match" ] || return 0
-    command -v hyprctl >/dev/null 2>&1 || { echo "REFRESH=match needs hyprctl" >&2; return 0; }
-
-    # Mode selection lives in pick-refresh-mode.py — embedding Python braces
-    # inside $( ) is brittle and unlintable.
-    local plan
-    plan=$("$HERE/pick-refresh-mode.py" "$FPS" \
-           < <(hyprctl monitors -j 2>/dev/null) 2>/dev/null) || true
-
-    [ -n "$plan" ] || { echo "could not work out a refresh plan; leaving the display alone" >&2; return 0; }
-
-    local name target restore cur chosen
-    IFS='|' read -r name target restore cur chosen <<<"$plan"
-
-    if [ "$cur" = "$chosen" ]; then
-        info "display: $name already at ${cur}Hz, nothing to change"
-        return 0
-    fi
-    # MUST be `hyprctl eval`, not the keyword subcommand: Omarchy configures
-    # Hyprland in Lua, and keyword fails on the Lua parser with "can't work with
-    # non-legacy parsers" — silently doing nothing rather than erroring.
-    hyprctl eval "$target" >/dev/null 2>&1 || {
-        echo "refresh switch failed; leaving the display alone" >&2; return 0; }
-    REFRESH_RESTORE="$restore"
-    info "display: $name ${cur}Hz -> ${chosen}Hz (restored on exit)"
-}
-
-restore_refresh() {
-    [ -n "$REFRESH_RESTORE" ] || return 0
-    hyprctl eval "$REFRESH_RESTORE" >/dev/null 2>&1
-    REFRESH_RESTORE=""
+    if desktop_refresh_match "$FPS"; then info "$DESKTOP_MSG"; else warn "$DESKTOP_MSG"; fi
 }
 
 # --- interactive A/V sync tuner -------------------------------------------

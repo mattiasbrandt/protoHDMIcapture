@@ -18,21 +18,19 @@ set -uo pipefail
 
 HERE=$(dirname "$(readlink -f "$0")")
 LOG="${XDG_RUNTIME_DIR:-/tmp}/protohdmicapture.log"
-
-notify() { command -v notify-send >/dev/null 2>&1 && notify-send -a protoHDMIcapture "$@"; }
+# shellcheck source=lib/desktop.sh
+. "$HERE/lib/desktop.sh"
 
 # --- already running? focus it instead of starting a second pipeline -------
 # Match class AND title exactly. A browser tab called "protoHDMIcapture ..." must not count,
 # which is why this does not use `omarchy launch or focus` — that matches a
 # word-boundary regex against class *or* title and would focus the browser.
-if command -v hyprctl >/dev/null 2>&1; then
-    addr=$(hyprctl clients -j 2>/dev/null \
-           | jq -r '.[] | select(.class == "mpv" and .title == "protoHDMIcapture") | .address' \
-           | head -1)
-    if [ -n "${addr:-}" ] && [ "$addr" != "null" ]; then
-        # Lua-configured Hyprland (Omarchy) rejects `dispatch focuswindow` as a
-        # Lua syntax error; the dispatcher has to be written as Lua.
-        hyprctl dispatch "hl.dsp.focus({ window = \"address:$addr\" })" >/dev/null 2>&1
+if [ "$DESKTOP" = hyprland ]; then
+    pid=$(hyprctl clients -j 2>/dev/null \
+          | jq -r '.[] | select(.class == "mpv" and .title == "protoHDMIcapture") | .pid' \
+          | head -1)
+    if [ -n "${pid:-}" ] && [ "$pid" != "null" ]; then
+        desktop_focus_pid "$pid"
         exit 0
     fi
 fi
@@ -54,7 +52,7 @@ if [ "$status" -ne 0 ]; then
     reason=$(sed 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -m1 '^!! ' | sed 's/^!! //')
     [ -n "$reason" ] || reason=$(sed 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -v '^$' | tail -1)
     [ -n "$reason" ] || reason="exited with status $status"
-    notify -u critical "protoHDMIcapture failed" "$reason
+    desktop_notify critical "protoHDMIcapture failed" "$reason
 Full log: $LOG"
 fi
 

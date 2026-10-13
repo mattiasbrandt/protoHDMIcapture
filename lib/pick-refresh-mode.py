@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pick the display mode closest to a target framerate, for view.sh.
+"""Pick the display mode closest to a target framerate, for lib/desktop.sh.
 
 Reads `hyprctl monitors -j` on stdin, finds the *focused* monitor (no output is
 hardcoded — whichever monitor you launch on is the one considered), and among
