@@ -566,8 +566,9 @@ mpv)
     # relabels the frames, no copy.
     # Labelled, so the overlay's l key can replace it live.
     [ "$LEVELS" != "auto" ] && args+=(--vf-append="@phc-levels:format:colorlevels=$LEVELS")
+    # Always passed, 0 included: a saved 0 must beat a value in mpv.conf.
     for _c in BRIGHTNESS CONTRAST SATURATION GAMMA; do
-        [ "${!_c}" != 0 ] && args+=(--"${_c,,}=${!_c}")
+        args+=(--"${_c,,}=${!_c}")
     done
     case "$WINDOW" in
         fullscreen) args+=(--fs) ;;
