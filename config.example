@@ -37,5 +37,7 @@
 #SATURATION=0
 #GAMMA=0
 
-# Any other view.sh knob works here too: DEV SRC SINK RES FPS FMT LAT_MS
-# BACKEND AUDIO SCALING LEVELS IPC REFRESH GST_IO_MODE
+# Any other setting works here too (README, "The settings worth knowing"):
+# DEV SRC SINK RES FPS FMT LAT_MS BACKEND AUDIO SCALING LEVELS IPC REFRESH
+# GST_IO_MODE. FULLSCREEN=yes|no is a deprecated alias of WINDOW.
+# ./view.sh --settings shows what each one resolves to.

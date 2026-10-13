@@ -447,6 +447,17 @@ shows the lot without starting anything.
 | `LEVELS` | `auto` | the colour range of the card's frames: `limited` or `full` if blacks look crushed or washed (mpv `--vf=format:colorlevels=`; the display's own range is untouched). `auto` trusts the frames: YUYV is read as limited, while MJPEG frames (MS2109) arrive flagged full. The MS2130 reports `Quantization: Default (maps to Limited Range)` and the PS5 outputs limited, so `auto` is right there |
 | `IPC` | `/tmp/mpv-protohdmicapture.sock` | mpv IPC socket, so you can drive it from a keybind or script |
 | `REFRESH` | `keep` | `match` switches the focused monitor to its mode nearest `FPS` for the session and restores it on exit (Hyprland only). No output hardcoded; resolution, position, scale and transform all preserved |
+| `DEV` | — | the card's video node (`/dev/videoN`) instead of finding it; a pin like `CARD_SERIAL`, but node numbers move on replug, so prefer the serial or the port |
+| `SRC` | — | the PipeWire source to take the audio from; default: the card's own audio input, found on its USB device |
+| `SINK` | — | the PipeWire sink to play it on; default: the desktop's default sink, followed when it changes |
+| `RES` | `1920x1080` | capture resolution; the wizard picks it from the card's own mode list |
+| `FPS` | `60` | capture frame rate; also what `REFRESH=match` matches |
+| `FMT` | `yuyv422` | capture format: `yuyv422` (uncompressed), `mjpeg`, `nv12`, `rawvideo`. Empty leaves the device as it was last set, which is luck, not a setting |
+| `DELAY` | `0.05` | audio sync in seconds, 0 to 1; **ctrl −/+** tunes it live and **w** saves it |
+| `LAT_MS` | `10` | the audio loopback's buffer in ms; raise it if the sound crackles |
+| `BACKEND` | `mpv` | the player: `mpv`; `gst` and `ffplay` are for comparisons and have no overlay |
+| `AUDIO` | `loopback` | `loopback` (PipeWire, beside the player), `mpv` (inside mpv: one process, more latency), `none` |
+| `GST_IO_MODE` | `mmap` | gst only: `mmap`, or `dmabuf` (zero-copy where the card supports it) |
 
 A few more that are simply on, with no knob, because there's no case for the
 other setting here:

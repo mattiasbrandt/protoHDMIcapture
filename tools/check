@@ -57,6 +57,20 @@ for f in sources/*.md; do
     done
 done
 
+# Every setting has a row in README's settings table (first cell) and is named
+# in config.example; the table names nothing that is not a setting.
+step "settings documented"
+mapfile -t ALL_SETTINGS < <(bash -c '. lib/settings.sh; settings_with')
+documented=$(sed -n '/^### The settings worth knowing/,/^#/p' README.md | grep '^| `' \
+             | cut -d'|' -f2 | grep -oE '`[A-Z_]+`' | tr -d '`' | sort -u)
+for n in "${ALL_SETTINGS[@]}"; do
+    grep -qx "$n" <<<"$documented" || bad "README: setting $n has no row in \"The settings worth knowing\""
+    grep -qE "(^|[^A-Z_])$n([^A-Z_]|$)" config.example || bad "config.example: setting $n is not mentioned"
+done
+for d in $documented; do
+    [[ " ${ALL_SETTINGS[*]} " == *" $d "* ]] || bad "README: $d has a settings row but is not a setting (lib/settings.sh)"
+done
+
 step "capture card table up to date"
 tools/capture-cards-table --check || bad "docs/capture-cards.md is stale"
 
