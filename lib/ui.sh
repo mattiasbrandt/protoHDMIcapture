@@ -74,10 +74,12 @@ confirm() {
     [[ "$reply" =~ ^[Yy] ]]
 }
 
+# Enter means yes, but end of input means no: a closed terminal must never
+# answer "yes" to starting something.
 confirm_yes() {
     local reply=""
     ceprompt '%s❓ %s [Y/n]%s ' "$YELLOW" "$1" "$RESET"
-    read -r reply || true
+    read -r reply || return 1
     ! [[ "$reply" =~ ^[Nn] ]]
 }
 

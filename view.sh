@@ -27,6 +27,24 @@ HERE=$(dirname "$(readlink -f "$0")")
 # shellcheck source=lib/desktop.sh
 . "$HERE/lib/desktop.sh"
 
+# --- mode --------------------------------------------------------------------
+# --setup hands over before the config is even read, so a config that would
+# make this script die can still be fixed by the wizard.
+if [ "${1:-}" = "--setup" ]; then
+    shift
+    exec "$HERE/lib/setup.sh" "$@"
+fi
+MODE=play
+for _arg in "$@"; do
+    case "$_arg" in
+        --tune) MODE=tune ;;
+        -h|--help)
+            echo "usage: ./view.sh [--setup | --tune]   (knobs: env vars or the config file)"
+            exit 0 ;;
+        *) echo "view.sh: unknown option $_arg (try --help)" >&2; exit 2 ;;
+    esac
+done
+
 # --- configuration ---------------------------------------------------------
 # Precedence: environment, then the config file (see config.example), then the
 # defaults below.
@@ -170,7 +188,7 @@ fi
 [ "$AUDIO" != "mpv" ] || [ "$BACKEND" = "mpv" ] \
     || die "AUDIO=mpv needs BACKEND=mpv; use AUDIO=loopback with $BACKEND"
 
-[ "${1:-}" = "--tune" ] || take_video_lock
+[ "$MODE" = tune ] || take_video_lock
 
 # --- resolve the card ------------------------------------------------------
 resolve_card || die "$CARD_ERROR"
@@ -261,7 +279,7 @@ start_refresh() {
 # --- interactive A/V sync tuner -------------------------------------------
 # Restarts the loopback with a new delay on each keypress. Video keeps running
 # in another terminal / window; you only nudge audio until it lines up.
-if [ "${1:-}" = "--tune" ]; then
+if [ "$MODE" = tune ]; then
     [ "$AUDIO" = "loopback" ] || die "--tune needs AUDIO=loopback"
     start_audio
     cat <<'EOF'

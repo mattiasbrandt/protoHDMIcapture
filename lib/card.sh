@@ -7,6 +7,7 @@
 #   config_read ARRAY    the file's own values into an associative array
 #   config_write K=V...  set keys in the config file (config_set K V for one)
 #   config_unset K...    remove keys from the config file
+#   card_list            "node<TAB>serial<TAB>card type" for every capture node
 #   resolve_card         set DEV (the card's video node) and CARD_NAME
 #   resolve_audio_source set SRC (the card's PipeWire source)
 #   card_serial DEV      print the USB serial of a video node
@@ -152,21 +153,28 @@ _is_capture_node() {
     _card_info "$1" | sed -n '/Device Caps/,/^[^[:space:]]/p' | grep -q 'Video Capture'
 }
 
+card_list() {
+    local n
+    for n in /dev/video*; do
+        [ -e "$n" ] || continue
+        _is_capture_node "$n" || continue
+        printf '%s\t%s\t%s\n' "$n" "$(card_serial "$n")" "$(_card_type "$n")"
+    done
+}
+
 resolve_card() {
     CARD_ERROR=""
     if [ -z "${DEV:-}" ]; then
-        local n
-        for n in /dev/video*; do
-            [ -e "$n" ] || continue
-            _is_capture_node "$n" || continue
+        local n serial type
+        while IFS=$'\t' read -r n serial type; do
             if [ -n "${CARD_SERIAL:-}" ]; then
-                [ "$(card_serial "$n")" = "$CARD_SERIAL" ] || continue
+                [ "$serial" = "$CARD_SERIAL" ] || continue
             elif [ -n "${IGNORE_CARDS_RE:-}" ]; then
                 # Guarded: an empty pattern would match, and skip, every card.
-                _card_type "$n" | grep -Eq "$IGNORE_CARDS_RE" && continue
+                grep -Eq "$IGNORE_CARDS_RE" <<<"$type" && continue
             fi
             DEV="$n"; break
-        done
+        done < <(card_list)
     fi
     if [ -z "${DEV:-}" ]; then
         if [ -n "${CARD_SERIAL:-}" ]; then
