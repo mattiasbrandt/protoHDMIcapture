@@ -29,8 +29,20 @@ local utils = require("mp.utils")
 
 local opts = { helper = "", mode = "fullscreen", quitfile = "", scaling = "balanced",
                levels = "auto", sources = "", source = "", audio = "", owner = "",
-               rundir = "", delay = "0.05", open = "" }
+               rundir = "", delay = "0.05", open = "",
+               -- From lib/settings.sh, through view.sh: "+"-separated, since
+               -- script-opts are split on commas.
+               saveable = "", window_values = "", scaling_values = "",
+               levels_values = "", delay_max = "1" }
 require("mp.options").read_options(opts, "protohdmicapture")
+
+-- "a+b+c" -> { "a", "b", "c" }; empty -> { fallback } so a cycle stays put.
+local function list(s, fallback)
+    local out = {}
+    for item in s:gmatch("[^+]+") do out[#out + 1] = item end
+    if #out == 0 then out[1] = fallback end
+    return out
+end
 
 local function helper(...)
     if opts.helper == "" then return end
@@ -55,7 +67,7 @@ local function set(prop, value)
 end
 
 -- --- display mode -----------------------------------------------------------
-local modes = { "fullscreen", "borderless", "windowed" }
+local modes = list(opts.window_values, opts.mode)
 local names = { fullscreen = "Fullscreen", borderless = "Borderless", windowed = "Windowed" }
 local current = opts.mode
 
@@ -94,7 +106,7 @@ local SCALINGS = {
              ["allow-delayed-peak-detect"] = "yes" },
     config = {},
 }
-local scaling_order = { "balanced", "fast", "config" }
+local scaling_order = list(opts.scaling_values, opts.scaling)
 local snapshot = {}
 for _, k in ipairs(SCALE_KEYS) do snapshot[k] = mp.get_property(k) end
 local scaling = opts.scaling
@@ -110,7 +122,7 @@ apply_scaling(scaling)
 -- --- levels -----------------------------------------------------------------
 -- The range of the card's frames, as a labelled format filter (view.sh adds
 -- it at start when LEVELS is not auto).
-local levels_order = { "auto", "limited", "full" }
+local levels_order = list(opts.levels_values, opts.levels)
 local levels = opts.levels
 
 local function apply_levels(value)
@@ -218,7 +230,7 @@ local function sync_send()
 end
 
 local function sync_step(ms)
-    delay = math.max(0, math.min(1, delay + ms / 1000))
+    delay = math.max(0, math.min(tonumber(opts.delay_max) or 1, delay + ms / 1000))
     delay = math.floor(delay * 1000 + 0.5) / 1000
     mp.osd_message(string.format("Audio sync %d ms …", math.floor(delay * 1000 + 0.5)), 1)
     if sync_timer then sync_timer:kill() end
@@ -288,8 +300,12 @@ local function current_settings()
 end
 local function changes()
     local out, now = {}, current_settings()
-    for _, k in ipairs({ "WINDOW", "LEVELS", "SCALING", "BRIGHTNESS", "CONTRAST", "SATURATION", "GAMMA", "DELAY" }) do
-        if now[k] ~= baseline[k] and (k ~= "DELAY" or opts.audio == "loopback") then out[#out + 1] = k .. "=" .. now[k] end
+    -- The settings w may save (flag save in lib/settings.sh) that this
+    -- script can read live; DELAY only while the loopback carries the sound.
+    for _, k in ipairs(list(opts.saveable)) do
+        if now[k] ~= nil and now[k] ~= baseline[k] and (k ~= "DELAY" or opts.audio == "loopback") then
+            out[#out + 1] = k .. "=" .. now[k]
+        end
     end
     return out
 end

@@ -62,7 +62,7 @@ case "${1:-}" in
     exit ;;
 --save)
     # The overlay's "save as defaults": the same writer the wizard uses, and
-    # only the settings the overlay changes live.
+    # only the settings flagged save in lib/settings.sh.
     shift
     [ "$#" -gt 0 ] || { echo "--save KEY=VALUE..." >&2; exit 2; }
     # The wizard's test feed reads a preview config that the wizard deletes;
@@ -70,7 +70,7 @@ case "${1:-}" in
     [ -z "${PROTOHDMI_SETUP_CHILD:-}" ] \
         || { echo "this is the wizard's test feed; change settings in the wizard" >&2; exit 1; }
     for _kv in "$@"; do
-        [[ " WINDOW LEVELS SCALING BRIGHTNESS CONTRAST SATURATION GAMMA DELAY " == *" ${_kv%%=*} "* ]] \
+        [[ " $(settings_with save | tr '\n' ' ') " == *" ${_kv%%=*} "* ]] \
             || { echo "--save: ${_kv%%=*} is not a setting the overlay saves" >&2; exit 2; }
     done
     config_write "$@" || { echo "$CONFIG_ERROR" >&2; exit 1; }
@@ -466,6 +466,18 @@ mpv)
         SOURCE=""
     fi
 
+    # What the overlay may cycle and save, from lib/settings.sh, as
+    # script-opts ("+" between items: script-opts split on commas).
+    _settings_opts() {
+        local n o
+        o="protohdmicapture-saveable=$(settings_with save | paste -sd+)"
+        for n in WINDOW SCALING LEVELS; do
+            o+=",protohdmicapture-${n,,}_values=$(settings_fact "$n" values | sed 's/^enum://; s/,/+/g')"
+        done
+        o+=",protohdmicapture-delay_max=$(settings_fact DELAY values | sed 's/.*\.\.//')"
+        printf '%s' "$o"
+    }
+
     # ~/.config/mpv/mpv.conf is tuned for films and actively fights this
     # workload, so the settings that matter are overridden explicitly on the
     # command line (CLI beats config). Each override below names what it undoes.
@@ -502,7 +514,7 @@ mpv)
         --input-terminal=no
         # f cycles the display mode, d opens the debug dashboard
         --script="$HERE/lib/mpv/protohdmicapture.lua"
-        --script-opts="protohdmicapture-helper=$HERE/view.sh,protohdmicapture-mode=$WINDOW,protohdmicapture-quitfile=$RUN_DIR/player.quit,protohdmicapture-scaling=$SCALING,protohdmicapture-levels=$LEVELS,protohdmicapture-sources=$HERE/sources,protohdmicapture-source=$SOURCE,protohdmicapture-audio=$AUDIO,protohdmicapture-owner=$$,protohdmicapture-rundir=$RUN_DIR,protohdmicapture-delay=$DELAY,protohdmicapture-open=$OPEN_OVERLAY"
+        --script-opts="protohdmicapture-helper=$HERE/view.sh,protohdmicapture-mode=$WINDOW,protohdmicapture-quitfile=$RUN_DIR/player.quit,protohdmicapture-scaling=$SCALING,protohdmicapture-levels=$LEVELS,protohdmicapture-sources=$HERE/sources,protohdmicapture-source=$SOURCE,protohdmicapture-audio=$AUDIO,protohdmicapture-owner=$$,protohdmicapture-rundir=$RUN_DIR,protohdmicapture-delay=$DELAY,protohdmicapture-open=$OPEN_OVERLAY,$(_settings_opts)"
         # a live feed generates no input events, so idle-blanking would otherwise
         # kick in mid-game
         --stop-screensaver=always
