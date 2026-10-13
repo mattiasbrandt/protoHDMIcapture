@@ -128,6 +128,7 @@ local render_page   -- defined with the overlay below
 local audio = { volume = nil, mute = nil, error = nil }
 
 local function audio_ctl(action, ...)
+    if opts.helper == "" then return end
     local args = { opts.helper, "--audio", action, ... }
     mp.command_native_async({ name = "subprocess", args = args, playback_only = false,
                               capture_stdout = true, capture_stderr = true }, function(_, r)
@@ -395,7 +396,42 @@ local function open(which)
     render_page()
 end
 
+-- --- startup key bar ----------------------------------------------------------
+-- The main keys along the bottom for the first 10 seconds, so nobody has to
+-- know Tab exists. Gone early when the overlay opens.
+local hint = mp.create_osd_overlay("ass-events")
+local hint_on = false
+
+local function render_hint()
+    if not hint_on then hint:remove(); return end
+    local w, h = mp.get_osd_size()
+    if not w or w == 0 then w, h = 1280, 720 end
+    hint.res_x, hint.res_y = w, h
+    local keys = { "Tab menu", "f display" }
+    if opts.audio == "loopback" then
+        keys[#keys + 1] = "m mute"; keys[#keys + 1] = "9/0 volume"; keys[#keys + 1] = "ctrl -/+ audio sync"
+    end
+    keys[#keys + 1] = "s screenshot"; keys[#keys + 1] = "q quit"
+    local text = table.concat(keys, "   ·   ")
+    local fs = math.max(14, math.floor(h / 45))
+    local chars = select(2, text:gsub("[^\128-\191]", ""))
+    local bw, bh = math.floor(chars * fs * 0.6 + 2 * fs), math.floor(fs * 2)
+    local x0, y0 = math.floor((w - bw) / 2), h - bh - fs
+    hint.data = table.concat({
+        string.format("{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&H101010&\\1a&H30&\\p1}m 0 0 l %d 0 %d %d 0 %d{\\p0}",
+                      x0, y0, bw, bw, bh, bh),
+        string.format("{\\an5\\pos(%d,%d)\\fnmonospace\\fs%d\\bord1\\3c&H000000&\\shad0\\1c&HDDDDDD&}%s",
+                      math.floor(w / 2), y0 + math.floor(bh / 2), fs, ass_escape(text)),
+    }, "\n")
+    hint:update()
+end
+
+local function hide_hint()
+    if hint_on then hint_on = false; render_hint() end
+end
+
 mp.add_forced_key_binding("TAB", "protohdmicapture-overlay", function()
+    hide_hint()
     if page then close() else open("panel") end
 end)
 
@@ -425,13 +461,23 @@ mp.add_forced_key_binding("d", "protohdmicapture-dashboard", function()
 end)
 
 for _, k in ipairs(COLOUR) do mp.observe_property(k, "number", function() if page then render_page() end end) end
-mp.observe_property("osd-dimensions", "native", function() if page then render_page() end end)
+mp.observe_property("osd-dimensions", "native", function()
+    if page then render_page() end
+    if hint_on then render_hint() end
+end)
 
 -- The start, for "what changed": options are applied before scripts load.
 baseline = current_settings()
 
--- view.sh --tune: the feed with the overlay already open.
-if opts.open == "panel" then open("panel") end
+-- view.sh --tune: the feed with the overlay already open; otherwise the key
+-- bar for the first 10 seconds.
+if opts.open == "panel" then
+    open("panel")
+else
+    hint_on = true
+    render_hint()
+    mp.add_timeout(10, hide_hint)
+end
 
 mp.register_event("shutdown", function()
     if opts.quitfile == "" then return end

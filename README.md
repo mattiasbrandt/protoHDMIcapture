@@ -28,6 +28,9 @@ mpv's frame-timing stats, **q** quits.
 
 ### The overlay
 
+For the first 10 seconds a bar along the bottom lists the main keys (Tab,
+f, the audio keys, s, q); it goes as soon as the overlay opens.
+
 **Tab** opens a panel over the picture with the keys and the live settings,
 each with its current value:
 
