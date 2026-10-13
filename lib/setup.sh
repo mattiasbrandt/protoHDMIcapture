@@ -587,7 +587,7 @@ stage_refresh() {
     mon=$(desktop_outputs | awk '/ focused$/ { print $1 " at " $2 }')
     say "A ${NEW[FPS]} fps feed on a display that refreshes at a different rate judders:"
     say "frames are held for an uneven number of refreshes. While the feed runs,"
-    say "the monitor it opens on can switch to its mode nearest ${NEW[FPS]} Hz."
+    say "the monitor that has focus can switch to its mode nearest ${NEW[FPS]} Hz."
     [ -n "$mon" ] && { center ""; note "Focused monitor now: $mon"; }
     center ""
     local pick

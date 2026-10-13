@@ -1,7 +1,8 @@
 # protoHDMIcapture
 
-- **Checks:** `tools/check` (shellcheck, Lua/Python syntax, banned patterns);
-  enable the hook per clone with `git config core.hooksPath .githooks`.
+- **Checks:** `tools/check` (lint, syntax, and consistency between code and
+  docs; each check prints its name); enable the hook per clone with
+  `git config core.hooksPath .githooks`.
 - **Verifying on hardware:** read [`docs/testing.md`](docs/testing.md) before
   a real run; it lists the harness traps that fake failures.
 - **Session files** (`$XDG_RUNTIME_DIR/protohdmicapture/`): the contract

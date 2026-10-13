@@ -17,7 +17,8 @@
 #   DELAY=0.08 ./view.sh      # audio delayed 80 ms to match video
 #   ./view.sh --tune          # the feed with the overlay open: ctrl -/+ syncs audio
 #
-# Every knob is an env var; see the block below.
+# Every setting is an env var or a line in the config file; lib/settings.sh
+# lists them, ./view.sh --settings shows each value and where it came from.
 
 set -uo pipefail
 
@@ -42,7 +43,8 @@ fi
 [ "${1:-}" = "--dashboard" ] && exec "$HERE/lib/dashboard.sh"
 
 # Helpers for the keys in the mpv window (lib/mpv/protohdmicapture.lua), acting
-# on the running session through its run directory; no config, no locks.
+# on the running session through its run directory, without its video or
+# audio lock: --audio takes only audio.ctl.lock, and --save writes the config.
 _RUN="${XDG_RUNTIME_DIR:-/tmp}/protohdmicapture"
 case "${1:-}" in
 --place-window)
@@ -85,7 +87,7 @@ for _arg in "$@"; do
         --debug) DEBUG_FLAG=1 ;;
         --settings) MODE=settings ;;
         -h|--help)
-            echo "usage: ./view.sh [--setup | --tune | --debug | --settings]   (settings: env vars or the config file)"
+            echo "usage: ./view.sh [--setup | --tune | --debug | --settings | --dashboard]   (settings: env vars or the config file)"
             exit 0 ;;
         *) echo "view.sh: unknown option $_arg (try --help)" >&2; exit 2 ;;
     esac

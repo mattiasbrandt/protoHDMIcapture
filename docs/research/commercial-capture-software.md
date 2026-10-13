@@ -17,6 +17,16 @@ property records in-process with no second reader (tested: MS2109 MJPEG
 720p60, 241 frames in 4.0 s, feed held 60 fps), which is the route if
 recording is ever reconsidered.
 
+**Status since (2026-10-13, same day, later):** this note is a snapshot and is
+not kept current; "protoHDMIcapture today" below describes the repo as it was
+then. Since shipped from the shortlist: 4 in part (mute and volume on the
+loopback, keys **m**, **9**, **0**; no level meter), 5 (colour keys **1**–**8**,
+**r** resets), 7 in another shape (the **Tab** overlay is a control panel and
+setup tips; fps, drops and audio state stay in the terminal dashboard), and 8
+(source profiles in `sources/` for PS4, PS5, Xbox Series, Switch, Switch 2 and
+PC). Also new: a "No signal" banner. Still open: 1 (screenshot confirm and
+folder) and 6 (rebindable keys). For what the viewer does now, read the README.
+
 ## protoHDMIcapture today (from repo)
 
 - Video: `mpv --untimed --profile=low-latency` straight from `/dev/videoN`

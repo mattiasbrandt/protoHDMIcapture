@@ -8,7 +8,9 @@ It started life as `ps5-capture`, built to play a PS5 in a window, so the
 measurements and source-side settings below were taken with a PS5 on the HDMI
 side. Nothing in the scripts is PS5-specific.
 
-Research + test kit. Written 2026-09-06, before the card was connected.
+A viewer only: it shows the picture and plays the sound, and does not record
+or stream. Tested end to end with the MS2130 card and a PS5 (see
+[docs/capture-cards.md](docs/capture-cards.md) for each card's support status).
 
 ---
 
@@ -77,7 +79,9 @@ audio. The tuning pair above is one of each, so it is allowed.
 
 1. **Capture card**: every capture device with its serial; the one with a
    known capture-chip USB id is recommended. Pinned by USB serial
-   (`CARD_SERIAL`), or by USB port (`CARD_PORT`) when the card reports none.
+   (`CARD_SERIAL`), or by USB port (`CARD_PORT`) when the card reports none,
+   or as a last resort by its node (`DEV=/dev/videoN`, which can change on a
+   replug).
 2. **USB link**: the chip the id implies, with what is known about that
    card and its support status (its profile in `capture-cards/`; see
    [docs/capture-cards.md](docs/capture-cards.md)), and the negotiated
@@ -95,12 +99,15 @@ audio. The tuning pair above is one of each, so it is allowed.
 6. **Audio**: the card's own input (found on the card's USB device at every
    start), another source, or none.
 7. **Display mode** and window size, **refresh matching** (where the desktop
-   adapter can), and scaling. The player is mpv; a config set to gst or
+   adapter can; it switches the monitor that has focus when the feed starts),
+   and scaling. The player is mpv; a config set to gst or
    ffplay by hand is offered the switch.
 8. **Audio sync**: optional; a windowed feed without audio opens and the
    j/k/h/l tuner runs in the wizard's terminal.
-9. **Review**: a diff of exactly what will change; nothing is written before
-   this. Then an optional test feed that behaves exactly as the saved config.
+9. **Troubleshooting**: debug output off (recommended), a log, or a log plus
+   the live dashboard (`DEBUG`).
+10. **Review**: a diff of exactly what will change; nothing is written before
+    this. Then an optional test feed that behaves exactly as the saved config.
 
 Re-running it edits: every question starts on the current value. Each run
 also writes a Markdown report (summary with verdicts, config changes, and the
@@ -886,13 +893,16 @@ REFRESH=keep ./launch.sh     # or just use ./view.sh directly
 ## The card: generic "USB3.0 Video Capture HDMI 4K" blue box
 
 Identified from the product photo: aluminium blue case, HDMI-in, HDMI loop-out,
-3.5 mm mic jack, USB-C `DC5V` aux power, LED. That is the standard
-**MacroSilicon MS2130** reference design (the USB 3.0 successor to the MS2109).
-Confirm once plugged in — `./view.sh --setup` prints the USB ID and names the chip.
+3.5 mm mic jack, USB-C `DC5V` aux power, LED. Plugged in, it enumerates as
+`1e4e:7016` (a borrowed "Cubeternet" id with no product string) and is
+**tested** here. The chip is taken to be the **MacroSilicon MS2130** (the USB
+3.0 successor to the MS2109) because it captures uncompressed 1080p60 over
+USB 3; the chip itself does not say so (see
+[capture-cards/ms2130.md](capture-cards/ms2130.md)).
 
-Expected IDs: `534d:2109` = MS2109 (USB 2.0), MS2130 boards commonly enumerate
-as `345f:2130` or under a `534d:` id. Whatever it is, `lsusb` decides, not the
-box.
+Other ids the same chips use: `534d:2109` (MS2109, USB 2.0), and `345f:2130`
+or a `534d:` id for other MS2130 boards. Whatever it is, `lsusb` decides, not
+the box; `./view.sh --setup` prints the id and names the chip it implies.
 
 ### Read the marketing correctly
 

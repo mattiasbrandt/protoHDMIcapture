@@ -57,7 +57,7 @@ SATURATION      |0                              |int:-100..100                  
 GAMMA           |0                              |int:-100..100                      |mpv            |save
 # IPC: empty disables the socket.
 IPC             |/tmp/mpv-protohdmicapture.sock |text                               |mpv            |empty
-# REFRESH: match switches the monitor the feed opens on to its mode nearest FPS
+# REFRESH: match switches the focused monitor to its mode nearest FPS
 # for the session (Hyprland). keep by default: a terminal run never touches
 # the display unasked; the menu launcher asks for match (launch.sh).
 REFRESH         |keep                           |enum:keep,match                    |all            |wizard
