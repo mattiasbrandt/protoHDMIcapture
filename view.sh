@@ -220,6 +220,7 @@ take_video_lock() {
     exit 0
 }
 
+ORPHAN_LOOPBACK_RE='^pw-loopback -n protohdmicapture-audio '
 AUDIO_LOCK=""
 take_audio_lock() {
     [ -z "$AUDIO_LOCK" ] || return 0
@@ -227,7 +228,7 @@ take_audio_lock() {
     flock -n "$AUDIO_LOCK" \
         || die "another session is already playing the card's audio; stop it, or start this one with AUDIO=none"
     dbg "audio lock: held"
-    kill_orphan audio.pid '^pw-loopback -n protohdmicapture-audio ' "audio loopback"
+    kill_orphan audio.pid "$ORPHAN_LOOPBACK_RE" "audio loopback"
     # A new session starts from what WirePlumber restores for the stream,
     # not from the previous session's file; only the lock holder may clear it.
     rm -f "$RUN_DIR/audio.state"
@@ -274,6 +275,13 @@ if [ "$DEBUG" != off ] && [ "$MODE" = play ]; then
 fi
 if [ -n "${VIDEO_LOCK:-}" ]; then
     dbg "video lock: held"
+    # A killed session's loopback plays on whatever this session's AUDIO
+    # (take_audio_lock stops it only for AUDIO=loopback). Under the audio
+    # lock, briefly: free, nobody live owns that loopback; held, it is a live
+    # tuning session's (the tuning pair), left alone.
+    if [ "$AUDIO" != loopback ]; then
+        ( flock -n 9 && kill_orphan audio.pid "$ORPHAN_LOOPBACK_RE" "audio loopback" ) 9>"$RUN_DIR/audio.lock"
+    fi
     kill_orphan video.pid '^(mpv .*--title=protoHDMIcapture|ffplay .*-window_title protoHDMIcapture|gst-launch-1\.0 .*v4l2src device=)' player
     # A refresh switch a killed session never undid (only a video lock
     # holder switches, so with the lock held it is not a live session's).
