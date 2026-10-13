@@ -31,6 +31,14 @@ HERE=$(dirname "$(readlink -f "$0")")
 # Precedence: environment, then the config file (see config.example), then the
 # defaults below.
 load_config
+
+# Player knobs you set yourself (environment or config file), as opposed to
+# defaults. Only these earn a warning when the backend cannot honour them, so
+# BACKEND=gst does not nag about the default SCALING.
+REQUESTED=" "
+for _knob in FMT FULLSCREEN SCALING LEVELS IPC GST_IO_MODE; do
+    [ -n "${!_knob:-}" ] && REQUESTED+="$_knob "
+done
 DEV="${DEV:-}"                  # /dev/videoN  (empty = find the card)
 SRC="${SRC:-}"                  # PipeWire source of the card's audio (auto)
 CARD_SERIAL="${CARD_SERIAL:-}"  # USB serial of the card; pins it among other cameras
@@ -101,6 +109,24 @@ take_audio_lock() {
     flock -n "$AUDIO_LOCK" \
         || die "another session is already playing the card's audio; stop it, or start this one with AUDIO=none"
 }
+
+# --- backend capabilities --------------------------------------------------
+# Which player knobs each backend honours. The env-var interface is shared,
+# but gst and ffplay have no equivalent for some of mpv's settings; say so
+# instead of silently ignoring them.
+declare -A BACKEND_KNOBS=(
+    [mpv]="FMT FULLSCREEN SCALING LEVELS IPC"
+    [gst]="FMT FULLSCREEN GST_IO_MODE"
+    [ffplay]="FMT FULLSCREEN"
+)
+[ -n "${BACKEND_KNOBS[$BACKEND]+x}" ] || die "unknown BACKEND=$BACKEND (mpv | gst | ffplay)"
+for _knob in $REQUESTED; do
+    [[ " ${BACKEND_KNOBS[$BACKEND]} " == *" $_knob "* ]] \
+        || warn "BACKEND=$BACKEND ignores $_knob=${!_knob} (it honours: ${BACKEND_KNOBS[$BACKEND]})"
+done
+# Not a knob but a mode: the other backends would play no audio at all.
+[ "$AUDIO" != "mpv" ] || [ "$BACKEND" = "mpv" ] \
+    || die "AUDIO=mpv needs BACKEND=mpv; use AUDIO=loopback with $BACKEND"
 
 [ "${1:-}" = "--tune" ] || take_video_lock
 
@@ -316,14 +342,21 @@ gst)
     # sync=false on the sink is the key knob: render on arrival, do not wait
     # for a presentation timestamp. queue leaky=downstream drops rather than
     # accumulates if the sink ever falls behind, so latency cannot creep.
-    if [ "$FMT" = "mjpeg" ]; then
-        CAPS="image/jpeg,width=${W},height=${H},framerate=${FPS}/1"
-        DECODE="jpegdec ! "
-    else
-        CAPS="video/x-raw,width=${W},height=${H},framerate=${FPS}/1"
-        DECODE=""
-    fi
-    PIPE="v4l2src device=${DEV} io-mode=${GST_IO_MODE} do-timestamp=true ! ${CAPS} ! ${DECODE}queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! videoconvert ! waylandsink sync=false async=false qos=false enable-last-sample=false"
+    # waylandsink is Wayland-only, and it cannot set a window title: on
+    # Hyprland the window shows up as class gst-launch-1.0 with no title.
+    [ -n "${WAYLAND_DISPLAY:-}" ] || die "BACKEND=gst renders with waylandsink and needs a Wayland session"
+    DECODE=""
+    case "$FMT" in
+        mjpeg)       CAPS="image/jpeg"; DECODE="jpegdec ! " ;;
+        yuyv422)     CAPS="video/x-raw,format=YUY2" ;;
+        nv12)        CAPS="video/x-raw,format=NV12" ;;
+        rawvideo|"") CAPS="video/x-raw" ;;
+        *)           die "BACKEND=gst has no caps for FMT=$FMT (yuyv422 | mjpeg | nv12 | rawvideo | \"\")" ;;
+    esac
+    CAPS="${CAPS},width=${W},height=${H},framerate=${FPS}/1"
+    SINK_OPTS="sync=false async=false qos=false enable-last-sample=false"
+    [ "$FULLSCREEN" = "yes" ] && SINK_OPTS="$SINK_OPTS fullscreen=true"
+    PIPE="v4l2src device=${DEV} io-mode=${GST_IO_MODE} do-timestamp=true ! ${CAPS} ! ${DECODE}queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! videoconvert ! waylandsink ${SINK_OPTS}"
     info "gst-launch-1.0 $PIPE"
     gst-launch-1.0 -e $PIPE &
     run_player $!
@@ -347,7 +380,4 @@ ffplay)
     run_player $!
     ;;
 
-*)
-    die "unknown BACKEND=$BACKEND (mpv | gst | ffplay)"
-    ;;
 esac
