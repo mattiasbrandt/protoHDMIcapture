@@ -298,13 +298,14 @@ stop_audio() {
 # explicitly rather than relied on.
 PLAYER_PID=""
 rm -f "$RUN_DIR/player.quit"
-# Waits for a player that has begun to quit, but not forever. mpv's teardown
+# A player that has begun to quit gets 2 s, then SIGKILL. mpv's teardown
 # frees the demuxer, whose thread sits in libavdevice's VIDIOC_DQBUF until the
 # card sends a frame (it ignores mpv's abort); from a sleeping source that is
-# never, so the quit gets 2 s and then SIGKILL. Waits again after a trapped
-# signal: kill -0 still succeeds on an unreaped child, never on a reaped one.
-reap_player() {
-    local killer rc
+# never. Armed from the USR2 trap itself, not the wait loop: a signal landing
+# between a flag check and `wait` would leave that wait unbounded.
+REAPER_PID=""
+arm_reaper() {
+    [ -n "$PLAYER_PID" ] && [ -z "$REAPER_PID" ] || return 0
     (
         exec {VIDEO_LOCK}>&-
         [ -z "$AUDIO_LOCK" ] || exec {AUDIO_LOCK}>&-
@@ -313,13 +314,22 @@ reap_player() {
         kill -KILL "$PLAYER_PID" 2>/dev/null \
             && warn "the player did not finish quitting within 2 s (no frames from the capture card?); killed it"
     ) &
-    killer=$!
-    # 2>/dev/null: bash's "Killed" job notice; the warning above says it.
+    REAPER_PID=$!
+}
+# Waits for the player to exit, again after each trapped signal (USR1, USR2)
+# interrupts the wait: kill -0 still succeeds on an unreaped child, never on
+# a reaped one. Never decided by $?: a player killed by a signal also
+# returns >128. Serves audio sync requests between waits when asked to.
+# 2>/dev/null: bash's job notices ("Killed"); run_player reports deaths.
+wait_player() {
+    local serve_sync=${1:-} rc
     while :; do
+        [ -z "$serve_sync" ] || while [ -n "$SYNC_REQUESTED" ]; do SYNC_REQUESTED=""; apply_sync_request; done
         wait "$PLAYER_PID" 2>/dev/null; rc=$?
         kill -0 "$PLAYER_PID" 2>/dev/null || break
     done
-    kill "$killer" 2>/dev/null
+    [ -z "$REAPER_PID" ] || kill "$REAPER_PID" 2>/dev/null
+    REAPER_PID=""
     return "$rc"
 }
 run_player() {
@@ -357,30 +367,22 @@ run_player() {
         DEBUG_JOB=$!
     fi
     dbg "player: $BACKEND pid $PLAYER_PID, window $WINDOW$([ "$WINDOW" = windowed ] && echo " ($WINDOW_SIZE)")"
-    # USR1 (an audio sync change from the overlay) and USR2 (mpv began to
-    # quit) interrupt the wait: serve them and wait again. Decided by the
-    # flags and the player still being ours to wait for, never by $?: a
-    # player killed by a signal also returns >128. Drained before each wait:
-    # a request that lands during a restart (half a second of link checking)
-    # is served right after it, not left waiting.
+    # Sync requests are drained before each wait: one that lands during a
+    # restart (half a second of link checking) is served right after it.
     local rc
-    while :; do
-        while [ -n "$SYNC_REQUESTED" ]; do SYNC_REQUESTED=""; apply_sync_request; done
-        if [ -n "$QUIT_STARTED" ]; then reap_player; rc=$?; break; fi
-        wait "$PLAYER_PID"; rc=$?
-        { [ -n "$SYNC_REQUESTED" ] || [ -n "$QUIT_STARTED" ]; } && kill -0 "$PLAYER_PID" 2>/dev/null && continue
-        break
-    done
+    wait_player serve-sync; rc=$?
     # mpv sometimes segfaults in libavdevice's v4l2 teardown after a normal
     # quit (upstream; "Some buffers are still owned by the caller on close").
     # The mpv script marked the quit before it, so this was a clean quit:
     # do not report it as a failure. A crash mid-feed has no mark and still is.
-    # SIGKILL after the mark is reap_player's, which has said so.
+    # SIGKILL after the mark is arm_reaper's, which has said so.
     if [ "$rc" = 137 ] && [ -e "$RUN_DIR/player.quit" ]; then
         rc=0
     elif [ "$rc" -gt 128 ] && [ -e "$RUN_DIR/player.quit" ]; then
         info "mpv crashed (signal $((rc - 128))) during its own shutdown after a normal quit; a known upstream teardown bug, ignored"
         rc=0
+    elif [ "$rc" -gt 128 ]; then
+        warn "the player died of signal $((rc - 128))"
     fi
     dbg "player exited with status $rc"
     return "$rc"
@@ -388,7 +390,8 @@ run_player() {
 stop_player() {
     if [ -n "$PLAYER_PID" ] && kill -0 "$PLAYER_PID" 2>/dev/null; then
         kill "$PLAYER_PID" 2>/dev/null
-        reap_player
+        arm_reaper
+        wait_player
     fi
     PLAYER_PID=""
 }
@@ -418,9 +421,8 @@ apply_sync_request() {
 }
 trap 'SYNC_REQUESTED=1' USR1
 # mpv began to quit: the mpv script sends USR2 as it unloads the feed, and
-# run_player stops waiting unboundedly (see reap_player).
-QUIT_STARTED=""
-trap 'QUIT_STARTED=1' USR2
+# the quit gets a bound (see arm_reaper).
+trap arm_reaper USR2
 
 DEBUG_JOB=""
 trap 'stop_player; stop_audio; desktop_refresh_restore; [ -z "$DEBUG_JOB" ] || kill "$DEBUG_JOB" 2>/dev/null' EXIT
