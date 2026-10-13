@@ -161,9 +161,12 @@ hyprland)
         [ -n "$_DESKTOP_RESTORE" ] || return 0
         local restore="$_DESKTOP_RESTORE"
         _DESKTOP_RESTORE=""
-        rm -f "$_DESKTOP_RECORD"
-        hyprctl eval "$restore" >/dev/null 2>&1 && return 0
-        DESKTOP_MSG="could not restore the display's refresh rate; run: hyprctl eval '$restore'"
+        # A failed restore keeps the record: the next run retries it.
+        if hyprctl eval "$restore" >/dev/null 2>&1; then
+            rm -f "$_DESKTOP_RECORD"
+            return 0
+        fi
+        DESKTOP_MSG="could not restore the display's refresh rate (the next run retries); now: hyprctl eval '$restore'"
         return 1
     }
 
