@@ -62,6 +62,12 @@ The fixed delay added to the source's sound so it lines up with the feed.
 Tuned once per capture card and display, then kept.
 _Avoid_: latency, offset, A/V delay
 
+**Setting**:
+A named value that shapes a run, such as the levels, the audio sync or the
+capture card pin; taken from the environment, else the saved settings, else
+its default.
+_Avoid_: knob, key, option
+
 **Saved settings**:
 The settings a run starts with, kept in the user's config file. Changed by
 the wizard, by hand, or by an explicit save from the overlay.
