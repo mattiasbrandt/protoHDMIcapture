@@ -89,12 +89,6 @@ for _arg in "$@"; do
         *) echo "view.sh: unknown option $_arg (try --help)" >&2; exit 2 ;;
     esac
 done
-# --tune is the feed with the overlay open: audio sync is ctrl -/+ there.
-# The wizard's sync stage still runs the terminal tuner (TUNE_EMBEDDED).
-OPEN_OVERLAY=""
-if [ "$MODE" = tune ] && [ -z "${TUNE_EMBEDDED:-}" ]; then
-    MODE=play; OPEN_OVERLAY=panel
-fi
 
 # --- first run -------------------------------------------------------------
 # No config file yet, and someone at a terminal: offer the wizard. Declining
@@ -206,6 +200,21 @@ warn() { printf '\033[33m** %s\033[0m\n' "$*" >&2; }
 # however it dies, so there is nothing stale to clean up.
 RUN_DIR="${XDG_RUNTIME_DIR:-/tmp}/protohdmicapture"
 mkdir -p "$RUN_DIR" || die "cannot create $RUN_DIR"
+
+# --tune is the feed with the overlay open: audio sync is ctrl -/+ there.
+# Beside a running feed with no loopback of its own (AUDIO=none ./view.sh,
+# the old tuning pair) there is no window to tune in, so it is the terminal
+# tuner instead, as the wizard's sync stage uses (TUNE_EMBEDDED).
+_lock_free() { ( flock -n 9 ) 9>"$RUN_DIR/$1.lock"; }
+OPEN_OVERLAY=""
+if [ "$MODE" = tune ] && [ -z "${TUNE_EMBEDDED:-}" ]; then
+    [ "$AUDIO" = loopback ] || die "--tune needs AUDIO=loopback"
+    if ! _lock_free video && _lock_free audio; then
+        info "a feed without its own audio is running: tuning here in the terminal"
+    else
+        MODE=play; OPEN_OVERLAY=panel
+    fi
+fi
 
 take_video_lock() {
     exec {VIDEO_LOCK}>"$RUN_DIR/video.lock"
