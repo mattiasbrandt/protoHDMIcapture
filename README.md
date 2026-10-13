@@ -22,9 +22,29 @@ AUDIO=none ./view.sh          # terminal 1 } re-tune audio sync later,
 ./view.sh --tune              # terminal 2 } then keep the DELAY it prints
 ```
 
-In the video window: **f** cycles fullscreen → borderless → windowed, **d**
-opens the live dashboard, **i** / **I** show mpv's own frame-timing overlay,
-**q** quits.
+In the video window: **Tab** opens the overlay, **f** cycles fullscreen →
+borderless → windowed, **d** opens the live dashboard, **1**–**8** adjust
+colour and **s** takes a screenshot (mpv's own keys), **i** / **I** show
+mpv's frame-timing stats, **q** quits.
+
+### The overlay
+
+**Tab** opens a panel over the picture with the keys and the live settings,
+each with its current value:
+
+| key | while the overlay is open |
+|---|---|
+| **l** | levels: auto → limited → full (the range of the card's frames) |
+| **c** | scaling: balanced → fast → config |
+| **1**–**8** | colour: contrast, brightness, gamma, saturation (mpv's keys, also with the overlay closed) |
+| **r** | reset colour |
+| **t** | the setup tips for the source (`SOURCE`); **←** / **→** browse the other sources |
+| **w** | save what changed since the feed started to the config file |
+| **Esc**, **Tab** | close |
+
+Changes are live: they last until the feed closes, unless **w** saves them,
+through the same writer the wizard uses. The overlay is mpv's; `BACKEND=gst`
+and `ffplay` have none.
 
 Settings are environment variables, or `KEY=value` lines in
 `~/.config/protohdmicapture/config` (the wizard writes it; see
@@ -403,7 +423,9 @@ tidy-up sometime, no functional effect.
 | `WINDOW_SIZE` | `1280x720` | window size for `WINDOW=windowed` |
 | `DEBUG` | `off` | `log` \| `window`; see "Debug mode". `--debug` = `window` for one run |
 | `FULLSCREEN` | — | deprecated: `yes` = `WINDOW=fullscreen`, `no` = `WINDOW=windowed` |
-| `SCALING` | `balanced` | `balanced` = spline36/mitchell, no deband, no dither. `fast` = `--profile=fast`, bilinear throughout, lowest GPU time and visibly softer. `config` = leave mpv.conf's high-quality settings alone |
+| `SCALING` | `balanced` | `balanced` = spline36/mitchell, no deband, no dither. `fast` = the properties of mpv's `fast` profile, bilinear throughout, lowest GPU time and visibly softer. `config` = leave mpv.conf's high-quality settings alone. Applied by the mpv script, so **c** in the overlay cycles all three live |
+| `BRIGHTNESS`, `CONTRAST`, `SATURATION`, `GAMMA` | `0` | mpv's colour adjustments, -100..100; keys **1**–**8** change them live and the overlay's **w** saves them |
+| `SOURCE` | — | what is plugged in: a profile name from `sources/` (`ps5`); its setup tips show in the overlay. The wizard writes it |
 | `LEVELS` | `auto` | the colour range of the card's frames: `limited` or `full` if blacks look crushed or washed (mpv `--vf=format:colorlevels=`; the display's own range is untouched). `auto` trusts the frames: YUYV is read as limited, while MJPEG frames (MS2109) arrive flagged full. The MS2130 reports `Quantization: Default (maps to Limited Range)` and the PS5 outputs limited, so `auto` is right there |
 | `IPC` | `/tmp/mpv-protohdmicapture.sock` | mpv IPC socket, so you can drive it from a keybind or script |
 | `REFRESH` | `keep` | `match` switches the focused monitor to its mode nearest `FPS` for the session and restores it on exit (Hyprland only). No output hardcoded; resolution, position, scale and transform all preserved |
@@ -419,8 +441,9 @@ other setting here:
   blanking would otherwise fire mid-game
 - `--term-status-msg=` — silences the per-frame `V: hh:mm:ss` status line,
   which means nothing for a live feed and used to fill the run log
-- `--script=lib/mpv/protohdmicapture.lua` — the **f** and **d** keys, bound
-  for this window only, so your `input.conf` is untouched
+- `--script=lib/mpv/protohdmicapture.lua` — the overlay and the **Tab**,
+  **f** and **d** keys, bound for this window only, so your `input.conf` is
+  untouched
 
 Driving it over IPC, e.g.:
 
@@ -746,7 +769,7 @@ v4l2-ctl -d /dev/video2 --get-fmt-video
 - `lib/ui.sh` — the wizard's and dashboard's centered terminal UI
 - `lib/debug.sh` — `DEBUG=log`: decision lines, perf pulse, player verbosity
 - `lib/dashboard.sh` — the live debug dashboard (`./view.sh --dashboard`)
-- `lib/mpv/protohdmicapture.lua` — the **f** / **d** keys in the mpv window
+- `lib/mpv/protohdmicapture.lua` — the overlay and the keys in the mpv window
 - `view.sh` — the player; every knob is an env var or config line, plus
   `--tune` for interactive A/V sync. Owns the one-window/one-loopback rule
 - `launch.sh` — GUI entry point used by the desktop launcher; see below

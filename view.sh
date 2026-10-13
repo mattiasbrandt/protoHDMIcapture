@@ -52,6 +52,18 @@ case "${1:-}" in
 --open-dashboard)
     desktop_open_terminal protohdmicapture.debug "protoHDMIcapture debug" "$HERE/view.sh" --dashboard
     exit ;;
+--save)
+    # The overlay's "save as defaults": the same writer the wizard uses, and
+    # only the settings the overlay changes live.
+    shift
+    [ "$#" -gt 0 ] || { echo "--save KEY=VALUE..." >&2; exit 2; }
+    for _kv in "$@"; do
+        [[ " WINDOW LEVELS SCALING BRIGHTNESS CONTRAST SATURATION GAMMA DELAY " == *" ${_kv%%=*} "* ]] \
+            || { echo "--save: ${_kv%%=*} is not a setting the overlay saves" >&2; exit 2; }
+    done
+    config_write "$@" || { echo "$CONFIG_ERROR" >&2; exit 1; }
+    echo "saved to $CONFIG_FILE: $*"
+    exit 0 ;;
 esac
 MODE=play
 DEBUG_FLAG=""
@@ -111,7 +123,7 @@ if [ -n "${FULLSCREEN:-}" ]; then
     fi
 fi
 REQUESTED=" "
-for _knob in FMT WINDOW WINDOW_SIZE SCALING LEVELS IPC GST_IO_MODE; do
+for _knob in FMT WINDOW WINDOW_SIZE SCALING LEVELS BRIGHTNESS CONTRAST SATURATION GAMMA IPC GST_IO_MODE; do
     [ -n "${!_knob:-}" ] && REQUESTED+="$_knob "
 done
 DEV="${DEV:-}"                  # /dev/videoN  (empty = find the card)
@@ -137,8 +149,11 @@ AUDIO="${AUDIO:-loopback}"      # loopback | mpv | none
 # gets direct scanout and tearing, so it is the lowest-latency mode.
 WINDOW="${WINDOW:-fullscreen}"  # fullscreen | borderless | windowed
 WINDOW_SIZE="${WINDOW_SIZE:-1280x720}"  # WxH, for WINDOW=windowed
-SCALING="${SCALING:-balanced}"  # balanced | fast | config  (see the mpv block below)
+SCALING="${SCALING:-balanced}"  # balanced | fast | config  (applied by the mpv script; see the mpv block below)
 LEVELS="${LEVELS:-auto}"        # auto | limited | full: the range the card sends (fix for crushed/washed blacks)
+# Colour, -100..100, 0 = untouched; mpv's own properties (keys 1-8 live).
+BRIGHTNESS="${BRIGHTNESS:-0}"; CONTRAST="${CONTRAST:-0}"; SATURATION="${SATURATION:-0}"; GAMMA="${GAMMA:-0}"
+SOURCE="${SOURCE:-}"            # sources/<SOURCE>.md for the overlay's setup tips (empty = any HDMI source)
 IPC="${IPC-/tmp/mpv-protohdmicapture.sock}"  # mpv IPC socket; empty to disable
 # keep  = leave the display alone (default)
 # match = for the session only, switch the monitor the window opens on to its
@@ -202,7 +217,7 @@ take_audio_lock() {
 # but gst and ffplay have no equivalent for some of mpv's settings; say so
 # instead of silently ignoring them.
 declare -A BACKEND_KNOBS=(
-    [mpv]="FMT WINDOW WINDOW_SIZE SCALING LEVELS IPC"
+    [mpv]="FMT WINDOW WINDOW_SIZE SCALING LEVELS BRIGHTNESS CONTRAST SATURATION GAMMA IPC"
     [gst]="FMT WINDOW GST_IO_MODE"
     [ffplay]="FMT WINDOW WINDOW_SIZE"
 )
@@ -247,7 +262,7 @@ if [ "$DEBUG" != off ] && [ "$MODE" = play ]; then
     debug_tee "$RUN_DIR/debug.log"
     dbg "protoHDMIcapture $(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo '?') · desktop $DESKTOP · log $RUN_DIR/debug.log"
     debug_knob_sources CARD_SERIAL CARD_PORT DEV SRC SINK RES FPS FMT DELAY LAT_MS BACKEND AUDIO \
-        WINDOW WINDOW_SIZE SCALING LEVELS IPC REFRESH GST_IO_MODE
+        WINDOW WINDOW_SIZE SCALING LEVELS BRIGHTNESS CONTRAST SATURATION GAMMA SOURCE IPC REFRESH GST_IO_MODE
 fi
 
 [ "$MODE" = tune ] || take_video_lock
@@ -444,6 +459,16 @@ mpv)
     [ -n "$FMT" ] && LAVF_O="${LAVF_O},input_format=${FMT}"
     [ "$AUDIO" = "mpv" ] && LAVF_O="timestamps=abs,${LAVF_O}"
 
+    case "$LEVELS" in auto|limited|full) ;; *) die "unknown LEVELS=$LEVELS (auto | limited | full)" ;; esac
+    for _c in BRIGHTNESS CONTRAST SATURATION GAMMA; do
+        [[ "${!_c}" =~ ^-?[0-9]+$ ]] && (( ${!_c} >= -100 && ${!_c} <= 100 )) \
+            || die "$_c=${!_c} is not a whole number from -100 to 100"
+    done
+    if [ -n "$SOURCE" ] && [ ! -r "$HERE/sources/$SOURCE.md" ]; then
+        warn "SOURCE=$SOURCE has no profile in sources/; the overlay shows the tips for any HDMI source"
+        SOURCE=""
+    fi
+
     # ~/.config/mpv/mpv.conf is tuned for films and actively fights this
     # workload, so the settings that matter are overridden explicitly on the
     # command line (CLI beats config). Each override below names what it undoes.
@@ -480,7 +505,7 @@ mpv)
         --input-terminal=no
         # f cycles the display mode, d opens the debug dashboard
         --script="$HERE/lib/mpv/protohdmicapture.lua"
-        --script-opts="protohdmicapture-helper=$HERE/view.sh,protohdmicapture-mode=$WINDOW,protohdmicapture-quitfile=$RUN_DIR/player.quit"
+        --script-opts="protohdmicapture-helper=$HERE/view.sh,protohdmicapture-mode=$WINDOW,protohdmicapture-quitfile=$RUN_DIR/player.quit,protohdmicapture-scaling=$SCALING,protohdmicapture-levels=$LEVELS,protohdmicapture-sources=$HERE/sources,protohdmicapture-source=$SOURCE"
         # a live feed generates no input events, so idle-blanking would otherwise
         # kick in mid-game
         --stop-screensaver=always
@@ -489,7 +514,11 @@ mpv)
     # The range of the card's frames, not of the display: --video-output-levels
     # would send studio-range RGB to a PC monitor. The format filter only
     # relabels the frames, no copy.
-    [ "$LEVELS" != "auto" ] && args+=(--vf-append="format:colorlevels=$LEVELS")
+    # Labelled, so the overlay's l key can replace it live.
+    [ "$LEVELS" != "auto" ] && args+=(--vf-append="@phc-levels:format:colorlevels=$LEVELS")
+    for _c in BRIGHTNESS CONTRAST SATURATION GAMMA; do
+        [ "${!_c}" != 0 ] && args+=(--"${_c,,}=${!_c}")
+    done
     case "$WINDOW" in
         fullscreen) args+=(--fs) ;;
         borderless) args+=(--border=no --title-bar=no --window-maximized=yes) ;;
@@ -498,14 +527,15 @@ mpv)
 
     # Scaling. mpv.conf sets profile=high-quality (ewa_lanczossharp + debanding
     # + antiringing); --profile=low-latency does NOT undo that, so it survives
-    # into this pipeline and costs real GPU frame time on every frame.
+    # into this pipeline and costs real GPU frame time on every frame. The mpv
+    # script applies the choice (so the overlay can cycle it live):
+    #   balanced  spline36/mitchell, no deband, no dither: good upscale, a
+    #             fraction of high-quality's cost
+    #   fast      the properties of mpv's fast profile: bilinear, lowest GPU
+    #             time, visibly softer
+    #   config    leave mpv.conf's settings alone
     case "$SCALING" in
-    balanced) # good upscale, a fraction of high-quality's cost
-        args+=(--scale=spline36 --cscale=spline36 --dscale=mitchell --deband=no --dither=no) ;;
-    fast)     # bilinear everything; lowest GPU time, visibly softer
-        args+=(--profile=fast) ;;
-    config)   # leave mpv.conf's high-quality settings alone
-        ;;
+    balanced|fast|config) ;;
     *) die "unknown SCALING=$SCALING (balanced | fast | config)" ;;
     esac
 

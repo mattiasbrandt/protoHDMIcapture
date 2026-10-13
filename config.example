@@ -30,5 +30,12 @@
 # Troubleshooting: off | log | window (log plus a live dashboard)
 #DEBUG=off
 
+# Colour, -100..100 (0 = untouched); keys 1-8 change them live and w in the
+# overlay (Tab) saves them here.
+#BRIGHTNESS=0
+#CONTRAST=0
+#SATURATION=0
+#GAMMA=0
+
 # Any other view.sh knob works here too: DEV SRC SINK RES FPS FMT LAT_MS
 # BACKEND AUDIO SCALING LEVELS IPC REFRESH GST_IO_MODE
