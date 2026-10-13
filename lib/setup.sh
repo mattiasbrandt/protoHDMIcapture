@@ -108,14 +108,18 @@ apply_to() {
 # A feed started from the wizard sees exactly what the saved config will say:
 # a preview copy of the file with NEW applied, and none of the managed keys in
 # its environment. PROTOHDMI_SETUP_CHILD keeps it from offering setup itself.
+# run_child [--exec] CMD...: --exec replaces the calling (sub)shell with CMD,
+# so a backgrounded child's $! is the child itself and can be stopped by PID.
 run_child() {
+    local ex=""
+    [ "${1:-}" = --exec ] && { ex="exec"; shift; }
     rm -f "$PREVIEW"
     [ -r "$CONFIG_FILE" ] && cp "$CONFIG_FILE" "$PREVIEW"
     apply_to "$PREVIEW" || { ui_bad "could not write a preview config: $CONFIG_ERROR"; return 1; }
     local -a envargs=()
     local k
     for k in "${MANAGED[@]}"; do envargs+=(-u "$k"); done
-    env "${envargs[@]}" CONFIG_FILE="$PREVIEW" PROTOHDMI_SETUP_CHILD=1 "$@"
+    $ex env "${envargs[@]}" CONFIG_FILE="$PREVIEW" PROTOHDMI_SETUP_CHILD=1 "$@"
 }
 
 # --- stage list --------------------------------------------------------------
@@ -336,39 +340,50 @@ stage_signal() {
     say "Capturing 2 seconds at ${BOLD}${NEW[RES]} @ ${NEW[FPS]} fps (${NEW[FMT]})${RESET} to see"
     say "whether frames really arrive at that rate."
     center ""
-    local out frames secs t0 t1 rc
+    local out frames secs t0 t1 rc failed=""
+    # Busy, unplugged or refused mode: report it, never measure past it.
     out=$(v4l2-ctl -d "$CARD_DEV" ${fourcc:+--set-fmt-video=width=$w,height=$h,pixelformat=$fourcc} \
                    --set-parm="${NEW[FPS]}" 2>&1)
-    if grep -qi 'busy' <<<"$out"; then
-        ui_bad "The card is busy: a feed is probably running. Close it first."
-        center ""
-        if confirm_yes "Try again?"; then _STAGE_INDEX=$((_STAGE_INDEX - 1)); stage_signal; fi
-        return
-    fi
-    frames=$(( NEW[FPS] * 2 ))
-    t0=$(date +%s.%N)
-    timeout 6 v4l2-ctl -d "$CARD_DEV" --stream-mmap --stream-count="$frames" --stream-to=/dev/null >/dev/null 2>&1
     rc=$?
-    t1=$(date +%s.%N)
-    secs=$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.2f", b - a }')
-    local got
-    got=$(v4l2-ctl -d "$CARD_DEV" --get-fmt-video 2>/dev/null | sed -n 's/.*Width\/Height *: *//p')
-    if [ "$rc" = 124 ]; then
-        SIGNAL_RESULT="no frames in 6 s"
-        ui_bad "No frames in 6 seconds: no signal, or HDCP is on at the source."
-        note "Check the source is on and outputting, and HDCP is off, then try again."
+    if grep -qi 'busy' <<<"$out"; then
+        failed="the card is busy: a feed is probably running. Close it first."
+    elif [ "$rc" != 0 ]; then
+        failed="could not set the mode (v4l2-ctl exit $rc): $(tail -1 <<<"$out")"
     else
-        MEASURED_FPS=$(awk -v f="$frames" -v s="$secs" 'BEGIN { printf "%.1f", f / s }')
-        SIGNAL_RESULT="$MEASURED_FPS fps measured"
-        if awk -v m="$MEASURED_FPS" -v t="${NEW[FPS]}" 'BEGIN { exit !(m >= t * 0.8) }'; then
-            ui_ok "$MEASURED_FPS fps measured (${got:-?})"
-        else
-            ui_warn "Only $MEASURED_FPS fps of ${NEW[FPS]} (${got:-?}). The first frames include start-up;"
-            note "a much lower number means the mode is not what the card really delivers."
+        frames=$(( NEW[FPS] * 2 ))
+        t0=$(date +%s.%N)
+        out=$(timeout 6 v4l2-ctl -d "$CARD_DEV" --stream-mmap --stream-count="$frames" --stream-to=/dev/null 2>&1 >/dev/null)
+        rc=$?
+        t1=$(date +%s.%N)
+        if [ "$rc" = 124 ]; then
+            failed="no frames in 6 seconds: no signal, or HDCP is on at the source."
+        elif [ "$rc" != 0 ]; then
+            failed="capture failed (v4l2-ctl exit $rc): $(tail -1 <<<"${out:-no error text}")"
         fi
     fi
+    if [ -n "$failed" ]; then
+        SIGNAL_RESULT="failed: $failed"
+        MEASURED_FPS=""
+        ui_bad "${failed^}"
+        note "Check the source is on and outputting, HDCP is off, and the card is plugged in."
+        center ""
+        if confirm_yes "Try again?"; then _STAGE_INDEX=$((_STAGE_INDEX - 1)); stage_signal; return; fi
+        pause
+        return
+    fi
+    # Only a clean capture of all the frames gets measured.
+    secs=$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.3f", b - a }')
+    local got
+    got=$(v4l2-ctl -d "$CARD_DEV" --get-fmt-video 2>/dev/null | sed -n 's/.*Width\/Height *: *//p')
+    MEASURED_FPS=$(awk -v f="$frames" -v s="$secs" 'BEGIN { printf "%.1f", f / s }')
+    SIGNAL_RESULT="$MEASURED_FPS fps measured"
+    if awk -v m="$MEASURED_FPS" -v t="${NEW[FPS]}" 'BEGIN { exit !(m >= t * 0.8 && m <= t * 1.2) }'; then
+        ui_ok "$MEASURED_FPS fps measured (${got:-?})"
+    else
+        ui_warn "$MEASURED_FPS fps measured for ${NEW[FPS]} requested (${got:-?})."
+        note "Start-up costs a little; a number far off means the mode is not what the card delivers."
+    fi
     center ""
-    if [ "$rc" = 124 ] && confirm_yes "Try again?"; then _STAGE_INDEX=$((_STAGE_INDEX - 1)); stage_signal; return; fi
     pause
 }
 
@@ -473,12 +488,13 @@ stage_backend() {
 # A background feed without audio, plus the --tune loop in this terminal.
 # Background jobs of a script ignore Ctrl-C, so the feed is always stopped
 # explicitly: here, and from the EXIT trap if the wizard is interrupted.
+# SYNC_SHELL is the wizard's own preview view.sh (started with --exec), never
+# a pid read from the shared run directory: by the time of cleanup that file
+# may name another session's player. TERM lets view.sh stop its own player,
+# loopback and refresh switch through its EXIT trap.
 sync_stop() {
     [ -n "$SYNC_SHELL" ] || return 0
-    local p
-    p=$(cat "$RUN_DIR/video.pid" 2>/dev/null)
-    [ -n "$p" ] && kill "$p" 2>/dev/null          # the player; view.sh then cleans up
-    kill "$SYNC_SHELL" 2>/dev/null
+    kill -TERM "$SYNC_SHELL" 2>/dev/null
     wait "$SYNC_SHELL" 2>/dev/null
     SYNC_SHELL=""
     rm -f "$RUN_DIR/tune.out"
@@ -501,18 +517,20 @@ stage_sync() {
         ui_warn "A feed is running. Close it first."
         confirm_yes "Check again?" || return
     done
-    local before t0
+    local before
     before=$(desktop_active_window)
-    t0=$(date +%s)
     rm -f "$RUN_DIR/tune.out"
-    run_child env AUDIO=none WINDOW=windowed WINDOW_SIZE=1280x720 REFRESH=keep \
+    run_child --exec env AUDIO=none WINDOW=windowed WINDOW_SIZE=1280x720 REFRESH=keep \
         "$HERE/view.sh" </dev/null >"$RUN_DIR/setup-video.log" 2>&1 &
     SYNC_SHELL=$!
-    # Ready when a player newer than this stage has written its pid.
-    local i ok=""
+    # Ready when the player named in video.pid is our own preview's child: a
+    # feed someone else started in the meantime does not count.
+    local i ok="" vp
     for i in $(seq 50); do
-        if [ -s "$RUN_DIR/video.pid" ] && [ "$(stat -c %Y "$RUN_DIR/video.pid")" -ge "$t0" ] \
-           && kill -0 "$(cat "$RUN_DIR/video.pid")" 2>/dev/null; then ok=1; break; fi
+        vp=$(cat "$RUN_DIR/video.pid" 2>/dev/null)
+        if [ -n "$vp" ] && [ "$(ps -o ppid= -p "$vp" 2>/dev/null | tr -d ' ')" = "$SYNC_SHELL" ]; then
+            ok=1; break
+        fi
         kill -0 "$SYNC_SHELL" 2>/dev/null || break
         sleep 0.1
     done
