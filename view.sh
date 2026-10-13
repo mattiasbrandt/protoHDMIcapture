@@ -584,7 +584,15 @@ gst)
         rawvideo|"") CAPS="video/x-raw" ;;
         *)           die "BACKEND=gst has no caps for FMT=$FMT (yuyv422 | mjpeg | nv12 | rawvideo | \"\")" ;;
     esac
-    CAPS="${CAPS},width=${W},height=${H},framerate=${FPS}/1"
+    # GStreamer caps take a fraction, and must equal one the card lists: the
+    # NTSC rates are 1000/1001 of a whole rate (59.94 = 60000/1001).
+    case "$FPS" in
+        23.976) _rate=24000/1001 ;; 29.97) _rate=30000/1001 ;;
+        59.94)  _rate=60000/1001 ;; 119.88) _rate=120000/1001 ;;
+        *.*)    _rate="$(awk -v f="$FPS" 'BEGIN { printf "%d", f * 1000 + 0.5 }')/1000" ;;
+        *)      _rate="$FPS/1" ;;
+    esac
+    CAPS="${CAPS},width=${W},height=${H},framerate=${_rate}"
     SINK_OPTS="sync=false async=false qos=false enable-last-sample=false"
     [ "$WINDOW" = fullscreen ] && SINK_OPTS="$SINK_OPTS fullscreen=true"
     PIPE="v4l2src device=${DEV} io-mode=${GST_IO_MODE} do-timestamp=true ! ${CAPS} ! ${DECODE}queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! videoconvert ! waylandsink ${SINK_OPTS}"

@@ -39,7 +39,7 @@ IGNORE_CARDS_RE |                               |text                           
 SRC             |                               |text                               |all            |wizard
 SINK            |                               |text                               |all            |
 RES             |1920x1080                      |size                               |all            |wizard,suggest
-FPS             |60                             |int:1..1000                        |all            |wizard,suggest
+FPS             |60                             |num:1..1000                        |all            |wizard,suggest
 # FMT: empty leaves the device on whatever it was last set to, which is luck,
 # not a setting, so the default is the uncompressed format, not empty.
 FMT             |yuyv422                        |enum:yuyv422,mjpeg,nv12,rawvideo   |all            |wizard,empty
@@ -114,7 +114,13 @@ _settings_check() {
     case "$spec" in
         text) return 0 ;;
         size) [[ "$v" =~ ^[0-9]+x[0-9]+$ ]] && return 0; echo "WIDTHxHEIGHT" ;;
-        enum:*) [[ ",${spec#enum:}," == *",$v,"* ]] && return 0; echo "one of: ${spec#enum:}" | tr ',' ' ' ;;
+        enum:*)
+            # Member by member: a substring test would let "mpv,gst" through.
+            local m
+            local -a members
+            IFS=',' read -ra members <<<"${spec#enum:}"
+            for m in "${members[@]}"; do [ "$v" = "$m" ] && return 0; done
+            echo "one of: ${members[*]}" ;;
         int:*|num:*)
             local lo="${spec#*:}" hi; hi="${lo#*..}"; lo="${lo%..*}"
             local re='^-?[0-9]+$'; [[ "$spec" == num:* ]] && re='^-?[0-9]+(\.[0-9]+)?$'

@@ -1,0 +1,3 @@
+exit 1
+^invalid: BACKEND=mpv,gst .* is not one of: mpv gst ffplay$
+^invalid: WINDOW=fullscreen,borderless .* is not one of: fullscreen borderless windowed$
