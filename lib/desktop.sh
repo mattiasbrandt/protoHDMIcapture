@@ -172,21 +172,26 @@ hyprland)
 
     desktop_refresh_recover() {
         local name set was restore now
-        IFS='|' read -r name set was restore <"$1" || { rm -f "$1"; DESKTOP_MSG="unreadable $1; dropped"; return 1; }
-        rm -f "$1"
+        # The record goes only once settled (restored, or changed by hand
+        # since); a failure keeps it for the next run, and until then no run
+        # switches the rate (view.sh start_refresh), so it keeps the original.
+        IFS='|' read -r name set was restore <"$1" && [ -n "$restore" ] \
+            || { rm -f "$1"; DESKTOP_MSG="unreadable refresh record $1; dropped"; return 1; }
         now=$(hyprctl monitors -j 2>/dev/null | jq -r --arg n "$name" '.[] | select(.name == $n) | .refreshRate' 2>/dev/null)
         if [ -z "$now" ]; then
-            DESKTOP_MSG="a killed session left $name at ${set}Hz, but its rate cannot be read now; to restore: hyprctl eval '$restore'"
+            DESKTOP_MSG="a killed session left $name at ${set}Hz, but its rate cannot be read now; kept for the next run (or: hyprctl eval '$restore'; rm $1)"
             return 1
         fi
         if ! awk -v a="$now" -v b="$set" 'BEGIN { exit !((a - b) ^ 2 < 0.0001) }'; then
+            rm -f "$1"
             DESKTOP_MSG="display: $name is at ${now}Hz, not the ${set}Hz a killed session set; left as it is"
             return 0
         fi
         if ! hyprctl eval "$restore" >/dev/null 2>&1; then
-            DESKTOP_MSG="could not restore $name to ${was}Hz after a killed session; run: hyprctl eval '$restore'"
+            DESKTOP_MSG="could not restore $name to ${was}Hz after a killed session; kept for the next run (or: hyprctl eval '$restore'; rm $1)"
             return 1
         fi
+        rm -f "$1"
         DESKTOP_MSG="display: $name ${set}Hz -> ${was}Hz, restored after a killed session"
     }
     ;;

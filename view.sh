@@ -519,6 +519,12 @@ trap 'exit 143' TERM
 # --- display refresh matching ---------------------------------------------
 start_refresh() {
     [ "$REFRESH" = "match" ] || return 0
+    # An unsettled record from a killed session (recovery failed above): a
+    # switch now would record the switched rate as the original.
+    if [ -e "$RUN_DIR/refresh.restore" ]; then
+        warn "REFRESH=match skipped: a killed session's refresh switch is still unresolved ($RUN_DIR/refresh.restore)"
+        return 0
+    fi
     if desktop_refresh_match "$FPS" "$RUN_DIR/refresh.restore"; then info "$DESKTOP_MSG"; else warn "$DESKTOP_MSG"; fi
     dbg "refresh: $DESKTOP_MSG"
 }
