@@ -11,6 +11,12 @@ The USB device that turns the source's HDMI signal into video and audio the
 PC can read. "Card" alone is fine in code; prose says capture card.
 _Avoid_: dongle, capture device, camera
 
+**Ignored device**:
+A video device on the PC that is not a capture card (a webcam, a laptop
+camera) and that the viewer never opens as one. Marked in the wizard, kept in
+the saved settings.
+_Avoid_: blocklist, blacklist
+
 **Chip**:
 The capture silicon inside a capture card (MS2109, MS2130). Many no-name
 products share one chip, often under borrowed USB ids.
@@ -52,6 +58,12 @@ _Avoid_: recommendations, guide
 The live picture from the capture card, shown in the viewer's window.
 _Avoid_: stream, preview, playback
 
+**No signal**:
+The capture card delivers no picture, either since the feed opened or
+because the source stopped (asleep, switched off). A card that keeps sending
+black frames is still delivering a picture.
+_Avoid_: stall, frozen, signal loss
+
 **Overlay**:
 The in-window control panel, opened on a key, that lists the keys, the live
 settings with their current values, and the setup tips.
@@ -59,7 +71,8 @@ _Avoid_: HUD, OSD, menu
 
 **Audio sync**:
 The fixed delay added to the source's sound so it lines up with the feed.
-Tuned once per capture card and display, then kept.
+One value, tuned once and kept; re-tune it after changing the capture card
+or the display.
 _Avoid_: latency, offset, A/V delay
 
 **Setting**:
