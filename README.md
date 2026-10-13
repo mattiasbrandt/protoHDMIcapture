@@ -453,7 +453,7 @@ shows the lot without starting anything.
 |---|---|---|
 | `CARD_SERIAL` | — | USB serial of the card; pins it among other cameras and across `/dev/video` renumbering. The setup wizard writes it |
 | `CARD_PORT` | — | USB port path (udev `ID_PATH`) of a card that reports no serial; found again after a replug into the same port. The setup wizard writes it. Any of `CARD_SERIAL`, `CARD_PORT`, `DEV` set in the environment overrides all three in the config file, so `CARD_PORT=... ./view.sh` plays a second card for one run |
-| `IGNORE_CARDS_RE` | — | ignored devices: v4l2 card types (extended regex) never opened as the capture card, e.g. `OBSBOT\|Integrated Camera`. Skipped while scanning, and a `DEV` naming one is set aside for the pin. The wizard adds the devices you mark as not the capture card |
+| `IGNORE_CARDS_RE` | — | ignored devices: v4l2 card types (extended regex) never opened as the capture card, e.g. `OBSBOT\|Integrated Camera`. Skipped while scanning, even at the card pin (a camera in the card's pinned port is refused), and a `DEV` naming one is set aside. The wizard adds the devices you mark as not the capture card |
 | `WINDOW` | `fullscreen` | `fullscreen` \| `borderless` \| `windowed`; see "Display modes". Opens on whatever monitor the desktop picks, none is hardcoded. **f** cycles it live |
 | `WINDOW_SIZE` | `1280x720` | window size for `WINDOW=windowed` |
 | `DEBUG` | `off` | `log` \| `window`; see "Debug mode". `--debug` = `window` for one run |
