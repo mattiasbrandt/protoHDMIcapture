@@ -15,7 +15,7 @@ contract; change a writer or a reader, update the row.
 | `audio.state` | `view.sh --audio` (overlay's m, 9, 0); cleared by `take_audio_lock` at a session's start | `start_audio` (`audio_state_apply`) | the session's loopback `VOLUME` and `MUTE`, re-applied to a restarted loopback; written via `audio.state.tmp` and renamed |
 | `backend`, `ipc.path` | `view.sh` `run_player` | dashboard | which player; mpv IPC socket (absent for gst/ffplay) |
 | `window.mode`, `window.size` | `view.sh` `run_player`, `--place-window` | `--place-window` | current `WINDOW` and `WINDOW_SIZE` for the f key |
-| `player.quit` | mpv script `shutdown` event (via `quitfile`) | `view.sh` after the player exits | mpv began a normal quit; a later signal death is its teardown bug |
+| `player.quit` | mpv script `on_unload` hook (via `quitfile`), then USR2 to `view.sh` (checked as for `audio.request`) | `view.sh` after the player exits | mpv began to quit; a later SIGKILL is `view.sh`'s 2 s quit bound (teardown hung without frames), another signal death is the upstream teardown crash |
 | `debug.log` | `view.sh` with `DEBUG≠off` (tee) | dashboard | the session's full output |
 | `mpv.sock` | mpv, when `DEBUG=window` and `IPC=""` | dashboard | private IPC socket for that session |
 | `setup.lock` | `lib/setup.sh` (flock, held while it runs) | `launch.sh` (blocks on it) | one wizard; "wizard ended" however it ended |

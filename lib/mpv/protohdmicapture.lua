@@ -20,9 +20,9 @@
 -- then `view.sh --place-window MODE` lets the desktop adapter finish where
 -- the compositor ignores a client (size, maximize and border on Hyprland).
 --
--- It also marks a normal shutdown in `quitfile`: mpv sometimes segfaults in
--- libavdevice's v4l2 teardown after it has already quit (an upstream bug),
--- and view.sh uses the mark to tell that apart from a crash mid-feed.
+-- It also marks the start of a quit in `quitfile` and tells view.sh (USR2):
+-- mpv's teardown can hang (no frames from the card) or segfault (upstream) in
+-- libavdevice's v4l2 code, and view.sh bounds the one and forgives the other.
 
 local msg = require("mp.msg")
 local utils = require("mp.utils")
@@ -525,8 +525,16 @@ else
     mp.add_timeout(10, hide_hint)
 end
 
-mp.register_event("shutdown", function()
-    if opts.quitfile == "" then return end
-    local f = io.open(opts.quitfile, "w")
-    if f then f:write("quit\n"); f:close() end
+-- on_unload, not shutdown: mpv frees the demuxer between the two, and that
+-- is where its teardown hangs or crashes, so shutdown may never come.
+mp.add_hook("on_unload", 50, function()
+    if opts.quitfile ~= "" then
+        local f = io.open(opts.quitfile, "w")
+        if f then f:write("quit\n"); f:close() end
+    end
+    if opts.owner ~= "" and owner_is_parent() then
+        local r = mp.command_native({ name = "subprocess", args = { "kill", "-USR2", opts.owner },
+                                      playback_only = false, capture_stderr = true })
+        if not r or r.status ~= 0 then msg.error("cannot tell view.sh about the quit: " .. why_failed(r)) end
+    end
 end)

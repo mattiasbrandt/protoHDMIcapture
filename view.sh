@@ -298,6 +298,30 @@ stop_audio() {
 # explicitly rather than relied on.
 PLAYER_PID=""
 rm -f "$RUN_DIR/player.quit"
+# Waits for a player that has begun to quit, but not forever. mpv's teardown
+# frees the demuxer, whose thread sits in libavdevice's VIDIOC_DQBUF until the
+# card sends a frame (it ignores mpv's abort); from a sleeping source that is
+# never, so the quit gets 2 s and then SIGKILL. Waits again after a trapped
+# signal: kill -0 still succeeds on an unreaped child, never on a reaped one.
+reap_player() {
+    local killer rc
+    (
+        exec {VIDEO_LOCK}>&-
+        [ -z "$AUDIO_LOCK" ] || exec {AUDIO_LOCK}>&-
+        trap 'kill "$s" 2>/dev/null; exit' TERM
+        sleep 2 & s=$!; wait "$s"
+        kill -KILL "$PLAYER_PID" 2>/dev/null \
+            && warn "the player did not finish quitting within 2 s (no frames from the capture card?); killed it"
+    ) &
+    killer=$!
+    # 2>/dev/null: bash's "Killed" job notice; the warning above says it.
+    while :; do
+        wait "$PLAYER_PID" 2>/dev/null; rc=$?
+        kill -0 "$PLAYER_PID" 2>/dev/null || break
+    done
+    kill "$killer" 2>/dev/null
+    return "$rc"
+}
 run_player() {
     PLAYER_PID=$1
     echo "$PLAYER_PID" >"$RUN_DIR/video.pid"
@@ -333,23 +357,28 @@ run_player() {
         DEBUG_JOB=$!
     fi
     dbg "player: $BACKEND pid $PLAYER_PID, window $WINDOW$([ "$WINDOW" = windowed ] && echo " ($WINDOW_SIZE)")"
-    # USR1 (an audio sync change from the overlay) interrupts the wait: serve
-    # it and wait again. Decided by the flag and the player still being ours
-    # to wait for, never by $?: a player killed by a signal also returns >128.
-    # Drained before each wait: a request that lands during a restart (half a
-    # second of link checking) is served right after it, not left waiting.
+    # USR1 (an audio sync change from the overlay) and USR2 (mpv began to
+    # quit) interrupt the wait: serve them and wait again. Decided by the
+    # flags and the player still being ours to wait for, never by $?: a
+    # player killed by a signal also returns >128. Drained before each wait:
+    # a request that lands during a restart (half a second of link checking)
+    # is served right after it, not left waiting.
     local rc
     while :; do
         while [ -n "$SYNC_REQUESTED" ]; do SYNC_REQUESTED=""; apply_sync_request; done
+        if [ -n "$QUIT_STARTED" ]; then reap_player; rc=$?; break; fi
         wait "$PLAYER_PID"; rc=$?
-        [ -n "$SYNC_REQUESTED" ] && kill -0 "$PLAYER_PID" 2>/dev/null && continue
+        { [ -n "$SYNC_REQUESTED" ] || [ -n "$QUIT_STARTED" ]; } && kill -0 "$PLAYER_PID" 2>/dev/null && continue
         break
     done
     # mpv sometimes segfaults in libavdevice's v4l2 teardown after a normal
     # quit (upstream; "Some buffers are still owned by the caller on close").
-    # The mpv script marked the shutdown before it, so this was a clean quit:
+    # The mpv script marked the quit before it, so this was a clean quit:
     # do not report it as a failure. A crash mid-feed has no mark and still is.
-    if [ "$rc" -gt 128 ] && [ -e "$RUN_DIR/player.quit" ]; then
+    # SIGKILL after the mark is reap_player's, which has said so.
+    if [ "$rc" = 137 ] && [ -e "$RUN_DIR/player.quit" ]; then
+        rc=0
+    elif [ "$rc" -gt 128 ] && [ -e "$RUN_DIR/player.quit" ]; then
         info "mpv crashed (signal $((rc - 128))) during its own shutdown after a normal quit; a known upstream teardown bug, ignored"
         rc=0
     fi
@@ -359,7 +388,7 @@ run_player() {
 stop_player() {
     if [ -n "$PLAYER_PID" ] && kill -0 "$PLAYER_PID" 2>/dev/null; then
         kill "$PLAYER_PID" 2>/dev/null
-        wait "$PLAYER_PID" 2>/dev/null
+        reap_player
     fi
     PLAYER_PID=""
 }
@@ -388,6 +417,10 @@ apply_sync_request() {
     start_audio
 }
 trap 'SYNC_REQUESTED=1' USR1
+# mpv began to quit: the mpv script sends USR2 as it unloads the feed, and
+# run_player stops waiting unboundedly (see reap_player).
+QUIT_STARTED=""
+trap 'QUIT_STARTED=1' USR2
 
 DEBUG_JOB=""
 trap 'stop_player; stop_audio; desktop_refresh_restore; [ -z "$DEBUG_JOB" ] || kill "$DEBUG_JOB" 2>/dev/null' EXIT
