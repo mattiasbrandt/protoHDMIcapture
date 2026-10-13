@@ -285,7 +285,9 @@ else
 fi
 
 # --- resolve the card ------------------------------------------------------
-resolve_card || die "$CARD_ERROR"
+resolve_card; _rc=$?
+[ -z "$CARD_WARNING" ] || warn "$CARD_WARNING"
+[ "$_rc" = 0 ] || die "$CARD_ERROR"
 info "video device: $DEV ($CARD_NAME)"
 if [ "$AUDIO" != "none" ]; then
     resolve_audio_source || die "$CARD_ERROR"

@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# shellcheck disable=SC2034  # CARD_NAME, CARD_ERROR, CONFIG_ERROR, SRC are outputs read by the caller
+# shellcheck disable=SC2034  # CARD_NAME, CARD_ERROR, CARD_WARNING, CONFIG_ERROR, SRC are outputs read by the caller
 # Card module: the config file, and which capture card to use. Sourced by
 # view.sh and lib/setup.sh; it sources lib/settings.sh, the rows.
 #
@@ -7,7 +7,8 @@
 #   config_write K=V...  set keys in the config file (config_set K V for one)
 #   config_unset K...    remove keys from the config file
 #   card_list            "node|serial|port|card type" for every capture node
-#   resolve_card         set DEV (the card's video node) and CARD_NAME
+#   resolve_card         set DEV (the card's video node) and CARD_NAME; CARD_WARNING
+#                        when a DEV that is no capture card was set aside
 #   resolve_audio_source set SRC (the card's PipeWire source)
 #   card_serial DEV      print the USB serial of a video node
 #   card_port DEV        print the USB port path (udev ID_PATH) of a video node
@@ -168,8 +169,31 @@ card_list() {
     done
 }
 
+# An ignored device: its card type matches IGNORE_CARDS_RE. Guarded: an
+# empty pattern would match, and so ignore, every device.
+card_ignored() {
+    [ -n "${IGNORE_CARDS_RE:-}" ] && grep -Eq "$IGNORE_CARDS_RE" <<<"$1"
+}
+
 resolve_card() {
-    CARD_ERROR=""
+    CARD_ERROR="" CARD_WARNING=""
+    # A node number can move on a replug (another device may take it), so a
+    # DEV that is not a capture card now, or is an ignored device, is set
+    # aside for the pin or the scan below rather than opened.
+    if [ -n "${DEV:-}" ]; then
+        local t=""
+        if [ ! -e "$DEV" ]; then
+            CARD_WARNING="DEV=$DEV does not exist (any more); looking for the capture card instead"
+        else
+            t=$(_card_type "$DEV")
+            if ! _is_capture_node "$DEV"; then
+                CARD_WARNING="DEV=$DEV is ${t:-a device} now, not a video capture node; looking for the capture card instead"
+            elif card_ignored "$t"; then
+                CARD_WARNING="DEV=$DEV is ${t:-a device} now, an ignored device; looking for the capture card instead"
+            fi
+        fi
+        [ -z "$CARD_WARNING" ] || DEV=""
+    fi
     if [ -z "${DEV:-}" ]; then
         local n serial port type
         while IFS='|' read -r n serial port type; do
@@ -177,9 +201,8 @@ resolve_card() {
                 [ "$serial" = "$CARD_SERIAL" ] || continue
             elif [ -n "${CARD_PORT:-}" ]; then
                 [ "$port" = "$CARD_PORT" ] || continue
-            elif [ -n "${IGNORE_CARDS_RE:-}" ]; then
-                # Guarded: an empty pattern would match, and skip, every card.
-                grep -Eq "$IGNORE_CARDS_RE" <<<"$type" && continue
+            elif card_ignored "$type"; then
+                continue
             fi
             DEV="$n"; break
         done < <(card_list)
@@ -194,7 +217,6 @@ resolve_card() {
         fi
         return 1
     fi
-    [ -e "$DEV" ] || { CARD_ERROR="$DEV does not exist"; return 1; }
     CARD_NAME="$(_card_type "$DEV")"
 }
 
