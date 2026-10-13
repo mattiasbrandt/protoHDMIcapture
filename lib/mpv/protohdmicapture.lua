@@ -516,7 +516,7 @@ local function render_nosig()
     local w, h = mp.get_osd_size()
     if not w or w == 0 then w, h = 1280, 720 end
     nosig.res_x, nosig.res_y = w, h
-    local detail = nosig_state == "never" and "Is the source on and connected?  Tab → setup tips"
+    local detail = nosig_state == "never" and "Is the source on and connected?"
         or "The source stopped sending.  "
            .. (wake and (wake:gsub("^%l", string.upper) .. " to wake it.") or "Is it asleep or switched off?")
     local fs = math.max(16, math.floor(h / 36))
