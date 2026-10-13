@@ -12,6 +12,13 @@ against the card. These are the harness traps that produce false results.
   timeout 6 v4l2-ctl -d /dev/video0 --stream-mmap --stream-count=60 --stream-to=/dev/null; echo $?   # 124 = no frames
   ```
 
+  To test the no-frames case on purpose: the MS2130 keeps streaming black
+  for about a minute after the PS5 enters rest mode, and frames can flicker
+  back for a few seconds after that. Check right before each run.
+- **Bare mpv is not view.sh's mpv for signals.** view.sh passes
+  `--input-terminal=no`, which leaves SIGTERM fatal; a bare mpv without it
+  catches TERM and quits cleanly, so the two behave differently.
+
 - **Frames are not a picture.** The MS2109 streams uniformly black frames at
   full rate with nothing plugged in; grab one before trusting a frame count.
 - **Bound ffmpeg probes with `timeout -k`.** ffmpeg blocked in a V4L2 read on
