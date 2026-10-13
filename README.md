@@ -15,7 +15,7 @@ Research + test kit. Written 2026-09-06, before the card was connected.
 ## Quick start
 
 ```bash
-./probe.sh                    # identify the card; offers to pin its serial
+./view.sh --setup             # pick the card, mode, audio and display; writes the config
 ./view.sh                     # play; close the window or Ctrl-C to stop
 AUDIO=none ./view.sh          # terminal 1 } line audio up with video,
 ./view.sh --tune              # terminal 2 } then keep the DELAY it prints
@@ -127,7 +127,7 @@ often they bite:
   capture card either gets crushed to a washed-out SDR image or needs tone
   mapping in the player. Not worth it for playing in a window.
 - **Video Output → Resolution: 1080p**, and **120 Hz Output: Off**, **VRR: Off**
-  — unless `probe.sh` shows the card genuinely captures more. Cards advertise
+  — unless the setup wizard's format list shows the card genuinely captures more. Cards advertise
   "4K" for their *input/passthrough* far more often than for what they actually
   hand to USB.
 
@@ -310,7 +310,7 @@ tidy-up sometime, no functional effect.
 
 | var | default | what it does |
 |---|---|---|
-| `CARD_SERIAL` | — | USB serial of the card; pins it among other cameras and across `/dev/video` renumbering. `probe.sh` offers to write it |
+| `CARD_SERIAL` | — | USB serial of the card; pins it among other cameras and across `/dev/video` renumbering. The setup wizard writes it |
 | `IGNORE_CARDS_RE` | — | without `CARD_SERIAL`: v4l2 card types to skip while scanning, e.g. `OBSBOT\|Integrated Camera` |
 | `FULLSCREEN` | `yes` | fullscreens on whatever monitor it opens on — no output is hardcoded, Hyprland decides, same as everything else on this desktop |
 | `SCALING` | `balanced` | `balanced` = spline36/mitchell, no deband, no dither. `fast` = `--profile=fast`, bilinear throughout, lowest GPU time and visibly softer. `config` = leave mpv.conf's high-quality settings alone |
@@ -406,11 +406,11 @@ misbehaves.
 1. Set the source-side options above. **HDCP off first** — everything else is moot.
 2. Plug the card into a **rear USB 3 port**, powered via its DC5V jack, and not
    into the `3-5` hub. Source on and outputting 1080p.
-3. `./probe.sh` — this is the step that decides the real settings. It names the
-   chip and prints the link speed; **check it says 5000, not 480**. Send me the
-   **"Supported formats"** block; the right `FMT`/`RES`/`FPS` combination is
-   card-specific, and ffmpeg *silently* falls back to some other mode if you ask
-   for a combination the card doesn't have.
+3. `./view.sh --setup` — this is the step that decides the real settings. It names the
+   chip and prints the link speed; **check it says 5000, not 480**. Its format
+   list decides `FMT`/`RES`/`FPS`: the right combination is card-specific, and
+   ffmpeg *silently* falls back to some other mode if you ask for a
+   combination the card doesn't have.
 4. Video-only smoke test:
    `mpv av://v4l2:/dev/videoN --profile=low-latency --untimed --no-audio`
 5. `AUDIO=none FMT=yuyv422 RES=1920x1080 FPS=60 ./view.sh` — then confirm
@@ -542,7 +542,7 @@ Everything below was executed on this machine, not predicted.
 | Check | Result |
 |---|---|
 | `bash -n` + `shellcheck -S warning` on both scripts | clean |
-| `probe.sh` / `view.sh` with no card present | refuse cleanly with an actionable message |
+| the former `probe` script / `view.sh` with no card present | refuse cleanly with an actionable message |
 | Full mpv option set (`--profile=low-latency --untimed --vo=gpu-next --swapchain-depth=1` …) rendering 120 frames | exit 0 |
 | GStreamer sink flags (`sync=false async=false qos=false leaky=downstream`) rendering 120 buffers | ran in 0.28 s — i.e. `sync=false` really does render on arrival rather than to a clock |
 | `pw-loopback` with `-C`/`-P`/`--latency 10`/`--delay 0.075` | starts, creates `input.protohdmicapture-audio` + `output.protohdmicapture-audio`, establishes real links to the target sink |
@@ -638,9 +638,11 @@ v4l2-ctl -d /dev/video2 --get-fmt-video
 
 ## Files
 
-- `probe.sh` — run with the card connected; identifies it, dumps every capture
-  mode, USB link speed, signal lock, audio source, offers to pin the card's
-  serial, and prints the next command
+- `lib/setup.sh` — the setup wizard (`./view.sh --setup`): identifies the card
+  and its USB link, lists its modes, checks the signal, picks audio, display
+  mode and player, writes the config and a Markdown diagnostics report to
+  `~/.local/state/protohdmicapture/`
+- `lib/ui.sh` — the wizard's centered terminal UI
 - `view.sh` — the player; every knob is an env var or config line, plus
   `--tune` for interactive A/V sync. Owns the one-window/one-loopback rule
 - `launch.sh` — GUI entry point used by the desktop launcher; see below
@@ -707,7 +709,7 @@ REFRESH=keep ./launch.sh     # or just use ./view.sh directly
 Identified from the product photo: aluminium blue case, HDMI-in, HDMI loop-out,
 3.5 mm mic jack, USB-C `DC5V` aux power, LED. That is the standard
 **MacroSilicon MS2130** reference design (the USB 3.0 successor to the MS2109).
-Confirm once plugged in — `probe.sh` prints the USB ID and names the chip.
+Confirm once plugged in — `./view.sh --setup` prints the USB ID and names the chip.
 
 Expected IDs: `534d:2109` = MS2109 (USB 2.0), MS2130 boards commonly enumerate
 as `345f:2130` or under a `534d:` id. Whatever it is, `lsusb` decides, not the
@@ -732,13 +734,13 @@ work:
 FMT=yuyv422 RES=1920x1080 FPS=60 ./view.sh
 ```
 
-Try that **first**. Fall back to `FMT=mjpeg` only if `probe.sh` shows YUYV
+Try that **first**. Fall back to `FMT=mjpeg` only if the setup wizard shows YUYV
 capped at a low framerate — which is what happens on the USB 2.0 MS2109, where
 YUYV manages about 5 fps at 1080p and MJPEG is mandatory.
 
 **So: plug this into a rear USB 3 port (blue/teal, or a USB-C port).** On a USB 2
 port the card silently drops to the MJPEG path and you lose the main advantage.
-`probe.sh` prints the negotiated link speed — anything reporting `480` means
+`./view.sh --setup` prints the negotiated link speed — anything reporting `480` means
 you're on USB 2 and should move it.
 
 ### Use the DC5V input

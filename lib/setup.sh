@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # protoHDMIcapture setup wizard. Run it as `./view.sh --setup`.
 #
-# Walks through the capture card, its format, a signal check, audio, display
-# mode, refresh matching and the player backend, then writes the choices to
-# the config file. Re-running it edits the existing config: every stage starts
+# Walks through the capture card, its USB link, its format, a signal check,
+# audio, display mode, refresh matching and the player backend, then writes
+# the choices to the config file and a Markdown diagnostics report. Re-running it edits the existing config: every stage starts
 # on the current value, so Enter keeps it.
 #
 # Options (normally passed by view.sh / launch.sh):
@@ -108,7 +108,7 @@ run_child() {
 }
 
 # --- stage list --------------------------------------------------------------
-STAGES=(welcome card format signal audio display)
+STAGES=(welcome card usb format signal audio display)
 desktop_can refresh_match && STAGES+=(refresh)
 STAGES+=(backend review)
 [ -z "$FROM_LAUNCHER" ] && STAGES+=(test)
@@ -138,6 +138,56 @@ stage_welcome() {
         center ""
         ui_warn "Set in your environment, and winning over the file: ${ENV_OVERRIDES[*]}"
     fi
+    center ""
+    pause
+}
+
+# Which chip a USB id means, and what that implies. Cheap boxes borrow ids,
+# so the format list, not the model number, has the last word.
+chip_info() {
+    case "$1" in
+        534d:2109) echo "MacroSilicon MS2109 (USB 2.0)|MJPEG is effectively required: YUYV manages about 5 fps at 1080p" ;;
+        345f:2130|534d:2130|534d:0021) echo "MacroSilicon MS2130 (USB 3.0)|uncompressed YUYV at 1080p60 needs the 5000 Mbit/s link" ;;
+        1e4e:7016) echo "MacroSilicon chip under a borrowed id|the 1e4e 'Cubeternet' vendor id is borrowed; on a USB 2 port it can reset-loop" ;;
+        534d:*|345f:*) echo "MacroSilicon family, exact chip unknown|go by the format list" ;;
+        *) echo "unknown chip|go by the format list" ;;
+    esac
+}
+
+stage_usb() {
+    stage "🔌 USB link"
+    # /sys/class/video4linux/videoN/device is the USB interface; its parent
+    # is the USB device, which carries the ids and the negotiated speed. The
+    # card may report no product string, so nothing here depends on one.
+    local intf
+    intf=$(readlink -f "/sys/class/video4linux/$(basename "$CARD_DEV")/device" 2>/dev/null)
+    USB_DIR=$(dirname "$intf")
+    if [ ! -r "$USB_DIR/idVendor" ]; then
+        USB_RESULT="not a USB device"
+        ui_warn "$CARD_DEV is not on USB; nothing to check here."
+        center ""; pause; return
+    fi
+    VIDPID="$(cat "$USB_DIR/idVendor"):$(cat "$USB_DIR/idProduct")"
+    LINK_SPEED=$(cat "$USB_DIR/speed" 2>/dev/null)
+    local chip hint
+    IFS='|' read -r chip hint <<<"$(chip_info "$VIDPID")"
+    CHIP="$chip"
+    say "USB id  : ${BOLD}$VIDPID${RESET} · $chip"
+    say "Port    : $(basename "$USB_DIR") · USB $(tr -d ' ' <"$USB_DIR/version" 2>/dev/null)"
+    note "$hint"
+    center ""
+    case "$LINK_SPEED" in
+        5000|10000|20000)
+            USB_RESULT="ok"
+            ui_ok "Link: $LINK_SPEED Mbit/s, enough for uncompressed 1080p60" ;;
+        480)
+            USB_RESULT="USB 2 link"
+            ui_bad "Link: 480 Mbit/s, a USB 2 port or hub"
+            note "Uncompressed 1080p60 needs USB 3: move the card to a rear USB 3 port." ;;
+        *)
+            USB_RESULT="speed ${LINK_SPEED:-unknown}"
+            ui_warn "Link: ${LINK_SPEED:-unknown} Mbit/s" ;;
+    esac
     center ""
     pause
 }
@@ -440,13 +490,103 @@ stage_test() {
     pause
 }
 
+# --- report ------------------------------------------------------------------
+# Everything a person (or an AI agent) needs to diagnose the setup, written
+# whether or not the config was saved. Old reports are pruned to the last 10.
+REPORT_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/protohdmicapture"
+write_report() {
+    mkdir -p "$REPORT_DIR" || return 1
+    REPORT="$REPORT_DIR/setup-$(date +%Y%m%d-%H%M%S).md"
+    local verdict k
+    {
+        echo "# protoHDMIcapture setup report"
+        echo
+        echo "- Generated: $(date -Is) by protoHDMIcapture $(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo '?')"
+        echo "- Kernel: $(uname -r) · desktop adapter: $DESKTOP · session: ${WAYLAND_DISPLAY:+wayland }${DISPLAY:+x11}"
+        echo "- Config: \`$CONFIG_FILE\` ($([ -n "$SAVED" ] && echo saved || { [ "$CHANGED" = 0 ] && echo unchanged || echo 'not saved'; }))"
+        echo
+        echo "## Summary"
+        echo
+        echo "| Check | Result | |"
+        echo "|---|---|---|"
+        echo "| Card | ${CARD_TYPE:-?} (\`${CARD_DEV:-?}\`, serial \`${NEW[CARD_SERIAL]:-none}\`) | |"
+        echo "| Chip | ${CHIP:-?} (\`${VIDPID:-?}\`) | |"
+        verdict="✅"; [ "${USB_RESULT:-}" = ok ] || verdict="⚠️"
+        echo "| USB link | ${LINK_SPEED:-?} Mbit/s | $verdict |"
+        verdict="✅"; [ -n "$MEASURED_FPS" ] || verdict="⚠️"
+        echo "| Mode | ${NEW[RES]} @ ${NEW[FPS]} fps, ${NEW[FMT]} | |"
+        echo "| Signal | ${SIGNAL_RESULT:-not checked} | $verdict |"
+        echo "| Audio | $(if [ "${NEW[AUDIO]}" = none ]; then echo none; else echo "${NEW[SRC]:-card audio by serial}"; fi) | |"
+        echo "| Display | $(cur WINDOW)$([ "$(cur WINDOW)" = windowed ] && echo " $(cur WINDOW_SIZE)"), refresh $(cur REFRESH) | |"
+        echo "| Player | $(cur BACKEND)$([ "$(cur BACKEND)" = mpv ] && echo ", scaling $(cur SCALING)") | |"
+        echo
+        if [ -n "$SAVED" ]; then echo "## Config changes"; else echo "## Proposed config changes (not saved)"; fi
+        echo
+        echo '```diff'
+        for k in "${MANAGED[@]}"; do
+            [ "${CUR[$k]:-}" = "${NEW[$k]}" ] && continue
+            [ -n "${CUR[$k]:-}" ] && echo "-$k=${CUR[$k]}"
+            [ -n "${NEW[$k]}" ] && echo "+$k=${NEW[$k]}"
+        done
+        echo '```'
+        echo
+        echo "Config file now:"
+        echo
+        echo '```'
+        cat "$CONFIG_FILE" 2>/dev/null || echo "(none)"
+        echo '```'
+        echo
+        echo "## Raw diagnostics"
+        _report_block "lsusb" lsusb
+        _report_block "lsusb -t" lsusb -t
+        [ -n "${VIDPID:-}" ] && _report_block "lsusb -v -d $VIDPID (excerpt)" \
+            bash -c "lsusb -v -d $VIDPID 2>/dev/null | grep -E 'bcdUSB|bcdDevice|iManufacturer|iProduct|iSerial|MaxPower|bInterfaceClass'"
+        _report_block "USB device speeds (sysfs)" bash -c '
+            for d in /sys/bus/usb/devices/[0-9]*-[0-9]*; do
+                [ -r "$d/idVendor" ] || continue
+                printf "%-10s %s:%s %6s Mbit/s  %s\n" "$(basename "$d")" "$(cat "$d/idVendor")" \
+                    "$(cat "$d/idProduct")" "$(cat "$d/speed" 2>/dev/null)" "$(cat "$d/product" 2>/dev/null || echo "(no product string)")"
+            done'
+        _report_block "v4l2-ctl --list-devices" v4l2-ctl --list-devices
+        if [ -n "${CARD_DEV:-}" ]; then
+            _report_block "v4l2-ctl --info" v4l2-ctl -d "$CARD_DEV" --info
+            _report_block "v4l2-ctl --list-formats-ext" v4l2-ctl -d "$CARD_DEV" --list-formats-ext
+            _report_block "v4l2-ctl --get-fmt-video / --get-parm" bash -c "v4l2-ctl -d $CARD_DEV --get-fmt-video; v4l2-ctl -d $CARD_DEV --get-parm"
+            _report_block "DV timings (UVC cards do not support these; failure is normal)" \
+                bash -c "v4l2-ctl -d $CARD_DEV --get-dv-timings 2>&1; v4l2-ctl -d $CARD_DEV --query-dv-timings 2>&1"
+            _report_block "v4l2-ctl --list-ctrls" v4l2-ctl -d "$CARD_DEV" --list-ctrls
+        fi
+        _report_block "pactl list short sources" pactl list short sources
+        _report_block "pactl list short sinks" pactl list short sinks
+        _report_block "arecord -l" arecord -l
+        _report_block "Kernel log: USB / UVC (last 30)" bash -c "journalctl -k -b --no-pager 2>/dev/null | grep -iE 'uvc|usb ${USB_DIR##*/}[: ]|${VIDPID:-xxxx}' | tail -30"
+        _report_block "Players" bash -c 'mpv --version 2>/dev/null | head -1; gst-launch-1.0 --version 2>/dev/null | head -2; ffplay -version 2>/dev/null | head -1'
+    } >"$REPORT"
+    # Keep the newest 10.
+    find "$REPORT_DIR" -maxdepth 1 -name 'setup-*.md' -printf '%T@ %p\n' 2>/dev/null \
+        | sort -rn | tail -n +11 | cut -d' ' -f2- | xargs -r rm -f
+}
+
+_report_block() {
+    local title="$1"; shift
+    echo
+    echo "### $title"
+    echo
+    echo '```'
+    "$@" 2>&1 | sed 's/\x1b\[[0-9;]*m//g'
+    echo '```'
+}
+
 # --- run ---------------------------------------------------------------------
 SAVED=""
+USB_DIR=""; VIDPID=""; LINK_SPEED=""; CHIP=""; USB_RESULT=""
+REPORT=""
 MEASURED_FPS=""
 SIGNAL_RESULT=""
 CARD_DEV=""
 CARD_TYPE=""
 for s in "${STAGES[@]}"; do "stage_$s"; done
+write_report || REPORT=""
 
 _clear
 center ""
@@ -458,10 +598,15 @@ else
     center "${BOLD}${YELLOW}Setup closed without saving${RESET}"
 fi
 center ""
-say "Card    : $CARD_TYPE (${CARD_DEV})"
+say "Card    : $CARD_TYPE (${CARD_DEV}) · ${LINK_SPEED:-?} Mbit/s"
 say "Mode    : ${NEW[RES]} @ ${NEW[FPS]} fps, ${NEW[FMT]}${SIGNAL_RESULT:+ · $SIGNAL_RESULT}"
 say "Display : $(cur WINDOW)$([ "$(cur WINDOW)" = windowed ] && echo " $(cur WINDOW_SIZE)") · player $(cur BACKEND)"
 center ""
+if [ -n "$REPORT" ]; then
+    say "📄 Report: ${BOLD}$REPORT${RESET}"
+    command -v wl-copy >/dev/null 2>&1 && note "Copy it for an AI agent or a forum post:  wl-copy < $REPORT"
+    center ""
+fi
 note "Play: ./view.sh, or protoHDMIcapture in your app launcher."
 note "Change any of this: ./view.sh --setup"
 center ""

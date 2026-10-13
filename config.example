@@ -3,7 +3,7 @@
 # variables win over this file, so `DELAY=0.1 ./view.sh` still works.
 
 # Pin the card by USB serial so other cameras and /dev/video renumbering never
-# matter. ./probe.sh finds it and offers to write this line.
+# matter. ./view.sh --setup finds it and writes this line.
 #CARD_SERIAL=
 
 # Without CARD_SERIAL: card types (v4l2 "Card type", extended regex) to skip

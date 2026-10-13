@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034  # CARD_NAME, CARD_ERROR, CONFIG_ERROR, SRC are outputs read by the caller
 # Card module: settings, and which capture card to use. Sourced by view.sh and
-# probe.sh.
+# lib/setup.sh.
 #
 #   load_config          read the config file into unset variables (env wins)
 #   config_read ARRAY    the file's own values into an associative array
@@ -180,7 +180,7 @@ resolve_card() {
         if [ -n "${CARD_SERIAL:-}" ]; then
             CARD_ERROR="no capture card with serial $CARD_SERIAL found; is it plugged in? (CARD_SERIAL in $CONFIG_FILE)"
         else
-            CARD_ERROR="no capture device found; set DEV=/dev/videoN (run ./probe.sh)"
+            CARD_ERROR="no capture device found; set DEV=/dev/videoN (or run ./view.sh --setup)"
         fi
         return 1
     fi
