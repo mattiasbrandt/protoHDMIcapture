@@ -71,6 +71,15 @@ for d in $documented; do
     [[ " ${ALL_SETTINGS[*]} " == *" $d "* ]] || bad "README: $d has a settings row but is not a setting (lib/settings.sh)"
 done
 
+# Hardware-free checks of the functions behind past defects (each names the
+# commits it guards); a harness prints what failed and exits non-zero.
+HARN=()
+for h in tools/harness/*.sh; do [ "${h##*/}" = lib.sh ] || HARN+=("$h"); done
+step "harnesses (${#HARN[@]})"
+for h in "${HARN[@]}"; do
+    timeout -k 2 30 "$h" || bad "harness ${h##*/} failed"
+done
+
 step "capture card table up to date"
 tools/capture-cards-table --check || bad "docs/capture-cards.md is stale"
 
