@@ -62,6 +62,25 @@ ui_warn() { center "${YELLOW}⚠️  $1${RESET}"; }
 ui_bad()  { center "${RED}✗ $1${RESET}"; }
 ui_ok()   { center "${GREEN}✓ $1${RESET}"; }
 
+# ui_list ITEM...: dim bullets, each wrapped with a hanging indent, centred
+# as one block so the bullets line up (plain text only: no colour codes).
+ui_list() {
+    local w=$(( COLS - 8 )) item line
+    (( w > 76 )) && w=76
+    (( w < 20 )) && w=20
+    local -a rows=()
+    for item in "$@"; do
+        local first=1
+        while IFS= read -r line; do
+            if [ -n "$first" ]; then rows+=("• $line"); first=""; else rows+=("  $line"); fi
+        done < <(fold -s -w "$(( w - 2 ))" <<<"$item" | sed 's/ *$//')
+    done
+    local rw=0 n
+    for line in "${rows[@]}"; do n=${#line}; (( n > rw )) && rw=$n; done
+    local left=$(( (COLS - rw) / 2 )); (( left < 0 )) && left=0
+    for line in "${rows[@]}"; do printf '%*s%s%s%s\n' "$left" '' "$DIM" "$line" "$RESET"; done
+}
+
 pause() {
     ceprompt '%s%s%s ' "$DIM" "${1:-⏎  Press Enter to continue}" "$RESET"
     read -r _ || true

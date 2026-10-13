@@ -8,7 +8,7 @@ fail=0
 step() { printf '\033[36m:: %s\033[0m\n' "$1"; }
 bad()  { printf '\033[31m!! %s\033[0m\n' "$1"; fail=1; }
 
-mapfile -t SH < <(git ls-files '*.sh' view.sh launch.sh tools/check .githooks/pre-commit | sort -u)
+mapfile -t SH < <(git ls-files '*.sh' view.sh launch.sh tools/check tools/capture-cards-table .githooks/pre-commit | sort -u)
 mapfile -t LUA < <(git ls-files '*.lua')
 mapfile -t PY < <(git ls-files '*.py')
 
@@ -28,6 +28,9 @@ step "no tab-separated read"
 if grep -nE "IFS=\\\$'\\\\t'[[:space:]]+read" "${SH[@]}"; then
     bad "IFS=\$'\\t' read collapses empty fields; use a non-whitespace separator"
 fi
+
+step "capture card table up to date"
+tools/capture-cards-table --check || bad "docs/capture-cards.md is stale"
 
 [ "$fail" = 0 ] && printf '\033[32m✓ all checks pass\033[0m\n'
 exit "$fail"

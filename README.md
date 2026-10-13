@@ -44,7 +44,10 @@ audio. The tuning pair above is one of each, so it is allowed.
 1. **Capture card**: every capture device with its serial; the one with a
    known capture-chip USB id is recommended. Pinned by USB serial
    (`CARD_SERIAL`), or by USB port (`CARD_PORT`) when the card reports none.
-2. **USB link**: the chip the id implies and the negotiated speed; 480 Mbit/s
+2. **USB link**: the chip the id implies (from its profile in
+   `capture-cards/`, with what is known about that card and its support
+   status, see [docs/capture-cards.md](docs/capture-cards.md)) and the
+   negotiated speed; 480 Mbit/s
    (USB 2) is flagged, since uncompressed 1080p60 needs USB 3, unless the
    chip is a USB 2 one (MS2109) anyway.
 3. **Picture format**: the card's own mode list, best first (frame rate, then
@@ -733,6 +736,11 @@ v4l2-ctl -d /dev/video2 --get-fmt-video
 
 ## Files
 
+- `capture-cards/` — one profile per capture chip: the USB ids it appears
+  under, its link, best mode, support status and quirks. The wizard reads
+  them; [`docs/capture-cards.md`](docs/capture-cards.md) is the support
+  table, generated from them by `tools/capture-cards-table`
+- `lib/capture-cards.sh` — reads those profiles
 - `lib/setup.sh` — the setup wizard (`./view.sh --setup`): identifies the card
   and its USB link, lists its modes, checks the signal, picks audio, display
   mode and player, writes the config and a Markdown diagnostics report to
@@ -753,7 +761,8 @@ v4l2-ctl -d /dev/video2 --get-fmt-video
   `FPS` and emits the `hyprctl eval` Lua for switching and restoring
 - `config.example` — the settings file, documented
 - `tools/check` — static checks (shellcheck, Lua/Python syntax, banned
-  patterns); the pre-commit hook in `.githooks/` runs it once enabled with
+  patterns, the capture card table being current); the pre-commit hook in
+  `.githooks/` runs it once enabled with
   `git config core.hooksPath .githooks`
 - `docs/testing.md`, `docs/run-dir.md`, `CODING_STANDARDS.md` — how to verify a
   change on hardware, the session-file contract, and the review rules

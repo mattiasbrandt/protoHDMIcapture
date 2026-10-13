@@ -26,6 +26,8 @@ HERE=$(dirname "$(dirname "$(readlink -f "$0")")")
 . "$HERE/lib/desktop.sh"
 # shellcheck source=lib/ui.sh
 . "$HERE/lib/ui.sh"
+# shellcheck source=lib/capture-cards.sh
+. "$HERE/lib/capture-cards.sh"
 
 FROM_LAUNCHER=""; THEN_PLAY=""
 for arg in "$@"; do
@@ -157,18 +159,9 @@ stage_welcome() {
     pause
 }
 
-# Which chip a USB id means, what that implies, and the fastest link the
-# chip uses ("chip|hint|link"; link empty when unknown). Cheap boxes borrow
-# ids, so the format list, not the model number, has the last word.
-chip_info() {
-    case "$1" in
-        534d:2109) echo "MacroSilicon MS2109 (USB 2.0)|MJPEG is effectively required: YUYV manages about 5 fps at 1080p|480" ;;
-        345f:2130|534d:2130|534d:0021) echo "MacroSilicon MS2130 (USB 3.0)|uncompressed YUYV at 1080p60 needs the 5000 Mbit/s link|5000" ;;
-        1e4e:7016) echo "MacroSilicon chip under a borrowed id|the 1e4e 'Cubeternet' vendor id is borrowed; on a USB 2 port it can reset-loop|5000" ;;
-        534d:*|345f:*) echo "MacroSilicon family, exact chip unknown|go by the format list|" ;;
-        *) echo "unknown chip|go by the format list|" ;;
-    esac
-}
+# Which chip a USB id means comes from the capture card profiles in
+# capture-cards/ (lib/capture-cards.sh). Cheap boxes borrow ids, so the
+# format list, not the model number, has the last word.
 
 # vid:pid of the USB device behind a video node, or nothing.
 _usb_id() {
@@ -188,15 +181,27 @@ stage_usb() {
     fi
     VIDPID="$(cat "$USB_DIR/idVendor"):$(cat "$USB_DIR/idProduct")"
     LINK_SPEED=$(cat "$USB_DIR/speed" 2>/dev/null)
-    local chip hint link
-    IFS='|' read -r chip hint link <<<"$(chip_info "$VIDPID")"
-    CHIP="$chip"
-    say "USB id  : ${BOLD}$VIDPID${RESET} · $chip"
+    capture_card_lookup "$VIDPID"
+    CHIP="$CC_CHIP"
+    SUPPORT=""
+    if [ -n "$CC_STATUS" ]; then
+        local level date rest
+        read -r level date rest <<<"$CC_STATUS"
+        [ "$date" = - ] && date=""
+        SUPPORT="$level${date:+ $date}${rest:+ · $rest}"
+    fi
+    say "USB id  : ${BOLD}$VIDPID${RESET} · $CHIP"
     say "Port    : $(basename "$USB_DIR") · USB $(tr -d ' ' <"$USB_DIR/version" 2>/dev/null)"
-    note "$hint"
+    [ -n "$SUPPORT" ] && say "Support : ${SUPPORT^}"
+    note "$CC_HINT"
+    if [ "${#CC_QUIRKS[@]}" -gt 0 ]; then
+        center ""
+        say "Known about this card (${CC_FILE#"$HERE/"}):"
+        ui_list "${CC_QUIRKS[@]//\`/}"   # Markdown code ticks read as noise here
+    fi
     center ""
     # A USB 2 chip on a USB 2 link is as good as it gets, not a fault.
-    case "$LINK_SPEED:$link" in
+    case "$LINK_SPEED:$CC_LINK" in
         5000:*|10000:*|20000:*)
             USB_RESULT="ok"
             ui_ok "Link: $LINK_SPEED Mbit/s, enough for uncompressed 1080p60" ;;
@@ -245,7 +250,7 @@ stage_card() {
     for i in "${!nodes[@]}"; do
         local vp
         vp=$(_usb_id "${nodes[$i]}")
-        [[ "$(chip_info "$vp")" == unknown* ]] || { rec=$i; break; }
+        capture_card_lookup "$vp"; [ $? -le 1 ] && { rec=$i; break; }
     done
     if [ -n "$rec" ]; then
         items[rec]="${items[rec]}|capture chip"
@@ -701,7 +706,7 @@ write_report() {
         echo "| Check | Result | |"
         echo "|---|---|---|"
         echo "| Card | ${CARD_TYPE:-?} (\`${CARD_DEV:-?}\`, serial \`${NEW[CARD_SERIAL]:-none}\`, port \`${NEW[CARD_PORT]:-${CARD_DEV:+$(card_port "$CARD_DEV")}}\`) | |"
-        echo "| Chip | ${CHIP:-?} (\`${VIDPID:-?}\`) | |"
+        echo "| Chip | ${CHIP:-?} (\`${VIDPID:-?}\`)${SUPPORT:+ · support: $SUPPORT} | |"
         verdict="✅"; [ "${USB_RESULT:-}" = ok ] || verdict="⚠️"
         echo "| USB link | ${LINK_SPEED:-?} Mbit/s | $verdict |"
         verdict="✅"; [ -n "$MEASURED_FPS" ] && [ "${PICTURE:-}" = ok ] || verdict="⚠️"
@@ -769,7 +774,7 @@ _report_block() {
 }
 
 # --- run ---------------------------------------------------------------------
-USB_DIR=""; VIDPID=""; LINK_SPEED=""; CHIP=""; USB_RESULT=""
+USB_DIR=""; VIDPID=""; LINK_SPEED=""; CHIP=""; SUPPORT=""; USB_RESULT=""
 REPORT=""
 MEASURED_FPS=""
 SIGNAL_RESULT=""; PICTURE=""
