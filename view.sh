@@ -15,7 +15,7 @@
 #   ./view.sh                 # auto-detect, mpv backend, loopback audio
 #   BACKEND=gst ./view.sh     # GStreamer backend
 #   DELAY=0.08 ./view.sh      # audio delayed 80 ms to match video
-#   ./view.sh --tune          # interactive A/V sync tuner
+#   ./view.sh --tune          # the feed with the overlay open: ctrl -/+ syncs audio
 #
 # Every knob is an env var; see the block below.
 
@@ -85,6 +85,12 @@ for _arg in "$@"; do
         *) echo "view.sh: unknown option $_arg (try --help)" >&2; exit 2 ;;
     esac
 done
+# --tune is the feed with the overlay open: audio sync is ctrl -/+ there.
+# The wizard's sync stage still runs the terminal tuner (TUNE_EMBEDDED).
+OPEN_OVERLAY=""
+if [ "$MODE" = tune ] && [ -z "${TUNE_EMBEDDED:-}" ]; then
+    MODE=play; OPEN_OVERLAY=panel
+fi
 
 # --- first run -------------------------------------------------------------
 # No config file yet, and someone at a terminal: offer the wizard. Declining
@@ -218,8 +224,8 @@ take_audio_lock() {
     flock -n "$AUDIO_LOCK" \
         || die "another session is already playing the card's audio; stop it, or start this one with AUDIO=none"
     dbg "audio lock: held"
-    # A new session starts at full volume, unmuted; only the lock holder may
-    # clear the previous session's state.
+    # A new session starts from what WirePlumber restores for the stream,
+    # not from the previous session's file; only the lock holder may clear it.
     rm -f "$RUN_DIR/audio.state"
 }
 
@@ -375,8 +381,18 @@ run_player() {
         DEBUG_JOB=$!
     fi
     dbg "player: $BACKEND pid $PLAYER_PID, window $WINDOW$([ "$WINDOW" = windowed ] && echo " ($WINDOW_SIZE)")"
-    wait "$PLAYER_PID"
-    local rc=$?
+    # USR1 (an audio sync change from the overlay) interrupts the wait: serve
+    # it and wait again. Decided by the flag and the player still being ours
+    # to wait for, never by $?: a player killed by a signal also returns >128.
+    # A request landing between the check and the wait is served with the
+    # next one.
+    local rc
+    while :; do
+        if [ -n "$SYNC_REQUESTED" ]; then SYNC_REQUESTED=""; apply_sync_request; fi
+        wait "$PLAYER_PID"; rc=$?
+        [ -n "$SYNC_REQUESTED" ] && kill -0 "$PLAYER_PID" 2>/dev/null && continue
+        break
+    done
     # mpv sometimes segfaults in libavdevice's v4l2 teardown after a normal
     # quit (upstream; "Some buffers are still owned by the caller on close").
     # The mpv script marked the shutdown before it, so this was a clean quit:
@@ -396,6 +412,26 @@ stop_player() {
     PLAYER_PID=""
 }
 
+# An audio sync change from the overlay: the mpv script writes audio.request
+# and sends USR1 here, and this process, which owns the loopback, its lock
+# and its PID file, restarts it. The trap only sets a flag; run_player's
+# wait loop does the work.
+SYNC_REQUESTED=""
+apply_sync_request() {
+    local want
+    want=$(sed -n 's/^DELAY=//p' "$RUN_DIR/audio.request" 2>/dev/null)
+    rm -f "$RUN_DIR/audio.request"
+    if ! [[ "$want" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        warn "audio sync request ignored: '$want' is not a delay in seconds"; return
+    fi
+    if [ "$AUDIO" != loopback ] || [ -z "$LOOPBACK_PID" ]; then
+        warn "audio sync request ignored: this session has no audio loopback"; return
+    fi
+    DELAY="$want"
+    start_audio
+}
+trap 'SYNC_REQUESTED=1' USR1
+
 DEBUG_JOB=""
 trap 'stop_player; stop_audio; desktop_refresh_restore; [ -z "$DEBUG_JOB" ] || kill "$DEBUG_JOB" 2>/dev/null' EXIT
 trap 'exit 130' INT
@@ -408,17 +444,14 @@ start_refresh() {
     dbg "refresh: $DESKTOP_MSG"
 }
 
-# --- interactive A/V sync tuner -------------------------------------------
-# Restarts the loopback with a new delay on each keypress. Video keeps running
-# in another terminal / window; you only nudge audio until it lines up.
-# TUNE_OUT: on q, also write the kept DELAY to this file (the setup wizard
-# reads it). TUNE_EMBEDDED: the caller already runs the video, skip saying so.
+# --- terminal A/V sync tuner (the wizard's) ---------------------------------
+# Only with TUNE_EMBEDDED: the setup wizard runs the video beside it and this
+# tuner in its own terminal. A plain --tune is the feed with the overlay open
+# (see the mode section). Restarts the loopback with a new delay on each
+# keypress. TUNE_OUT: on q, also write the kept DELAY to this file.
 if [ "$MODE" = tune ]; then
     [ "$AUDIO" = "loopback" ] || die "--tune needs AUDIO=loopback"
     start_audio
-    if [ -z "${TUNE_EMBEDDED:-}" ]; then
-        printf '\n  A/V sync tuner. Start the video in another terminal:\n      AUDIO=none ./view.sh\n'
-    fi
     cat <<'EOF'
 
   Watch something with sharp transients (console menu clicks are ideal):
@@ -517,7 +550,7 @@ mpv)
         --input-terminal=no
         # f cycles the display mode, d opens the debug dashboard
         --script="$HERE/lib/mpv/protohdmicapture.lua"
-        --script-opts="protohdmicapture-helper=$HERE/view.sh,protohdmicapture-mode=$WINDOW,protohdmicapture-quitfile=$RUN_DIR/player.quit,protohdmicapture-scaling=$SCALING,protohdmicapture-levels=$LEVELS,protohdmicapture-sources=$HERE/sources,protohdmicapture-source=$SOURCE,protohdmicapture-audio=$AUDIO"
+        --script-opts="protohdmicapture-helper=$HERE/view.sh,protohdmicapture-mode=$WINDOW,protohdmicapture-quitfile=$RUN_DIR/player.quit,protohdmicapture-scaling=$SCALING,protohdmicapture-levels=$LEVELS,protohdmicapture-sources=$HERE/sources,protohdmicapture-source=$SOURCE,protohdmicapture-audio=$AUDIO,protohdmicapture-owner=$$,protohdmicapture-rundir=$RUN_DIR,protohdmicapture-delay=$DELAY,protohdmicapture-open=$OPEN_OVERLAY"
         # a live feed generates no input events, so idle-blanking would otherwise
         # kick in mid-game
         --stop-screensaver=always

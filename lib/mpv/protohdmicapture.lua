@@ -9,6 +9,7 @@
 --   1-8  colour (mpv's own keys); s screenshot (mpv's own)
 --   m    mute, 9 / 0 volume down / up: the audio loopback, when the sound
 --        runs through it (AUDIO=loopback), not mpv's own (it has none)
+--   ctrl -/+  audio sync 10 ms earlier / later; alt -/+ by 50 ms (loopback)
 --   While the overlay is open: l levels, c scaling, r reset colour,
 --   t setup tips (left/right: other sources), w save as defaults, Esc close.
 --
@@ -27,7 +28,8 @@ local msg = require("mp.msg")
 local utils = require("mp.utils")
 
 local opts = { helper = "", mode = "fullscreen", quitfile = "", scaling = "balanced",
-               levels = "auto", sources = "", source = "", audio = "" }
+               levels = "auto", sources = "", source = "", audio = "", owner = "",
+               rundir = "", delay = "0.05", open = "" }
 require("mp.options").read_options(opts, "protohdmicapture")
 
 local function helper(...)
@@ -125,15 +127,17 @@ local render_page   -- defined with the overlay below
 -- prints the result, so the panel shows what is, not what was asked.
 local audio = { volume = nil, mute = nil, error = nil }
 
-local function audio_ctl(...)
-    local args = { opts.helper, "--audio", ... }
+local function audio_ctl(action, ...)
+    local args = { opts.helper, "--audio", action, ... }
     mp.command_native_async({ name = "subprocess", args = args, playback_only = false,
                               capture_stdout = true, capture_stderr = true }, function(_, r)
         if r and r.status == 0 then
             audio.volume = tonumber(r.stdout:match("volume=(%d+)"))
             audio.mute = r.stdout:match("mute=(%a+)") == "yes"
             audio.error = nil
-            mp.osd_message(audio.mute and "Audio muted" or ("Volume " .. audio.volume .. "%"), 1.5)
+            if action ~= "status" then
+                mp.osd_message(audio.mute and "Audio muted" or ("Volume " .. audio.volume .. "%"), 1.5)
+            end
         else
             audio.error = ((r and r.stderr ~= "" and r.stderr) or (r and r.error_string) or "failed"):gsub("%s+$", "")
             msg.error("audio: " .. audio.error)
@@ -141,6 +145,54 @@ local function audio_ctl(...)
         end
         render_page()
     end)
+end
+
+-- --- audio sync -------------------------------------------------------------
+-- view.sh owns the loopback and restarts it with a new delay when asked:
+-- the wanted DELAY goes to audio.request and view.sh (owner, our parent, as
+-- passed on our command line) gets USR1. A held key sends once it rests.
+local delay = tonumber(opts.delay) or 0.05
+local sync_timer = nil
+local sync_note = nil       -- shown in the panel: nil, or why it did not apply
+
+local function sync_confirm()
+    local f = io.open(opts.rundir .. "/audio.env", "r")
+    local got = f and f:read("*a"):match("DELAY=([%d.]+)")
+    if f then f:close() end
+    if got and math.abs(tonumber(got) - delay) < 0.0005 then
+        sync_note = nil
+        mp.osd_message(string.format("Audio sync %d ms", math.floor(delay * 1000 + 0.5)), 1.5)
+    else
+        sync_note = "not applied, see the log"
+        msg.error("audio sync: asked for " .. delay .. ", loopback has " .. tostring(got))
+        mp.osd_message("Audio sync not applied (see the log)", 3)
+    end
+    render_page()
+end
+
+local function sync_send()
+    sync_timer = nil
+    local f, err = io.open(opts.rundir .. "/audio.request", "w")
+    if not f then msg.error("audio sync: " .. tostring(err)); mp.osd_message("Audio sync: " .. tostring(err), 3); return end
+    f:write(string.format("DELAY=%.3f\n", delay)); f:close()
+    local r = mp.command_native({ name = "subprocess", args = { "kill", "-USR1", opts.owner },
+                                  playback_only = false, capture_stderr = true })
+    if r.status ~= 0 then
+        msg.error("audio sync: cannot signal view.sh (" .. opts.owner .. "): " .. (r.stderr or ""))
+        mp.osd_message("Audio sync: view.sh is not reachable", 3)
+        return
+    end
+    -- start_audio waits half a second to verify the new link.
+    mp.add_timeout(1.2, sync_confirm)
+end
+
+local function sync_step(ms)
+    delay = math.max(0, math.min(1, delay + ms / 1000))
+    delay = math.floor(delay * 1000 + 0.5) / 1000
+    mp.osd_message(string.format("Audio sync %d ms …", math.floor(delay * 1000 + 0.5)), 1)
+    if sync_timer then sync_timer:kill() end
+    sync_timer = mp.add_timeout(0.4, sync_send)
+    render_page()
 end
 
 -- --- source profiles (sources/<id>.md; shape in lib/sources.sh) --------------
@@ -199,14 +251,14 @@ end
 -- What a save would write: each saved setting that differs from the start.
 local baseline = {}
 local function current_settings()
-    local s = { WINDOW = current, LEVELS = levels, SCALING = scaling }
+    local s = { WINDOW = current, LEVELS = levels, SCALING = scaling, DELAY = string.format("%.3f", delay) }
     for _, k in ipairs(COLOUR) do s[k:upper()] = tostring(mp.get_property_number(k, 0)) end
     return s
 end
 local function changes()
     local out, now = {}, current_settings()
-    for _, k in ipairs({ "WINDOW", "LEVELS", "SCALING", "BRIGHTNESS", "CONTRAST", "SATURATION", "GAMMA" }) do
-        if now[k] ~= baseline[k] then out[#out + 1] = k .. "=" .. now[k] end
+    for _, k in ipairs({ "WINDOW", "LEVELS", "SCALING", "BRIGHTNESS", "CONTRAST", "SATURATION", "GAMMA", "DELAY" }) do
+        if now[k] ~= baseline[k] and (k ~= "DELAY" or opts.audio == "loopback") then out[#out + 1] = k .. "=" .. now[k] end
     end
     return out
 end
@@ -216,24 +268,31 @@ local function panel_lines()
     for _, k in ipairs(COLOUR) do colour[#colour + 1] = k .. " " .. mp.get_property_number(k, 0) end
     local src = read_source(tips_id)
     local ch = changes()
-    return {
+    local lines = {
         "protoHDMIcapture",
         "",
         "f     Display      " .. names[current],
         "l     Levels       " .. levels,
         "c     Scaling      " .. scaling .. (scaling == "config" and " (mpv.conf)" or ""),
         "1-8   Colour       " .. table.concat(colour, " · "),
-        opts.audio == "loopback"
-            and ("m 9 0 Audio        " .. (audio.error and ("unavailable: " .. audio.error)
-                 or audio.volume and ((audio.mute and "muted · " or "") .. "volume " .. audio.volume .. "%")
-                 or "volume 100% (unchanged)"))
-            or ("      Audio        " .. (opts.audio == "" and "?" or opts.audio)),
+    }
+    if opts.audio == "loopback" then
+        lines[#lines + 1] = "m 9 0 Audio        " .. (audio.error and ("unavailable: " .. audio.error)
+            or audio.volume and ((audio.mute and "muted · " or "") .. "volume " .. audio.volume .. "%")
+            or "…")
+        lines[#lines + 1] = string.format("^-/^+ Audio sync   %d ms%s   (alt -/+: 50 ms steps)",
+            math.floor(delay * 1000 + 0.5), sync_note and (" · " .. sync_note) or "")
+    else
+        lines[#lines + 1] = "      Audio        " .. (opts.audio == "" and "?" or opts.audio)
+    end
+    for _, l in ipairs({
         "r     Reset colour",
         "t     Setup tips   " .. (src and src.name or tips_id),
         "w     Save         " .. (#ch == 0 and "nothing changed" or table.concat(ch, " ")),
         "",
         "s screenshot   d dashboard   Tab/Esc close   q quit",
-    }
+    }) do lines[#lines + 1] = l end
+    return lines
 end
 
 local function tips_lines()
@@ -346,6 +405,13 @@ mp.add_forced_key_binding("f", "protohdmicapture-cycle-window", function()
 end)
 
 if opts.audio == "loopback" then
+    for key, ms in pairs({ ["ctrl+-"] = -10, ["ctrl++"] = 10, ["ctrl+="] = 10,
+                           ["alt+-"] = -50, ["alt++"] = 50, ["alt+="] = 50 }) do
+        mp.add_forced_key_binding(key, "protohdmicapture-sync" .. key, function() sync_step(ms) end,
+                                  { repeatable = true })
+    end
+    -- What WirePlumber restored for the stream, for the panel.
+    audio_ctl("status")
     mp.add_forced_key_binding("m", "protohdmicapture-mute", function() audio_ctl("mute") end)
     mp.add_forced_key_binding("9", "protohdmicapture-volume-down", function() audio_ctl("volume", "-5") end,
                               { repeatable = true })
@@ -363,6 +429,9 @@ mp.observe_property("osd-dimensions", "native", function() if page then render_p
 
 -- The start, for "what changed": options are applied before scripts load.
 baseline = current_settings()
+
+-- view.sh --tune: the feed with the overlay already open.
+if opts.open == "panel" then open("panel") end
 
 mp.register_event("shutdown", function()
     if opts.quitfile == "" then return end

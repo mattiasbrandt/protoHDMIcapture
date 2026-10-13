@@ -18,8 +18,7 @@ Research + test kit. Written 2026-09-06, before the card was connected.
 ./view.sh                     # play; the first run offers the setup wizard
 ./view.sh --setup             # (re)run the wizard: card, mode, audio, display, sync
 ./view.sh --debug             # play with verbose logging and a live dashboard
-AUDIO=none ./view.sh          # terminal 1 } re-tune audio sync later,
-./view.sh --tune              # terminal 2 } then keep the DELAY it prints
+./view.sh --tune              # re-tune audio sync: the overlay opens, ctrl -/+ shifts it, w keeps it
 ```
 
 In the video window: **Tab** opens the overlay, **f** cycles fullscreen →
@@ -37,6 +36,7 @@ each with its current value:
 | **l** | levels: auto → limited → full (the range of the card's frames) |
 | **c** | scaling: balanced → fast → config |
 | **1**–**8** | colour: contrast, brightness, gamma, saturation (mpv's keys, also with the overlay closed) |
+| **ctrl −** / **ctrl +**, **alt −** / **alt +** | audio sync 10 / 50 ms earlier / later (also with the overlay closed); **w** saves it as `DELAY` |
 | **m**, **9** / **0** | mute, volume down / up of the audio loopback (also with the overlay closed). Not in the config: WirePlumber remembers the stream's volume between sessions, as it does for any app |
 | **r** | reset colour |
 | **t** | the setup tips for the source (`SOURCE`); **←** / **→** browse the other sources |
@@ -437,7 +437,7 @@ other setting here:
 - `--force-window=immediate` — window appears instantly rather than after the
   first frame lands, so a no-signal card doesn't look like a hung launcher
 - `--input-terminal=no` — mpv doesn't steal stdin from the terminal you launched
-  it from, which matters because `--tune` runs in a second terminal
+  it from, which matters because the wizard's sync tuner reads that terminal
 - `--stop-screensaver=always` — a capture feed produces no input events, so idle
   blanking would otherwise fire mid-game
 - `--term-status-msg=` — silences the per-frame `V: hh:mm:ss` status line,
@@ -495,17 +495,13 @@ the Arctis Nova Pro and HDMI output mid-game just works.
 the card + USB + decode + display is ~50–100 ms. So audio arrives *early*, and
 `--delay` should go *up* from 0 until it matches. Starting guess `DELAY=0.05`.
 
-Tune it with:
-
-```bash
-AUDIO=none ./view.sh          # terminal 1: video
-./view.sh --tune              # terminal 2: j/k = ±10 ms, h/l = ±50 ms
-```
-
-`--tune` needs the audio to itself: if a session with its own loopback is
-already running (e.g. one started from the menu), it is refused rather than
-doubling the audio. Close that session first. Put the value it prints in the
-config file as `DELAY=`.
+Tune it in the feed: **ctrl −** / **ctrl +** move the audio 10 ms earlier /
+later, **alt −** / **alt +** by 50 ms, and **w** in the overlay (**Tab**)
+saves it as `DELAY`. `./view.sh --tune` is the feed with the overlay already
+open. Each change restarts the loopback (a moment of silence): `view.sh`,
+which owns it, does that on a request from the mpv script (`audio.request`
+and a USR1, see [`docs/run-dir.md`](docs/run-dir.md)); volume and mute carry
+over. The setup wizard's sync stage still uses its own terminal tuner.
 
 PS5 menu navigation clicks are the best test signal — sharp transient, tied to a
 visible highlight moving.
@@ -773,7 +769,8 @@ v4l2-ctl -d /dev/video2 --get-fmt-video
 - `lib/dashboard.sh` — the live debug dashboard (`./view.sh --dashboard`)
 - `lib/mpv/protohdmicapture.lua` — the overlay and the keys in the mpv window
 - `view.sh` — the player; every knob is an env var or config line, plus
-  `--tune` for interactive A/V sync. Owns the one-window/one-loopback rule
+  `--tune` (the feed with the overlay open, for audio sync). Owns the
+  one-window/one-loopback rule
 - `launch.sh` — GUI entry point used by the desktop launcher; see below
 - `lib/card.sh` — config file, and which `/dev/video` node and PipeWire source
   are the card

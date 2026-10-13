@@ -9,7 +9,8 @@
 #
 #   audio_stream_id          the stream's sink-input index, or nothing
 #   audio_status ID          "volume=N mute=yes|no"
-#   audio_control ACTION     mute | volume +N | volume -N; prints the status
+#   audio_control ACTION     status | mute | volume +N | volume -N; prints
+#                            the status (status changes nothing)
 #   audio_state_apply        re-apply audio.state to a new stream
 
 audio_stream_id() {
@@ -33,6 +34,7 @@ audio_control() {
     st=$(audio_status "$id") || { echo "cannot read the loopback's volume" >&2; return 1; }
     vol=${st#volume=}; vol=${vol%% *}; mute=${st##*mute=}
     case "$1" in
+        status) echo "volume=$vol mute=$mute"; return 0 ;;
         mute)
             [ "$mute" = yes ] && mute=no || mute=yes
             pactl set-sink-input-mute "$id" "$mute" || { echo "pactl could not set mute" >&2; return 1; } ;;
@@ -41,7 +43,7 @@ audio_control() {
             # 0..100: past 100 % the loopback only clips.
             vol=$(( vol + $2 )); (( vol < 0 )) && vol=0; (( vol > 100 )) && vol=100
             pactl set-sink-input-volume "$id" "$vol%" || { echo "pactl could not set the volume" >&2; return 1; } ;;
-        *) echo "audio: mute | volume +N | volume -N" >&2; return 2 ;;
+        *) echo "audio: status | mute | volume +N | volume -N" >&2; return 2 ;;
     esac
     printf 'VOLUME=%s\nMUTE=%s\n' "$vol" "$mute" >"$RUN_DIR/audio.state"
     echo "volume=$vol mute=$mute"
