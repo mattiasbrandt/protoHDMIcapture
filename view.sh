@@ -384,11 +384,11 @@ run_player() {
     # USR1 (an audio sync change from the overlay) interrupts the wait: serve
     # it and wait again. Decided by the flag and the player still being ours
     # to wait for, never by $?: a player killed by a signal also returns >128.
-    # A request landing between the check and the wait is served with the
-    # next one.
+    # Drained before each wait: a request that lands during a restart (half a
+    # second of link checking) is served right after it, not left waiting.
     local rc
     while :; do
-        if [ -n "$SYNC_REQUESTED" ]; then SYNC_REQUESTED=""; apply_sync_request; fi
+        while [ -n "$SYNC_REQUESTED" ]; do SYNC_REQUESTED=""; apply_sync_request; done
         wait "$PLAYER_PID"; rc=$?
         [ -n "$SYNC_REQUESTED" ] && kill -0 "$PLAYER_PID" 2>/dev/null && continue
         break
