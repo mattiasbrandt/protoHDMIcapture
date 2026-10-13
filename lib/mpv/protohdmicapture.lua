@@ -7,8 +7,12 @@
 -- mpv's own window properties are set here, which is all most desktops need;
 -- then `view.sh --place-window MODE` lets the desktop adapter finish where
 -- the compositor ignores a client (size, maximize and border on Hyprland).
+--
+-- It also marks a normal shutdown in `quitfile`: mpv sometimes segfaults in
+-- libavdevice's v4l2 teardown after it has already quit (an upstream bug),
+-- and view.sh uses the mark to tell that apart from a crash mid-feed.
 
-local opts = { helper = "", mode = "fullscreen" }
+local opts = { helper = "", mode = "fullscreen", quitfile = "" }
 require("mp.options").read_options(opts, "protohdmicapture")
 
 local modes = { "fullscreen", "borderless", "windowed" }
@@ -43,6 +47,12 @@ mp.add_forced_key_binding("f", "protohdmicapture-cycle-window", function()
         end
     end
     apply("fullscreen")
+end)
+
+mp.register_event("shutdown", function()
+    if opts.quitfile == "" then return end
+    local f = io.open(opts.quitfile, "w")
+    if f then f:write("quit\n"); f:close() end
 end)
 
 mp.add_forced_key_binding("d", "protohdmicapture-dashboard", function()

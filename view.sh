@@ -311,6 +311,7 @@ stop_audio() {
 # job in a non-interactive shell ignores SIGINT, so Ctrl-C has to be passed on
 # explicitly rather than relied on.
 PLAYER_PID=""
+rm -f "$RUN_DIR/player.quit"
 run_player() {
     PLAYER_PID=$1
     echo "$PLAYER_PID" >"$RUN_DIR/video.pid"
@@ -348,6 +349,14 @@ run_player() {
     dbg "player: $BACKEND pid $PLAYER_PID, window $WINDOW$([ "$WINDOW" = windowed ] && echo " ($WINDOW_SIZE)")"
     wait "$PLAYER_PID"
     local rc=$?
+    # mpv sometimes segfaults in libavdevice's v4l2 teardown after a normal
+    # quit (upstream; "Some buffers are still owned by the caller on close").
+    # The mpv script marked the shutdown before it, so this was a clean quit:
+    # do not report it as a failure. A crash mid-feed has no mark and still is.
+    if [ "$rc" -gt 128 ] && [ -e "$RUN_DIR/player.quit" ]; then
+        info "mpv crashed (signal $((rc - 128))) during its own shutdown after a normal quit; a known upstream teardown bug, ignored"
+        rc=0
+    fi
     dbg "player exited with status $rc"
     return "$rc"
 }
@@ -470,7 +479,7 @@ mpv)
         --input-terminal=no
         # f cycles the display mode, d opens the debug dashboard
         --script="$HERE/lib/mpv/protohdmicapture.lua"
-        --script-opts="protohdmicapture-helper=$HERE/view.sh,protohdmicapture-mode=$WINDOW"
+        --script-opts="protohdmicapture-helper=$HERE/view.sh,protohdmicapture-mode=$WINDOW,protohdmicapture-quitfile=$RUN_DIR/player.quit"
         # a live feed generates no input events, so idle-blanking would otherwise
         # kick in mid-game
         --stop-screensaver=always
