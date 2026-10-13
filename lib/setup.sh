@@ -62,33 +62,23 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 
-# The keys this wizard decides. Anything else in the file (DELAY, LAT_MS, ...)
-# is carried over untouched.
-MANAGED=(SOURCE CARD_SERIAL CARD_PORT DEV IGNORE_CARDS_RE FMT RES FPS AUDIO SRC WINDOW WINDOW_SIZE
-         REFRESH BACKEND SCALING DELAY DEBUG FULLSCREEN)
+# The settings this wizard decides (flag wizard in lib/settings.sh). Anything
+# else in the file (LAT_MS, LEVELS, ...) is carried over untouched.
+mapfile -t MANAGED < <(settings_with wizard)
 
 # CUR: what the file says now. NEW: what it will say; "" = not in the file.
 declare -A CUR NEW
 config_read CUR
 for k in "${MANAGED[@]}"; do NEW[$k]="${CUR[$k]:-}"; done
 
-# A knob set in the environment beats the file at play time; say so up front.
+# A setting in the environment beats the file at play time; say so up front.
 ENV_OVERRIDES=()
 for k in "${CONFIG_KEYS[@]}"; do
     [ -n "${!k+x}" ] && ENV_OVERRIDES+=("$k")
 done
 
-# Built-in defaults, as in view.sh, for "current value" when the file is silent.
-default_of() {
-    case "$1" in
-        FMT) echo yuyv422 ;; RES) echo 1920x1080 ;; FPS) echo 60 ;;
-        AUDIO) echo loopback ;; WINDOW) echo fullscreen ;; WINDOW_SIZE) echo 1280x720 ;;
-        REFRESH) echo keep ;; BACKEND) echo mpv ;; SCALING) echo balanced ;;
-        DELAY) echo 0.05 ;; DEBUG) echo off ;;
-        *) echo "" ;;
-    esac
-}
-cur() { local v="${NEW[$1]}"; [ -n "$v" ] && echo "$v" || default_of "$1"; }
+# The current value: what the file will say, else the setting's default.
+cur() { local v="${NEW[$1]}"; [ -n "$v" ] && echo "$v" || settings_fact "$1" default; }
 
 # FULLSCREEN is the old spelling of WINDOW; the wizard always writes WINDOW.
 if [ -n "${NEW[FULLSCREEN]}" ]; then

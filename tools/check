@@ -47,6 +47,16 @@ for cfg in "${FIX[@]}"; do
     done < <(tail -n +2 "$base.expect")
 done
 
+# A source profile may suggest only the settings flagged "suggest".
+step "source profile suggestions"
+mapfile -t SUGGESTABLE < <(bash -c '. lib/settings.sh; settings_with suggest')
+for f in sources/*.md; do
+    for kv in $(sed -n 's/^Suggest:[[:space:]]*//p' "$f"); do
+        [[ " ${SUGGESTABLE[*]} " == *" ${kv%%=*} "* ]] \
+            || bad "$f suggests ${kv%%=*}, which is not a suggestable setting (${SUGGESTABLE[*]})"
+    done
+done
+
 step "capture card table up to date"
 tools/capture-cards-table --check || bad "docs/capture-cards.md is stale"
 
