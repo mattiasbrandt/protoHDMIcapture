@@ -2,6 +2,7 @@
 
 Suggest: RES=1920x1080 FPS=60
 Status: reported -
+Wake: press the Xbox button on the controller
 
 - Allow HDR10 and Auto HDR: off (Settings › General › TV & display options › Advanced › Video modes). The card captures SDR.
 - Allow Variable Refresh Rate: off (Settings › General › TV & display options › Advanced › Video modes). Keeps the signal at a fixed rate.

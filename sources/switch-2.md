@@ -2,6 +2,7 @@
 
 Suggest: RES=1920x1080 FPS=60
 Status: reported -
+Wake: press the HOME button on the controller
 
 - TV Resolution: 1080p (System Settings › Display › TV Resolution). 4K output is capped at 60 fps, and the card takes 1080p.
 - HDR Output: Off (System Settings › Display › HDR Output). The card captures SDR.

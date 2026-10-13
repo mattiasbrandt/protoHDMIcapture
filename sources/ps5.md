@@ -2,6 +2,7 @@
 
 Suggest: RES=1920x1080 FPS=60
 Status: tested 2026-09-06
+Wake: press the PS button on the controller
 
 - HDCP: Off (Settings › System › HDMI › Enable HDCP). Capture shows black until it is off; Netflix and other video apps need it back on.
 - Audio Format (Priority): Linear PCM (Settings › Sound › Audio Output). Bitstream (Dolby, DTS) gives silence or noise.

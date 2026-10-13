@@ -51,6 +51,15 @@ Changes are live: they last until the feed closes, unless **w** saves them,
 through the same writer the wizard uses. The overlay is mpv's; `BACKEND=gst`
 and `ffplay` have none.
 
+**No signal.** When the capture card sends no frames, a banner says so in
+the middle of the window: after 5 s if no picture has come since the feed
+opened ("is the source on and connected?"), or 2 s after the frames stop
+(a source gone to sleep; the source profile's `Wake:` line says how to wake
+it, e.g. the PS button). It goes on the first new frame, and hides while
+the overlay is open. A card that keeps sending frames shows no banner: the
+MS2130 streams its own "No Signal" box for about a minute after the source
+sleeps, and the MS2109 streams black with nothing plugged in.
+
 Settings are environment variables, or `KEY=value` lines in
 `~/.config/protohdmicapture/config` (the wizard writes it; see
 `config.example`); the environment wins. Machine-specific values (which card,

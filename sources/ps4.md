@@ -2,6 +2,7 @@
 
 Suggest: RES=1920x1080 FPS=60
 Status: reported -
+Wake: press the PS button on the controller
 
 - HDCP: Off (Settings › System › Enable HDCP, path from a third-party guide). With it on, game capture cards struggle.
 - Audio Format (Priority): Linear PCM (Settings › Sound and Screen › Audio Output Settings › Audio Format (Priority)). Linear PCM is the default; the card takes PCM stereo, not bitstream.

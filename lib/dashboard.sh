@@ -78,6 +78,15 @@ while true; do
             row "fps" "$(good_bad "$(_num1 "$fps")" "awk -v a='${fps:-0}' -v b='${want:-0}' 'BEGIN{exit !(b==0 || a>=b*0.95)}'") captured of $(_num1 "$want") · display $(_num1 "$dfps") Hz"
             row "frames" "dropped $(good_bad "${drops:-?}" "[ '${drops:-0}' = 0 ]") · decoder $(good_bad "${dec:-?}" "[ '${dec:-0}' = 0 ]") · delayed $(good_bad "${delayed:-?}" "[ '${delayed:-0}' = 0 ]")"
             row "picture" "${w:-?}x${h:-?}"
+            # From the mpv script: ok, waiting (no frame yet), never (none
+            # since the feed opened) or stopped.
+            sig=$(mpv_get "$IPC" user-data/protohdmicapture/signal)
+            case "$sig" in
+                ok|waiting) row "signal" "$sig" ;;
+                never)      row "signal" "${RED}none since the feed opened${RESET}" ;;
+                stopped)    row "signal" "${RED}stopped (source asleep or off?)${RESET}" ;;
+                *)          row "signal" "?" ;;
+            esac
         elif [ "$BACKEND" = ffplay ]; then
             last=$(grep 'fd=' "$LOG" 2>/dev/null | tail -1 | sed 's/\x1b\[[0-9;]*m//g; s/^ *//')
             row "ffplay stats" "${last:-(none yet)}"
@@ -93,6 +102,8 @@ while true; do
             err=$(pw_errs 'input\\.protohdmicapture-audio')
             row "loopback" "pid $LP · cpu $(_cpu_pct "$l0" "$l1" "$dt" "$HZ")% · delay ${delay:-?} s · buffer ${lat:-?} ms"
             row "xruns" "$(good_bad "${err:-?}" "[ '${err:-0}' = 0 ]") (PipeWire ERR count for the loopback)"
+        elif [ -r "$RUN_DIR/audio.failed" ]; then
+            row "loopback" "${RED}failed: $(head -1 "$RUN_DIR/audio.failed")${RESET} (see audio.log)"
         else
             row "loopback" "not running (AUDIO=none or mpv)"
         fi

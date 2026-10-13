@@ -248,6 +248,7 @@ local function read_source(id)
         if first then s.name = line:gsub("^# ", ""); first = false
         elseif line:match("^## ") then break
         elseif line:match("^Status: ") then s.status = line:gsub("^Status: ", "")
+        elseif line:match("^Wake: ") then s.wake = line:gsub("^Wake: ", "")
         elseif line:match("^%- ") then s.tips[#s.tips + 1] = line:sub(3)
         end
     end
@@ -481,6 +482,71 @@ local function hide_hint()
     if hint_on then hint_on = false; render_hint() end
 end
 
+-- --- no signal ----------------------------------------------------------------
+-- A banner while the capture card delivers no picture: none since the feed
+-- opened, or none for a moment since the last one. Black frames are a
+-- picture, so a card that streams black (the MS2109 with nothing plugged in)
+-- shows no banner. A frame moves time-pos and estimated-frame-number; with
+-- no frames both stay at 0 (measured on the MS2130), and a change rather
+-- than an increase counts, in case timestamps restart when the source wakes.
+local NEVER_AFTER, STOPPED_AFTER = 5, 2     -- seconds
+local wake = opts.source ~= "" and (read_source(opts.source) or {}).wake or nil
+local nosig = mp.create_osd_overlay("ass-events")
+nosig.z = -10                               -- under the key bar
+local nosig_state = nil                     -- nil, "never" or "stopped"
+local nosig_drawn = nil                     -- the same, but nil while the overlay is open
+local feed_opened, last_frame_at, last_mark, any_frame = mp.get_time(), nil, 0, false
+local published = nil                       -- for the dashboard: ok, waiting, never, stopped
+
+-- Hidden while the overlay is open: its translucent box over the banner is
+-- unreadable, and the overlay has the setup tips itself.
+local function render_nosig()
+    nosig_drawn = (not page) and nosig_state or nil
+    if not nosig_drawn then nosig:remove(); return end
+    local w, h = mp.get_osd_size()
+    if not w or w == 0 then w, h = 1280, 720 end
+    nosig.res_x, nosig.res_y = w, h
+    local detail = nosig_state == "never" and "Is the source on and connected?  Tab → setup tips"
+        or "The source stopped sending.  "
+           .. (wake and (wake:gsub("^%l", string.upper) .. " to wake it.") or "Is it asleep or switched off?")
+    local fs = math.max(16, math.floor(h / 36))
+    local chars = select(2, detail:gsub("[^\128-\191]", ""))
+    local bw, bh = math.floor(chars * fs * 0.6 + 4 * fs), math.floor(fs * 5)
+    local x0, y0 = math.floor((w - bw) / 2), math.floor((h - bh) / 2)
+    nosig.data = table.concat({
+        string.format("{\\an7\\pos(%d,%d)\\bord0\\shad0\\1c&H101010&\\1a&H30&\\p1}m 0 0 l %d 0 %d %d 0 %d{\\p0}",
+                      x0, y0, bw, bw, bh, bh),
+        string.format("{\\an5\\pos(%d,%d)\\fnmonospace\\fs%d\\b1\\bord1\\3c&H000000&\\shad0\\1c&HDDDDDD&}No signal",
+                      math.floor(w / 2), y0 + math.floor(bh * 0.33), math.floor(fs * 1.6)),
+        string.format("{\\an5\\pos(%d,%d)\\fnmonospace\\fs%d\\bord1\\3c&H000000&\\shad0\\1c&HDDDDDD&}%s",
+                      math.floor(w / 2), y0 + math.floor(bh * 0.72), fs, ass_escape(detail)),
+    }, "\n")
+    nosig:update()
+end
+
+mp.add_periodic_timer(0.25, function()
+    local now = mp.get_time()
+    -- Paused, nothing is shown, so nothing to judge: start counting afresh.
+    if mp.get_property_native("pause") then last_frame_at = any_frame and now or nil; feed_opened = now; return end
+    local mark = (mp.get_property_number("time-pos") or 0) + (mp.get_property_number("estimated-frame-number") or 0)
+    if mark ~= 0 and mark ~= last_mark then any_frame, last_frame_at = true, now end
+    last_mark = mark
+    local state = nil
+    if not any_frame then
+        if now - feed_opened >= NEVER_AFTER then state = "never" end
+    elseif now - last_frame_at >= STOPPED_AFTER then
+        state = "stopped"
+    end
+    nosig_state = state
+    local pub = state or (any_frame and "ok" or "waiting")
+    if pub ~= published then
+        published = pub
+        msg.info("signal: " .. pub)
+        mp.set_property("user-data/protohdmicapture/signal", pub)    -- the dashboard reads it over IPC
+    end
+    if ((not page) and nosig_state or nil) ~= nosig_drawn then render_nosig() end
+end)
+
 mp.add_forced_key_binding("TAB", "protohdmicapture-overlay", function()
     hide_hint()
     if page then close() else open("panel") end
@@ -515,6 +581,7 @@ for _, k in ipairs(COLOUR) do mp.observe_property(k, "number", function() if pag
 mp.observe_property("osd-dimensions", "native", function()
     if page then render_page() end
     if hint_on then render_hint() end
+    if nosig_drawn then render_nosig() end
 end)
 
 -- The start, for "what changed": options are applied before scripts load.

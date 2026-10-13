@@ -2,6 +2,7 @@
 
 Suggest: RES=1920x1080 FPS=60
 Status: reported -
+Wake: move the mouse or press a key
 
 - HDR: Off (Settings › System › Display, then Turn on HDR). The card captures SDR.
 - Refresh rate: 60 Hz (Settings › System › Display › Advanced display › Refresh rate). Keeps the signal at one rate.

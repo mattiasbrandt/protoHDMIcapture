@@ -8,6 +8,7 @@
 #   # <display name>                    first line
 #   Suggest: KEY=value ...              viewer settings it suggests (may be empty)
 #   Status: <tested|reported> <date|->  tested = played through a card here
+#   Wake: <what wakes it>               optional; the overlay's no-signal banner
 #   - <setting>: <value> (<menu path>). <why>     the setup tips, one per line
 #   ## References                       links; ends the tips
 #
