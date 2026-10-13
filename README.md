@@ -37,7 +37,7 @@ each with its current value:
 | **l** | levels: auto → limited → full (the range of the card's frames) |
 | **c** | scaling: balanced → fast → config |
 | **1**–**8** | colour: contrast, brightness, gamma, saturation (mpv's keys, also with the overlay closed) |
-| **m**, **9** / **0** | mute, volume down / up of the audio loopback (also with the overlay closed; not saved, the desktop mixer owns lasting volume) |
+| **m**, **9** / **0** | mute, volume down / up of the audio loopback (also with the overlay closed). Not in the config: WirePlumber remembers the stream's volume between sessions, as it does for any app |
 | **r** | reset colour |
 | **t** | the setup tips for the source (`SOURCE`); **←** / **→** browse the other sources |
 | **w** | save what changed since the feed started to the config file |

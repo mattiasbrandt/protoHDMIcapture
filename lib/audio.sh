@@ -47,8 +47,11 @@ audio_control() {
     echo "volume=$vol mute=$mute"
 }
 
-# A new loopback stream starts at 100 % and unmuted; give it the session's
-# state. The stream appears a moment after pw-loopback starts.
+# Give a restarted loopback's stream the session's state. WirePlumber
+# usually restores a stream's last volume by its node name (it also carries
+# the volume from one session to the next); applying it here keeps the
+# restart independent of that. The stream appears a moment after
+# pw-loopback starts.
 audio_state_apply() {
     [ -r "$RUN_DIR/audio.state" ] || return 0
     local vol mute id _
