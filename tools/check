@@ -29,6 +29,24 @@ if grep -nE "IFS=\\\$'\\\\t'[[:space:]]+read" "${SH[@]}"; then
     bad "IFS=\$'\\t' read collapses empty fields; use a non-whitespace separator"
 fi
 
+# Each fixture: a config file, optional KEY=value lines for the environment,
+# and the expected exit status plus regexes that some output line must match.
+# Run with a bare environment so the caller's own settings cannot leak in.
+mapfile -t FIX < <(ls tools/fixtures/settings/*.config 2>/dev/null)
+step "settings fixtures (${#FIX[@]})"
+for cfg in "${FIX[@]}"; do
+    base="${cfg%.config}"; name="${base##*/}"
+    envs=(); [ -r "$base.env" ] && mapfile -t envs <"$base.env"
+    out=$(env -i HOME="$HOME" PATH="$PATH" XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}" \
+          CONFIG_FILE="$cfg" "${envs[@]}" ./view.sh --settings 2>&1)
+    rc=$?
+    want=$(sed -n '1s/^exit //p' "$base.expect")
+    [ "$rc" = "$want" ] || bad "settings fixture $name: exit $rc, expected $want"
+    while IFS= read -r re; do
+        grep -Eq -- "$re" <<<"$out" || bad "settings fixture $name: no line matches /$re/"
+    done < <(tail -n +2 "$base.expect")
+done
+
 step "capture card table up to date"
 tools/capture-cards-table --check || bad "docs/capture-cards.md is stale"
 

@@ -1,0 +1,5 @@
+exit 0
+^LEVELS +limited +saved$
+^DELAY +0.08 +saved$
+^SCALING +balanced +default$
+^all valid$

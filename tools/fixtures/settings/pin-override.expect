@@ -1,0 +1,5 @@
+exit 0
+^CARD_PORT +pci-0000:00:00.0-usb-0:1:1.0 +env$
+^CARD_SERIAL +"" +default$
+^FPS +30 +saved$
+^note: a capture card is picked in the environment; the saved CARD_SERIAL=123456 is not used$

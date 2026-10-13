@@ -18,6 +18,7 @@ Research + test kit. Written 2026-09-06, before the card was connected.
 ./view.sh                     # play; the first run offers the setup wizard
 ./view.sh --setup             # (re)run the wizard: card, mode, audio, display, sync
 ./view.sh --debug             # play with verbose logging and a live dashboard
+./view.sh --settings          # every setting, its value and where it came from; checks them
 ./view.sh --tune              # re-tune audio sync: the overlay opens, ctrl -/+ shifts it, w keeps it
 ```
 
@@ -423,7 +424,13 @@ undo them. `view.sh` now overrides each explicitly on the command line:
 Note the config's comments mention Plasma 6, but you're on Hyprland — worth a
 tidy-up sometime, no functional effect.
 
-### The knobs worth knowing
+### The settings worth knowing
+
+Each setting has one row in `lib/settings.sh`: its default, the values it
+allows and the players that honour it. A value outside them stops the run
+with a message naming the setting and where it came from (environment, the
+config file, or the default), whatever the player; `./view.sh --settings`
+shows the lot without starting anything.
 
 | var | default | what it does |
 |---|---|---|
@@ -782,6 +789,10 @@ v4l2-ctl -d /dev/video2 --get-fmt-video
   `--tune` (the feed with the overlay open, for audio sync). Owns the
   one-window/one-loopback rule
 - `launch.sh` — GUI entry point used by the desktop launcher; see below
+- `lib/settings.sh` — one row per setting (default, allowed values, players,
+  flags) and the functions that resolve, validate and list them;
+  `tools/fixtures/settings/` holds the configs `tools/check` runs through
+  `--settings`
 - `lib/card.sh` — config file, and which `/dev/video` node and PipeWire source
   are the card
 - `lib/desktop.sh` — notifications, opening a terminal, focusing and shaping

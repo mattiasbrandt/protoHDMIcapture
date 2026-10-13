@@ -5,9 +5,8 @@
 #
 #   dbg MSG                  timestamped "[dbg]" line when DEBUG is not off
 #   debug_tee LOGFILE        from here on, copy stdout and stderr into LOGFILE
-#   debug_knob_sources K...  one line: each knob's value and where it came from
-#                            (env | file | default); call debug_snapshot_env
-#                            before load_config and debug_snapshot_file after
+#   debug_settings           one line: every setting's value and where it
+#                            came from (env | saved | default)
 #   debug_after_start PID    background: the negotiated capture format, then a
 #                            perf line every 5 s until PID exits
 #   mpv_get SOCKET PROP      one property over mpv's IPC socket (needs socat)
@@ -28,20 +27,13 @@ debug_tee() {
     exec > >(tee -a "$1") 2> >(tee -a "$1" >&2)
 }
 
-declare -A _DEBUG_SRC=()
-debug_snapshot_env() {
-    local k
-    for k in "$@"; do [ -n "${!k+x}" ] && _DEBUG_SRC[$k]="env"; done
-}
-debug_snapshot_file() {
-    local k
-    for k in "$@"; do [ -n "${!k+x}" ] && [ -z "${_DEBUG_SRC[$k]:-}" ] && _DEBUG_SRC[$k]="file"; done
-}
-debug_knob_sources() {
+# Every setting with its value and where it came from (SETTING_FROM, from
+# settings_resolve in lib/settings.sh).
+debug_settings() {
     [ "${DEBUG:-off}" = off ] && return 0
-    local k out=""
-    for k in "$@"; do out+=" $k=${!k:-\"\"}(${_DEBUG_SRC[$k]:-default})"; done
-    dbg "knobs:$out"
+    local n out=""
+    for n in "${SETTINGS[@]}"; do out+=" $n=${!n:-\"\"}(${SETTING_FROM[$n]:-default})"; done
+    dbg "settings:$out"
 }
 
 mpv_get() {

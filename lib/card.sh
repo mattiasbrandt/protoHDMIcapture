@@ -1,9 +1,8 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034  # CARD_NAME, CARD_ERROR, CONFIG_ERROR, SRC are outputs read by the caller
-# Card module: settings, and which capture card to use. Sourced by view.sh and
-# lib/setup.sh.
+# Card module: the config file, and which capture card to use. Sourced by
+# view.sh and lib/setup.sh; it sources lib/settings.sh, the rows.
 #
-#   load_config          read the config file into unset variables (env wins)
 #   config_read ARRAY    the file's own values into an associative array
 #   config_write K=V...  set keys in the config file (config_set K V for one)
 #   config_unset K...    remove keys from the config file
@@ -19,11 +18,12 @@
 
 CONFIG_FILE="${CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/protohdmicapture/config}"
 
-# Keys the config file may set. Anything else is reported, not silently used.
-CONFIG_KEYS=(SOURCE CARD_SERIAL CARD_PORT IGNORE_CARDS_RE DEV SRC SINK RES FPS FMT DELAY LAT_MS
-             BACKEND AUDIO WINDOW WINDOW_SIZE SCALING LEVELS IPC REFRESH GST_IO_MODE
-             BRIGHTNESS CONTRAST SATURATION GAMMA DEBUG
-             FULLSCREEN)   # FULLSCREEN: deprecated alias, still read
+# shellcheck source=lib/settings.sh
+. "$(dirname "${BASH_SOURCE[0]}")/settings.sh"
+
+# Keys the config file may set: the settings (lib/settings.sh). Anything else
+# is reported, not silently used.
+mapfile -t CONFIG_KEYS < <(settings_with)
 
 # Parsed, never sourced: the file holds settings, not code. Values may be
 # wrapped in single or double quotes.
@@ -43,28 +43,6 @@ _config_line() {
         \'*\') _CV="${_CV#\'}"; _CV="${_CV%\'}" ;;
     esac
     return 0
-}
-
-# A variable already set in the environment is left alone, so
-# `DELAY=0.1 ./view.sh` beats the file.
-#
-# The keys that pick the card are one setting: `CARD_PORT=... ./view.sh`
-# plays that card even when the file pins another by CARD_SERIAL, so when
-# the environment sets any of them the file's are all skipped.
-PIN_KEYS=(CARD_SERIAL CARD_PORT DEV)
-load_config() {
-    [ -r "$CONFIG_FILE" ] || return 0
-    local line rc k env_pin=""
-    for k in "${PIN_KEYS[@]}"; do [ -n "${!k:-}" ] && env_pin=1; done
-    while IFS= read -r line || [ -n "$line" ]; do
-        _config_line "$line"; rc=$?
-        if [ "$rc" = 2 ]; then
-            printf '\033[33m** %s: ignoring unknown line: %s\033[0m\n' "$CONFIG_FILE" "$line" >&2
-        elif [ "$rc" = 0 ]; then
-            [ -n "$env_pin" ] && [[ " ${PIN_KEYS[*]} " == *" $_CK "* ]] && continue
-            [ -n "${!_CK+x}" ] || printf -v "$_CK" '%s' "$_CV"
-        fi
-    done <"$CONFIG_FILE"
 }
 
 # config_read ARRAY: the file's own values into an associative array, ignoring

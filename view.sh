@@ -83,8 +83,9 @@ for _arg in "$@"; do
     case "$_arg" in
         --tune) MODE=tune ;;
         --debug) DEBUG_FLAG=1 ;;
+        --settings) MODE=settings ;;
         -h|--help)
-            echo "usage: ./view.sh [--setup | --tune | --debug]   (knobs: env vars or the config file)"
+            echo "usage: ./view.sh [--setup | --tune | --debug | --settings]   (settings: env vars or the config file)"
             exit 0 ;;
         *) echo "view.sh: unknown option $_arg (try --help)" >&2; exit 2 ;;
     esac
@@ -108,79 +109,6 @@ if [ "$MODE" = play ] && [ ! -e "$CONFIG_FILE" ] && [ -z "${PROTOHDMI_SETUP_CHIL
     fi
 fi
 
-# --- configuration ---------------------------------------------------------
-# Precedence: environment, then the config file (see config.example), then the
-# defaults below.
-debug_snapshot_env "${CONFIG_KEYS[@]}"
-load_config
-debug_snapshot_file "${CONFIG_KEYS[@]}"
-
-# Player knobs you set yourself (environment or config file), as opposed to
-# defaults. Only these earn a warning when the backend cannot honour them, so
-# BACKEND=gst does not nag about the default SCALING.
-#
-# FULLSCREEN=yes|no predates WINDOW and still works; WINDOW wins if both are
-# set. Translated here, before the scan, so a migrated value counts as yours.
-DEPRECATED=""; DEPRECATED_BAD=""
-if [ -n "${FULLSCREEN:-}" ]; then
-    if [ -n "${WINDOW:-}" ]; then
-        DEPRECATED="FULLSCREEN=$FULLSCREEN is ignored because WINDOW=$WINDOW is set; remove FULLSCREEN"
-    else
-        case "$FULLSCREEN" in
-            yes) WINDOW=fullscreen ;;
-            no)  WINDOW=windowed ;;
-            *)   DEPRECATED_BAD="FULLSCREEN=$FULLSCREEN is not yes or no (FULLSCREEN is deprecated; use WINDOW=fullscreen | borderless | windowed)" ;;
-        esac
-        [ -n "$DEPRECATED_BAD" ] || DEPRECATED="FULLSCREEN is deprecated; use WINDOW=$WINDOW"
-    fi
-fi
-REQUESTED=" "
-for _knob in FMT WINDOW WINDOW_SIZE SCALING LEVELS BRIGHTNESS CONTRAST SATURATION GAMMA IPC GST_IO_MODE; do
-    [ -n "${!_knob:-}" ] && REQUESTED+="$_knob "
-done
-DEV="${DEV:-}"                  # /dev/videoN  (empty = find the card)
-SRC="${SRC:-}"                  # PipeWire source of the card's audio (auto)
-CARD_SERIAL="${CARD_SERIAL:-}"  # USB serial of the card; pins it among other cameras
-CARD_PORT="${CARD_PORT:-}"      # USB port path (udev ID_PATH); pins a card that reports no serial
-IGNORE_CARDS_RE="${IGNORE_CARDS_RE:-}"  # without a pin: card types to skip, e.g. 'OBSBOT|Integrated Camera'
-SINK="${SINK:-}"                # PipeWire sink to hear it on (empty = default)
-RES="${RES:-1920x1080}"         # capture resolution
-FPS="${FPS:-60}"                # capture framerate
-# yuyv422 is confirmed correct for this card: uncompressed, 1080p60, no decode
-# step, and its MJPEG path is broken ("No JPEG data found in image").
-# Empty means "leave the device on whatever it was last set to" — which is luck,
-# not a setting, so do not default to empty.
-FMT="${FMT-yuyv422}"            # yuyv422 | mjpeg | rawvideo | nv12 | "" to leave as-is
-DELAY="${DELAY:-0.05}"          # seconds of audio delay to match video latency
-LAT_MS="${LAT_MS:-10}"          # PipeWire loopback buffer, ms
-BACKEND="${BACKEND:-mpv}"       # mpv | gst | ffplay
-AUDIO="${AUDIO:-loopback}"      # loopback | mpv | none
-# Display mode, as games present it. fullscreen covers the monitor it opens on;
-# borderless is a maximized window without decorations (the desktop's bar
-# stays visible); windowed is a normal window of WINDOW_SIZE. Only fullscreen
-# gets direct scanout and tearing, so it is the lowest-latency mode.
-WINDOW="${WINDOW:-fullscreen}"  # fullscreen | borderless | windowed
-WINDOW_SIZE="${WINDOW_SIZE:-1280x720}"  # WxH, for WINDOW=windowed
-SCALING="${SCALING:-balanced}"  # balanced | fast | config  (applied by the mpv script; see the mpv block below)
-LEVELS="${LEVELS:-auto}"        # auto | limited | full: the range the card sends (fix for crushed/washed blacks)
-# Colour, -100..100, 0 = untouched; mpv's own properties (keys 1-8 live).
-BRIGHTNESS="${BRIGHTNESS:-0}"; CONTRAST="${CONTRAST:-0}"; SATURATION="${SATURATION:-0}"; GAMMA="${GAMMA:-0}"
-SOURCE="${SOURCE:-}"            # sources/<SOURCE>.md for the overlay's setup tips (empty = any HDMI source)
-IPC="${IPC-/tmp/mpv-protohdmicapture.sock}"  # mpv IPC socket; empty to disable
-# keep  = leave the display alone (default)
-# match = for the session only, switch the monitor the window opens on to its
-#         mode closest to FPS, then restore on exit (Hyprland only). 60 fps into a 100 Hz panel
-#         holds frames for 1 or 2 refreshes alternately, which judders no matter
-#         how clean the capture path is. No output is hardcoded — whichever
-#         monitor is focused when you launch is the one that changes.
-REFRESH="${REFRESH:-keep}"      # keep | match
-GST_IO_MODE="${GST_IO_MODE:-mmap}"   # mmap | dmabuf  (dmabuf is zero-copy but not all cards do it)
-# off | log = every decision, the negotiated format, verbose player output and
-# a perf line every 5 s, on screen and in $XDG_RUNTIME_DIR/protohdmicapture/debug.log
-# window = log, plus a live dashboard in its own terminal. --debug = window.
-DEBUG="${DEBUG:-off}"           # off | log | window
-[ -z "$DEBUG_FLAG" ] || DEBUG=window
-
 # Exit status 3 means "failed, and the reason was already reported": printed
 # on a terminal, and also sent as a desktop notification when there is none
 # (started from a menu via launch.sh), so nobody has to dig it out of a log.
@@ -191,6 +119,32 @@ die() {
 }
 info() { printf '\033[36m:: %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m** %s\033[0m\n' "$*" >&2; }
+
+# --- configuration ---------------------------------------------------------
+# Every setting comes from the environment, else the saved settings (see
+# config.example), else its default; lib/settings.sh holds one row per
+# setting: its default, the values it allows and the players that honour it.
+settings_resolve
+[ -z "$DEBUG_FLAG" ] || { DEBUG=window; SETTING_FROM[DEBUG]="env"; }
+
+# --settings: each setting, its value and where it came from, then whether
+# they are all valid. Changes nothing; needs no card.
+if [ "$MODE" = settings ]; then
+    for _n in "${SETTINGS[@]}"; do
+        printf '%-16s %-34s %s\n' "$_n" "${!_n:-\"\"}" "${SETTING_FROM[$_n]}"
+    done
+    for _n in "${SETTINGS_NOTES[@]}"; do echo "note: $_n"; done
+    if settings_validate; then echo "all valid"; exit 0; fi
+    for _n in "${SETTINGS_ERRORS[@]}"; do echo "invalid: $_n"; done
+    exit 1
+fi
+
+for _n in "${SETTINGS_NOTES[@]}"; do warn "$_n"; done
+if ! settings_validate; then
+    for _n in "${SETTINGS_ERRORS[@]:1}"; do warn "$_n"; done
+    die "${SETTINGS_ERRORS[0]}"
+fi
+
 
 # --- one window, one loopback ----------------------------------------------
 # Two locks rather than one session lock, because the tuning pair
@@ -244,14 +198,9 @@ take_audio_lock() {
 }
 
 # --- backend capabilities --------------------------------------------------
-# Which player knobs each backend honours. The env-var interface is shared,
-# but gst and ffplay have no equivalent for some of mpv's settings; say so
-# instead of silently ignoring them.
-declare -A BACKEND_KNOBS=(
-    [mpv]="FMT WINDOW WINDOW_SIZE SCALING LEVELS BRIGHTNESS CONTRAST SATURATION GAMMA IPC"
-    [gst]="FMT WINDOW GST_IO_MODE"
-    [ffplay]="FMT WINDOW WINDOW_SIZE"
-)
+# Which players honour which setting is in lib/settings.sh: gst and ffplay
+# have no equivalent for some of mpv's settings, and a value you set for a
+# player that ignores it earns a warning, never silence (a default does not).
 # The WINDOW modes each backend can produce on its own. waylandsink has no
 # decorations to remove and no way to ask for a size.
 declare -A BACKEND_WINDOWS=(
@@ -259,17 +208,8 @@ declare -A BACKEND_WINDOWS=(
     [gst]="fullscreen"
     [ffplay]="fullscreen borderless windowed"
 )
-[ -z "$DEPRECATED_BAD" ] || die "$DEPRECATED_BAD"
-[ -z "$DEPRECATED" ] || warn "$DEPRECATED"
-case "$WINDOW" in
-    fullscreen|borderless|windowed) ;;
-    *) die "unknown WINDOW=$WINDOW (fullscreen | borderless | windowed)" ;;
-esac
-[[ "$WINDOW_SIZE" =~ ^[0-9]+x[0-9]+$ ]] || die "WINDOW_SIZE=$WINDOW_SIZE is not WIDTHxHEIGHT"
-[ -n "${BACKEND_KNOBS[$BACKEND]+x}" ] || die "unknown BACKEND=$BACKEND (mpv | gst | ffplay)"
-for _knob in $REQUESTED; do
-    [[ " ${BACKEND_KNOBS[$BACKEND]} " == *" $_knob "* ]] \
-        || warn "BACKEND=$BACKEND ignores $_knob=${!_knob} (it honours: ${BACKEND_KNOBS[$BACKEND]})"
+for _n in $(settings_with "ignored-by=$BACKEND"); do
+    [ "${SETTING_FROM[$_n]}" = default ] || warn "BACKEND=$BACKEND ignores $_n=${!_n} (only $(settings_fact "$_n" players) honours it)"
 done
 if ! [[ " ${BACKEND_WINDOWS[$BACKEND]} " == *" $WINDOW "* ]]; then
     if desktop_can place_window; then
@@ -282,7 +222,6 @@ fi
 [ "$AUDIO" != "mpv" ] || [ "$BACKEND" = "mpv" ] \
     || die "AUDIO=mpv needs BACKEND=mpv; use AUDIO=loopback with $BACKEND"
 
-case "$DEBUG" in off|log|window) ;; *) die "unknown DEBUG=$DEBUG (off | log | window)" ;; esac
 # The dashboard reads mpv over its IPC socket; with IPC disabled, use a
 # private one for this session rather than showing no numbers.
 if [ "$DEBUG" = window ] && [ "$BACKEND" = mpv ] && [ -z "$IPC" ]; then
@@ -292,8 +231,7 @@ fi
 if [ "$DEBUG" != off ] && [ "$MODE" = play ]; then
     debug_tee "$RUN_DIR/debug.log"
     dbg "protoHDMIcapture $(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo '?') · desktop $DESKTOP · log $RUN_DIR/debug.log"
-    debug_knob_sources CARD_SERIAL CARD_PORT DEV SRC SINK RES FPS FMT DELAY LAT_MS BACKEND AUDIO \
-        WINDOW WINDOW_SIZE SCALING LEVELS BRIGHTNESS CONTRAST SATURATION GAMMA SOURCE IPC REFRESH GST_IO_MODE
+    debug_settings
 fi
 
 [ "$MODE" = tune ] || take_video_lock
@@ -486,9 +424,9 @@ EOF
         IFS= read -rsn1 key || break
         case "$key" in
             j) DELAY=$(awk -v d="$DELAY" 'BEGIN{v=d-0.010; if(v<0)v=0; printf "%.3f", v}') ;;
-            k) DELAY=$(awk -v d="$DELAY" 'BEGIN{printf "%.3f", d+0.010}') ;;
+            k) DELAY=$(awk -v d="$DELAY" 'BEGIN{v=d+0.010; if(v>1)v=1; printf "%.3f", v}') ;;
             h) DELAY=$(awk -v d="$DELAY" 'BEGIN{v=d-0.050; if(v<0)v=0; printf "%.3f", v}') ;;
-            l) DELAY=$(awk -v d="$DELAY" 'BEGIN{printf "%.3f", d+0.050}') ;;
+            l) DELAY=$(awk -v d="$DELAY" 'BEGIN{v=d+0.050; if(v>1)v=1; printf "%.3f", v}') ;;
             0) DELAY=0.000 ;;
             q) echo; info "keep this: DELAY=$DELAY"
                [ -z "${TUNE_OUT:-}" ] || printf '%s\n' "$DELAY" >"$TUNE_OUT"
@@ -523,11 +461,6 @@ mpv)
     [ -n "$FMT" ] && LAVF_O="${LAVF_O},input_format=${FMT}"
     [ "$AUDIO" = "mpv" ] && LAVF_O="timestamps=abs,${LAVF_O}"
 
-    case "$LEVELS" in auto|limited|full) ;; *) die "unknown LEVELS=$LEVELS (auto | limited | full)" ;; esac
-    for _c in BRIGHTNESS CONTRAST SATURATION GAMMA; do
-        [[ "${!_c}" =~ ^-?[0-9]+$ ]] && (( ${!_c} >= -100 && ${!_c} <= 100 )) \
-            || die "$_c=${!_c} is not a whole number from -100 to 100"
-    done
     if [ -n "$SOURCE" ] && [ ! -r "$HERE/sources/$SOURCE.md" ]; then
         warn "SOURCE=$SOURCE has no profile in sources/; the overlay shows the tips for any HDMI source"
         SOURCE=""
@@ -599,10 +532,6 @@ mpv)
     #   fast      the properties of mpv's fast profile: bilinear, lowest GPU
     #             time, visibly softer
     #   config    leave mpv.conf's settings alone
-    case "$SCALING" in
-    balanced|fast|config) ;;
-    *) die "unknown SCALING=$SCALING (balanced | fast | config)" ;;
-    esac
 
     if [ "$AUDIO" = "mpv" ]; then
         # Single-pipeline fallback: mpv owns both streams and does the sync.
