@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# GUI entry point for view.sh, used by protohdmicapture.desktop.
+# GUI entry point for view.sh, used by the .desktop entry; works on any
+# desktop, with Hyprland extras where available (see lib/desktop.sh).
 #
-# view.sh expects a terminal: it prints its decisions, and `die` writes the
-# reason to stderr. Launched from an app launcher there is no terminal, so this
-# wrapper does the three jobs the terminal was doing:
+# view.sh enforces its own rules however it is started: one window and one
+# audio loopback at a time (a second launch focuses the running window), and
+# a failure becomes a desktop notification when there is no terminal. This
+# wrapper only adds what a menu launch needs:
 #
-#   1. keeps a second pipeline from starting on top of the first
-#   2. turns a failed start into a desktop notification instead of silence
-#   3. keeps the full run log somewhere readable afterwards
+#   1. menu defaults: REFRESH=match, since a menu has nowhere to type it
+#   2. the run log, kept somewhere readable afterwards
+#   3. a notification for a failure view.sh could not report itself
 #
-# Env vars are passed straight through, so the desktop entry's defaults can
-# still be overridden from a terminal:
+# Env vars are passed straight through, so the defaults can still be
+# overridden from a terminal:
 #
 #     REFRESH=keep ./launch.sh
 
@@ -21,38 +23,19 @@ LOG="${XDG_RUNTIME_DIR:-/tmp}/protohdmicapture.log"
 # shellcheck source=lib/desktop.sh
 . "$HERE/lib/desktop.sh"
 
-# --- already running? focus it instead of starting a second pipeline -------
-# Match class AND title exactly. A browser tab called "protoHDMIcapture ..." must not count,
-# which is why this does not use `omarchy launch or focus` — that matches a
-# word-boundary regex against class *or* title and would focus the browser.
-if [ "$DESKTOP" = hyprland ]; then
-    pid=$(hyprctl clients -j 2>/dev/null \
-          | jq -r '.[] | select(.class == "mpv" and .title == "protoHDMIcapture") | .pid' \
-          | head -1)
-    if [ -n "${pid:-}" ] && [ "$pid" != "null" ]; then
-        desktop_focus_pid "$pid"
-        exit 0
-    fi
-fi
-
-# --- defaults for the GUI path --------------------------------------------
-# DP-1 runs at 100Hz and cannot do VRR (native G-Sync module, no vrr_capable in
-# sysfs), so 60fps judders unless the panel is dropped to its 59.97Hz mode.
-# view.sh restores the original mode on exit. See README "Display cadence".
+# A 60 fps feed on a faster fixed-refresh panel judders unless the panel is
+# dropped to its nearest mode; view.sh restores the original mode on exit.
+# Without Hyprland this only logs that the display was left alone.
 export REFRESH="${REFRESH:-match}"
 
-# --- run -------------------------------------------------------------------
-# No "starting…" toast: mpv runs with --force-window=immediate, so the window is
-# up before a notification would be, and a failure gets its own toast below.
+# No "starting…" toast: mpv opens its window immediately, and failures get
+# their own notification.
 "$HERE/view.sh" >"$LOG" 2>&1
 status=$?
 
-if [ "$status" -ne 0 ]; then
-    # `die` prints "!! reason" in red; fall back to the last non-empty line.
-    reason=$(sed 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -m1 '^!! ' | sed 's/^!! //')
-    [ -n "$reason" ] || reason=$(sed 's/\x1b\[[0-9;]*m//g' "$LOG" | grep -v '^$' | tail -1)
-    [ -n "$reason" ] || reason="exited with status $status"
-    desktop_notify critical "protoHDMIcapture failed" "$reason
+# 3 = view.sh's die() already notified with the reason.
+if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then
+    desktop_notify critical "protoHDMIcapture failed" "exited with status $status
 Full log: $LOG"
 fi
 

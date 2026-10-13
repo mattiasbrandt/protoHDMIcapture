@@ -60,9 +60,49 @@ IPC="${IPC-/tmp/mpv-protohdmicapture.sock}"  # mpv IPC socket; empty to disable
 REFRESH="${REFRESH:-keep}"      # keep | match
 GST_IO_MODE="${GST_IO_MODE:-mmap}"   # mmap | dmabuf  (dmabuf is zero-copy but not all cards do it)
 
-die() { printf '\033[31m!! %s\033[0m\n' "$*" >&2; exit 1; }
+# Exit status 3 means "failed, and the reason was already reported": printed
+# on a terminal, and also sent as a desktop notification when there is none
+# (started from a menu via launch.sh), so nobody has to dig it out of a log.
+die() {
+    printf '\033[31m!! %s\033[0m\n' "$*" >&2
+    [ -t 2 ] || desktop_notify critical "protoHDMIcapture failed" "$*"
+    exit 3
+}
 info() { printf '\033[36m:: %s\033[0m\n' "$*"; }
 warn() { printf '\033[33m** %s\033[0m\n' "$*" >&2; }
+
+# --- one window, one loopback ----------------------------------------------
+# Two locks rather than one session lock, because the tuning pair
+# (AUDIO=none ./view.sh beside ./view.sh --tune) is one video holder plus one
+# audio holder and must be allowed. What is refused is a second window, or a
+# second loopback (double audio). flock locks drop when their holder exits,
+# however it dies, so there is nothing stale to clean up.
+RUN_DIR="${XDG_RUNTIME_DIR:-/tmp}/protohdmicapture"
+mkdir -p "$RUN_DIR" || die "cannot create $RUN_DIR"
+
+take_video_lock() {
+    exec {VIDEO_LOCK}>"$RUN_DIR/video.lock"
+    flock -n "$VIDEO_LOCK" && return 0
+    local pid
+    pid=$(cat "$RUN_DIR/video.pid" 2>/dev/null)
+    if [ -n "$pid" ] && desktop_focus_pid "$pid"; then
+        info "already running (pid $pid); focused it"
+    else
+        info "already running (pid ${pid:-unknown})"
+        [ -t 1 ] || desktop_notify normal "protoHDMIcapture is already running"
+    fi
+    exit 0
+}
+
+AUDIO_LOCK=""
+take_audio_lock() {
+    [ -z "$AUDIO_LOCK" ] || return 0
+    exec {AUDIO_LOCK}>"$RUN_DIR/audio.lock"
+    flock -n "$AUDIO_LOCK" \
+        || die "another session is already playing the card's audio; stop it, or start this one with AUDIO=none"
+}
+
+[ "${1:-}" = "--tune" ] || take_video_lock
 
 # --- resolve the card ------------------------------------------------------
 resolve_card || die "$CARD_ERROR"
@@ -76,6 +116,7 @@ fi
 LOOPBACK_PID=""
 start_audio() {
     [ "$AUDIO" = "loopback" ] || return 0
+    take_audio_lock
     stop_audio
     # -C capture source, -P playback sink (omitted = follow default sink),
     # --latency = loopback buffer, --delay = deliberate offset to match video.
@@ -100,8 +141,8 @@ start_audio() {
              | grep -A1 '^input\.protohdmicapture-audio:input_FL$' | sed -n '2p' \
              | sed 's/^[[:space:]]*|<-[[:space:]]*//; s/:[^:]*$//')
     if [ -n "$linked" ] && [ "$linked" != "$SRC" ]; then
-        printf '\033[33m** audio is linked to "%s", not the requested "%s"\033[0m\n' "$linked" "$SRC" >&2
-        printf '\033[33m** the requested source was probably unavailable; check it with: pactl list short sources\033[0m\n' >&2
+        warn "audio is linked to \"$linked\", not the requested \"$SRC\""
+        warn "the requested source was probably unavailable; check it with: pactl list short sources"
     fi
 }
 stop_audio() {
@@ -111,7 +152,29 @@ stop_audio() {
     fi
     LOOPBACK_PID=""
 }
-trap 'stop_audio; desktop_refresh_restore' EXIT INT TERM
+
+# --- player process ----------------------------------------------------------
+# The player runs in the background so its PID can be recorded for a second
+# launch to focus, and so a signal to this script reaches it: a background
+# job in a non-interactive shell ignores SIGINT, so Ctrl-C has to be passed on
+# explicitly rather than relied on.
+PLAYER_PID=""
+run_player() {
+    PLAYER_PID=$1
+    echo "$PLAYER_PID" >"$RUN_DIR/video.pid"
+    wait "$PLAYER_PID"
+}
+stop_player() {
+    if [ -n "$PLAYER_PID" ] && kill -0 "$PLAYER_PID" 2>/dev/null; then
+        kill "$PLAYER_PID" 2>/dev/null
+        wait "$PLAYER_PID" 2>/dev/null
+    fi
+    PLAYER_PID=""
+}
+
+trap 'stop_player; stop_audio; desktop_refresh_restore' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- display refresh matching ---------------------------------------------
 start_refresh() {
@@ -245,7 +308,8 @@ mpv)
     # The VIDIOC_QBUF line is libavdevice's noisy v4l2 teardown on exit; it is
     # harmless (verified: no re-enumeration) and only that exact line is dropped.
     MANGOHUD=0 mpv "${args[@]}" \
-        2> >(grep -vE 'ioctl\(VIDIOC_QBUF\): Inappropriate ioctl for device' >&2)
+        2> >(grep -vE 'ioctl\(VIDIOC_QBUF\): Inappropriate ioctl for device' >&2) &
+    run_player $!
     ;;
 
 gst)
@@ -261,7 +325,8 @@ gst)
     fi
     PIPE="v4l2src device=${DEV} io-mode=${GST_IO_MODE} do-timestamp=true ! ${CAPS} ! ${DECODE}queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! videoconvert ! waylandsink sync=false async=false qos=false enable-last-sample=false"
     info "gst-launch-1.0 $PIPE"
-    gst-launch-1.0 -e $PIPE
+    gst-launch-1.0 -e $PIPE &
+    run_player $!
     ;;
 
 ffplay)
@@ -278,7 +343,8 @@ ffplay)
     [ -n "$FMT" ] && args=(-input_format "$FMT" "${args[@]}")
     [ "$FULLSCREEN" = "yes" ] && args+=(-fs)
     info "ffplay ${args[*]} $DEV"
-    ffplay "${args[@]}" "$DEV"
+    ffplay "${args[@]}" "$DEV" &
+    run_player $!
     ;;
 
 *)
