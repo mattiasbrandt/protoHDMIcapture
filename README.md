@@ -82,7 +82,8 @@ audio. The tuning pair above is one of each, so it is allowed.
 6. **Audio**: the card's own input (found on the card's USB device at every
    start), another source, or none.
 7. **Display mode** and window size, **refresh matching** (where the desktop
-   adapter can), **player** and scaling.
+   adapter can), and scaling. The player is mpv; a config set to gst or
+   ffplay by hand is offered the switch.
 8. **Audio sync**: optional; a windowed feed without audio opens and the
    j/k/h/l tuner runs in the wizard's terminal.
 9. **Review**: a diff of exactly what will change; nothing is written before
@@ -344,9 +345,11 @@ system. Only if the loopback crackles at `LAT_MS=10` should you consider raising
 
 ## The three video backends, and why
 
-All three are wired up in `view.sh` because which one wins is card-dependent
-and worth measuring rather than arguing about. They share one set of knobs but
-do not all honour every one; a knob you set that the backend ignores gets a
+mpv is the player: the overlay and every live key exist only there, and the
+wizard sets it. gst and ffplay stay wired up for measuring and fault
+isolation (which one wins on latency is card-dependent and worth measuring
+rather than arguing about); set them by hand, and `view.sh` says they have
+no overlay. They share one set of knobs but do not all honour every one; a knob you set that the backend ignores gets a
 warning, never silence:
 
 | knob | mpv | gst | ffplay |

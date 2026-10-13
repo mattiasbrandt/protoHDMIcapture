@@ -603,13 +603,19 @@ stage_refresh() {
     NEW[REFRESH]="$pick"
 }
 
+# mpv is the player: the overlay and the live keys exist only there. gst and
+# ffplay stay for latency comparisons and fault isolation, set by hand
+# (BACKEND=gst | ffplay); a config that already says so is asked about.
 stage_backend() {
     stage "🎬 Player"
-    local -a items=("mpv|mpv · every option, the default|recommended")
-    [ -n "${WAYLAND_DISPLAY:-}" ] && items+=("gst|GStreamer · fewest stages, Wayland only, fewer options")
-    items+=("ffplay|ffplay · reference player, for comparison")
-    local pick
-    choose pick "Player" "$(cur BACKEND)" "${items[@]}" || exit 1
+    local pick=mpv
+    if [ "${NEW[BACKEND]:-mpv}" != mpv ]; then
+        ui_warn "The config plays with BACKEND=${NEW[BACKEND]}, a diagnostic player."
+        note "It has no overlay and no live keys (Tab, audio sync, volume); mpv has all of them."
+        center ""
+        confirm_yes "Switch to mpv?" || pick="${NEW[BACKEND]}"
+        center ""
+    fi
     NEW[BACKEND]="$pick"
     if [ "$pick" = mpv ]; then
         center ""

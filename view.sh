@@ -608,6 +608,7 @@ mpv)
     ;;
 
 gst)
+    warn "BACKEND=gst is a diagnostic player: no overlay and no live keys (Tab, audio sync, volume); mpv has them"
     # sync=false on the sink is the key knob: render on arrival, do not wait
     # for a presentation timestamp. queue leaky=downstream drops rather than
     # accumulates if the sink ever falls behind, so latency cannot creep.
@@ -638,6 +639,7 @@ gst)
     ;;
 
 ffplay)
+    warn "BACKEND=ffplay is a diagnostic player: no overlay and no live keys (Tab, audio sync, volume); mpv has them"
     args=(
         -hide_banner -loglevel warning
         -f v4l2
