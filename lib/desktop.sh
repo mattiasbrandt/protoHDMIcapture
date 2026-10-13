@@ -84,12 +84,12 @@ hyprland)
     # Hyprland floats or tiles windows itself and ignores a client's size and
     # maximize requests, and it draws the border, not the client. So the
     # player's own flags are applied first and this finishes the job: float
-    # + resize + centre for windowed, maximize + no border for borderless.
-    # fullscreen needs nothing.
+    # + resize + centre for windowed, maximize + no border for borderless,
+    # true fullscreen for fullscreen. Each mode first undoes what the others
+    # set, so this also serves switching modes on a live window (the f key).
     desktop_place_window() {
         local pid="$1" mode="$2" size="$3" sel i
         sel="pid:$1"
-        [ "$mode" = fullscreen ] && { DESKTOP_MSG="window: fullscreen, nothing to place"; return 1; }
         # The window maps some time after the process starts; wait for it.
         for i in $(seq 30); do
             hyprctl clients -j 2>/dev/null | jq -e --argjson p "$pid" 'any(.[]; .pid == $p)' >/dev/null && break
@@ -98,15 +98,25 @@ hyprland)
         done
         _hl() { hyprctl dispatch "$1" >/dev/null 2>&1; }
         case "$mode" in
+        fullscreen)
+            _hl "hl.dsp.window.set_prop({ prop = \"border_size\", value = \"unset\", window = \"$sel\" })"
+            _hl "hl.dsp.window.set_prop({ prop = \"rounding\", value = \"unset\", window = \"$sel\" })"
+            _hl "hl.dsp.window.fullscreen({ mode = \"fullscreen\", action = \"set\", window = \"$sel\" })"
+            DESKTOP_MSG="window: fullscreen" ;;
         windowed)
+            _hl "hl.dsp.window.fullscreen({ mode = \"fullscreen\", action = \"unset\", window = \"$sel\" })"
+            _hl "hl.dsp.window.fullscreen({ mode = \"maximized\", action = \"unset\", window = \"$sel\" })"
+            _hl "hl.dsp.window.set_prop({ prop = \"border_size\", value = \"unset\", window = \"$sel\" })"
+            _hl "hl.dsp.window.set_prop({ prop = \"rounding\", value = \"unset\", window = \"$sel\" })"
             _hl "hl.dsp.window.float({ action = \"enable\", window = \"$sel\" })"
             _hl "hl.dsp.window.resize({ x = ${size%x*}, y = ${size#*x}, window = \"$sel\" })"
             _hl "hl.dsp.window.center({ window = \"$sel\" })"
             DESKTOP_MSG="window: floating ${size}, centred" ;;
         borderless)
+            _hl "hl.dsp.window.fullscreen({ mode = \"fullscreen\", action = \"unset\", window = \"$sel\" })"
             _hl "hl.dsp.window.set_prop({ prop = \"border_size\", value = \"0\", window = \"$sel\" })"
             _hl "hl.dsp.window.set_prop({ prop = \"rounding\", value = \"0\", window = \"$sel\" })"
-            _hl "hl.dsp.window.fullscreen({ mode = \"maximized\", window = \"$sel\" })"
+            _hl "hl.dsp.window.fullscreen({ mode = \"maximized\", action = \"set\", window = \"$sel\" })"
             DESKTOP_MSG="window: maximized, no border" ;;
         esac
     }

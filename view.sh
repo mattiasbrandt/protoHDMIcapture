@@ -38,6 +38,21 @@ if [ "${1:-}" = "--setup" ]; then
 fi
 # --dashboard is the live debug window; like --setup it needs no config.
 [ "${1:-}" = "--dashboard" ] && exec "$HERE/lib/dashboard.sh"
+
+# Helpers for the keys in the mpv window (lib/mpv/protohdmicapture.lua), acting
+# on the running session through its run directory; no config, no locks.
+_RUN="${XDG_RUNTIME_DIR:-/tmp}/protohdmicapture"
+case "${1:-}" in
+--place-window)
+    _pid=$(cat "$_RUN/video.pid" 2>/dev/null) && kill -0 "$_pid" 2>/dev/null || exit 1
+    case "${2:-}" in fullscreen|borderless|windowed) ;; *) echo "--place-window fullscreen|borderless|windowed" >&2; exit 2 ;; esac
+    echo "$2" >"$_RUN/window.mode"
+    desktop_place_window "$_pid" "$2" "$(cat "$_RUN/window.size" 2>/dev/null || echo 1280x720)"
+    exit 0 ;;
+--open-dashboard)
+    desktop_open_terminal protohdmicapture.debug "protoHDMIcapture debug" "$HERE/view.sh" --dashboard
+    exit ;;
+esac
 MODE=play
 DEBUG_FLAG=""
 for _arg in "$@"; do
@@ -300,6 +315,8 @@ run_player() {
     PLAYER_PID=$1
     echo "$PLAYER_PID" >"$RUN_DIR/video.pid"
     echo "$BACKEND" >"$RUN_DIR/backend"
+    echo "$WINDOW" >"$RUN_DIR/window.mode"
+    echo "$WINDOW_SIZE" >"$RUN_DIR/window.size"
     if [ "$BACKEND" = mpv ]; then echo "$IPC" >"$RUN_DIR/ipc.path"; else rm -f "$RUN_DIR/ipc.path"; fi
     # The dashboard is fire-and-forget: in its own terminal, holding none of
     # this session's lock fds, and nothing here waits on it or checks it.
@@ -451,6 +468,9 @@ mpv)
         --pause=no
         # do not steal stdin from the terminal you launched this in
         --input-terminal=no
+        # f cycles the display mode, d opens the debug dashboard
+        --script="$HERE/lib/mpv/protohdmicapture.lua"
+        --script-opts="protohdmicapture-helper=$HERE/view.sh,protohdmicapture-mode=$WINDOW"
         # a live feed generates no input events, so idle-blanking would otherwise
         # kick in mid-game
         --stop-screensaver=always
