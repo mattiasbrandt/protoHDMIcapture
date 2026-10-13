@@ -229,7 +229,11 @@ Two gotchas found in the current state:
 The settings on the source itself that produce a black screen or bad audio
 when wrong (HDCP, audio format, HDR, resolution and refresh) live in one
 profile per source in [`sources/`](sources/): [PlayStation 5](sources/ps5.md)
-(tested) and [any HDMI source](sources/generic.md). The setup wizard asks what
+(tested), and from the vendors' own pages [PlayStation 4](sources/ps4.md),
+[Xbox Series X/S](sources/xbox-series.md), [Nintendo Switch](sources/switch.md),
+[Nintendo Switch 2](sources/switch-2.md) and [a Windows PC](sources/pc.md),
+plus [any HDMI source](sources/generic.md). A path only a third-party guide
+gives says so on its line. The setup wizard asks what
 is plugged in, shows that source's tips before the signal check, and starts
 the mode list on the mode the source suggests, or the closest one the card
 can capture. **HDCP off first**: everything else is moot until it is.

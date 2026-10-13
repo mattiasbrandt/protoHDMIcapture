@@ -308,7 +308,10 @@ stage_source() {
         else
             local level date
             read -r level date <<<"$(source_status "$id")"
-            items+=("$id|$(source_name "$id")${level:+|$level}")
+            local name
+            name=$(source_name "$id")
+            # "|" separates choose's fields; a name must not carry one.
+            items+=("$id|${name//|//}${level:+|$level}")
         fi
     done < <(source_ids)
     local def="${NEW[SOURCE]:-generic}"
