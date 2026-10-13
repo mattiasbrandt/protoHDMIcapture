@@ -5,16 +5,18 @@
 # Run with the card plugged in AND the HDMI source (console, PC, ...) powered on and outputting a signal.
 # Some cards only expose their real mode list while a source is locked.
 #
-#   ./probe.sh                 # auto-detect (ignores known non-capture cams)
+#   ./probe.sh                 # auto-detect (CARD_SERIAL, else IGNORE_CARDS_RE)
 #   ./probe.sh /dev/video4     # force a specific node
+#
+# Once the card is identified it offers to pin its serial in the config file,
+# so view.sh finds it no matter which /dev/video node it lands on.
 
 set -uo pipefail
 
-# Video nodes belonging to devices we know are NOT the capture card.
-# Card type strings for the OBSBOT webcam, which is NOT the capture card.
-# Do not add "UVC Camera (1e4e:7016)" here: despite the Cubeternet vendor id,
-# that IS the capture card (serial 20000130041415, MacroSilicon inside).
-IGNORE_CARDS_RE='OBSBOT|Meet 2|Integrated Camera'
+HERE=$(dirname "$(readlink -f "$0")")
+# shellcheck source=lib/card.sh
+. "$HERE/lib/card.sh"
+load_config
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 hr()   { printf '%s\n' "----------------------------------------------------------------"; }
@@ -55,7 +57,7 @@ for d in /sys/bus/usb/devices/[0-9]*-[0-9]*; do
         ;;
     1e4e:7016)
         FOUND_CHIP=1
-        echo "  $vid:$pid -> THIS BOX'S CAPTURE CARD (serial 20000130041415)"
+        echo "  $vid:$pid -> MacroSilicon-based card under a borrowed id"
         echo "     The 1e4e 'Cubeternet' vendor id is borrowed; the silicon is"
         echo "     MacroSilicon. It reports no manufacturer/product strings."
         echo "     * On a USB 2 port it enumerates at 480 and reset-loops badly."
@@ -78,28 +80,21 @@ v4l2-ctl --list-devices
 hr
 
 # --- pick the capture node -------------------------------------------------
-DEV="${1:-}"
-if [ -z "$DEV" ]; then
-    for n in /dev/video*; do
-        [ -e "$n" ] || continue
-        card=$(v4l2-ctl -d "$n" --info 2>/dev/null | sed -n 's/^\s*Card type\s*:\s*//p')
-        [ -n "$card" ] || continue
-        echo "$card" | grep -Eq "$IGNORE_CARDS_RE" && continue
-        # Must actually be a video-capture node (metadata nodes are not).
-        v4l2-ctl -d "$n" --all 2>/dev/null | grep -q 'Video Capture' || continue
-        DEV="$n"
-        break
-    done
+DEV="${1:-${DEV:-}}"
+if ! resolve_card && [ -n "${CARD_SERIAL:-}" ]; then
+    # A pinned serial that is absent is exactly the "new card" case this
+    # script exists for, so fall back to scanning rather than stopping.
+    echo "  CARD_SERIAL=$CARD_SERIAL is not connected; scanning instead."
+    CARD_SERIAL=""
+    resolve_card
 fi
-
-if [ -z "$DEV" ]; then
-    echo "!! No capture node found. Plug the card in, or pass one explicitly:"
-    echo "     $0 /dev/videoN"
+if [ -n "$CARD_ERROR" ]; then
+    echo "!! $CARD_ERROR"
+    echo "   Plug the card in, or pass the node explicitly: $0 /dev/videoN"
     exit 1
 fi
 
-CARD=$(v4l2-ctl -d "$DEV" --info 2>/dev/null | sed -n 's/^\s*Card type\s*:\s*//p')
-bold "== Selected capture device: $DEV  ($CARD) =="
+bold "== Selected capture device: $DEV  ($CARD_NAME) =="
 hr
 
 bold "== Device info =="
@@ -139,22 +134,39 @@ pactl list short sinks
 hr
 
 # --- audio source match ----------------------------------------------------
-# Match on the card's USB serial, which appears verbatim in the PipeWire node
-# name (alsa_input.usb-1e4e_7016_20000130041415-02...). Picking "the first USB
-# source" instead grabs whatever headset happens to enumerate first.
-CARD_SERIAL=$(v4l2-ctl -d "$DEV" --info 2>/dev/null | sed -n 's/^[[:space:]]*Serial[[:space:]]*:[[:space:]]*//p' | head -1)
+# The card's USB serial appears verbatim in its PipeWire node name.
+CARD_SERIAL_FOUND="$(card_serial "$DEV")"
 SRC=""
-if [ -n "$CARD_SERIAL" ]; then
-    SRC=$(pactl list short sources 2>/dev/null \
-          | awk '$2 !~ /\.monitor$/ {print $2}' \
-          | grep -F "$CARD_SERIAL" | head -1)
-fi
-if [ -n "$SRC" ]; then
-    echo "  matched the card's audio by serial $CARD_SERIAL:"
+if resolve_audio_source; then
+    echo "  matched the card's audio by serial $CARD_SERIAL_FOUND:"
     echo "    $SRC"
 else
-    echo "  !! could not match an audio source to serial '${CARD_SERIAL:-<none>}'"
+    echo "  !! $CARD_ERROR"
     echo "     pick it by hand from the source list above."
+fi
+hr
+
+# --- pin the card ------------------------------------------------------------
+bold "== Pin this card =="
+if [ -z "$CARD_SERIAL_FOUND" ]; then
+    echo "  The card reports no serial, so it cannot be pinned. view.sh will scan;"
+    echo "  set IGNORE_CARDS_RE in $CONFIG_FILE if it picks another camera."
+elif [ "${CARD_SERIAL:-}" = "$CARD_SERIAL_FOUND" ]; then
+    echo "  Already pinned: CARD_SERIAL=$CARD_SERIAL_FOUND in $CONFIG_FILE"
+elif [ -t 0 ]; then
+    printf '  Write CARD_SERIAL=%s to %s? [y/N] ' "$CARD_SERIAL_FOUND" "$CONFIG_FILE"
+    read -r answer
+    case "$answer" in
+        [yY]*) if config_set CARD_SERIAL "$CARD_SERIAL_FOUND"; then
+                   echo "  Pinned."
+               else
+                   echo "  !! could not write $CONFIG_FILE"
+               fi ;;
+        *)     echo "  Not pinned." ;;
+    esac
+else
+    echo "  To pin it, add this line to $CONFIG_FILE:"
+    echo "    CARD_SERIAL=$CARD_SERIAL_FOUND"
 fi
 hr
 
@@ -172,7 +184,5 @@ echo "    RES=1920x1080 FPS=60 FMT=yuyv422 \\"
 echo "    ./view.sh"
 echo
 echo "  If the format list above shows YUYV capped at a low framerate at 1080p"
-echo "  (the USB 2.0 / MS2109 case), use FMT=mjpeg instead."
-echo
-echo "  Paste the 'Supported formats' block above back to Claude — the right"
-echo "  FMT/RES/FPS combination is card-specific and that list decides it."
+echo "  (the USB 2.0 / MS2109 case), use FMT=mjpeg instead. The right"
+echo "  FMT/RES/FPS combination is card-specific; the format list decides it."

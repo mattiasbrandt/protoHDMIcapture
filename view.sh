@@ -21,9 +21,18 @@
 
 set -uo pipefail
 
+HERE=$(dirname "$(readlink -f "$0")")
+# shellcheck source=lib/card.sh
+. "$HERE/lib/card.sh"
+
 # --- configuration ---------------------------------------------------------
-DEV="${DEV:-}"                  # /dev/videoN  (auto-detected if empty)
+# Precedence: environment, then the config file (see config.example), then the
+# defaults below.
+load_config
+DEV="${DEV:-}"                  # /dev/videoN  (empty = find the card)
 SRC="${SRC:-}"                  # PipeWire source of the card's audio (auto)
+CARD_SERIAL="${CARD_SERIAL:-}"  # USB serial of the card; pins it among other cameras
+IGNORE_CARDS_RE="${IGNORE_CARDS_RE:-}"  # without CARD_SERIAL: card types to skip, e.g. 'OBSBOT|Integrated Camera'
 SINK="${SINK:-}"                # PipeWire sink to hear it on (empty = default)
 RES="${RES:-1920x1080}"         # capture resolution
 FPS="${FPS:-60}"                # capture framerate
@@ -49,40 +58,14 @@ IPC="${IPC-/tmp/mpv-protohdmicapture.sock}"  # mpv IPC socket; empty to disable
 REFRESH="${REFRESH:-keep}"      # keep | match
 GST_IO_MODE="${GST_IO_MODE:-mmap}"   # mmap | dmabuf  (dmabuf is zero-copy but not all cards do it)
 
-# The OBSBOT webcam, which is not the capture card. Note the capture card
-# reports as "UVC Camera (1e4e:7016)" and must NOT be excluded here.
-IGNORE_CARDS_RE='OBSBOT|Meet 2|Integrated Camera'
-
 die() { printf '\033[31m!! %s\033[0m\n' "$*" >&2; exit 1; }
 info() { printf '\033[36m:: %s\033[0m\n' "$*"; }
 
-# --- resolve the capture device -------------------------------------------
-if [ -z "$DEV" ]; then
-    for n in /dev/video*; do
-        [ -e "$n" ] || continue
-        card=$(v4l2-ctl -d "$n" --info 2>/dev/null | sed -n 's/^\s*Card type\s*:\s*//p')
-        [ -n "$card" ] || continue
-        echo "$card" | grep -Eq "$IGNORE_CARDS_RE" && continue
-        v4l2-ctl -d "$n" --all 2>/dev/null | grep -q 'Video Capture' || continue
-        DEV="$n"; break
-    done
-fi
-[ -n "$DEV" ] && [ -e "$DEV" ] || die "no capture device found; set DEV=/dev/videoN (run ./probe.sh)"
-info "video device: $DEV ($(v4l2-ctl -d "$DEV" --info 2>/dev/null | sed -n 's/^\s*Card type\s*:\s*//p'))"
-
-# --- resolve the audio source ---------------------------------------------
-if [ "$AUDIO" != "none" ] && [ -z "$SRC" ]; then
-    # Match the card's own USB serial, which PipeWire embeds in the node name.
-    # "first USB source" grabs a headset mic instead — observed on this box.
-    _serial=$(v4l2-ctl -d "$DEV" --info 2>/dev/null | sed -n 's/^[[:space:]]*Serial[[:space:]]*:[[:space:]]*//p' | head -1)
-    if [ -n "$_serial" ]; then
-        SRC=$(pactl list short sources 2>/dev/null \
-              | awk '$2 !~ /\.monitor$/ {print $2}' \
-              | grep -F "$_serial" | head -1)
-    fi
-fi
+# --- resolve the card ------------------------------------------------------
+resolve_card || die "$CARD_ERROR"
+info "video device: $DEV ($CARD_NAME)"
 if [ "$AUDIO" != "none" ]; then
-    [ -n "$SRC" ] || die "no capture audio source found; set SRC=<name from 'pactl list short sources'>"
+    resolve_audio_source || die "$CARD_ERROR"
     info "audio source: $SRC"
 fi
 
@@ -137,7 +120,7 @@ start_refresh() {
     # Mode selection lives in pick-refresh-mode.py — embedding Python braces
     # inside $( ) is brittle and unlintable.
     local plan
-    plan=$("$(dirname "$0")/pick-refresh-mode.py" "$FPS" \
+    plan=$("$HERE/pick-refresh-mode.py" "$FPS" \
            < <(hyprctl monitors -j 2>/dev/null) 2>/dev/null) || true
 
     [ -n "$plan" ] || { echo "could not work out a refresh plan; leaving the display alone" >&2; return 0; }
