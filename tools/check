@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Static checks for protoHDMIcapture; the pre-commit hook runs this.
+# Usage: tools/check
+set -uo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+
+fail=0
+step() { printf '\033[36m:: %s\033[0m\n' "$1"; }
+bad()  { printf '\033[31m!! %s\033[0m\n' "$1"; fail=1; }
+
+mapfile -t SH < <(git ls-files '*.sh' view.sh launch.sh tools/check .githooks/pre-commit | sort -u)
+mapfile -t LUA < <(git ls-files '*.lua')
+mapfile -t PY < <(git ls-files '*.py')
+
+step "shellcheck (${#SH[@]} files)"
+shellcheck -x -S warning "${SH[@]}" || bad "shellcheck"
+
+step "lua syntax (${#LUA[@]} files)"
+for f in "${LUA[@]}"; do luac -p "$f" || bad "luac: $f"; done
+
+step "python syntax (${#PY[@]} files)"
+for f in "${PY[@]}"; do python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' "$f" || bad "python: $f"; done
+
+# read splits on IFS whitespace, and a tab is whitespace: two tabs around an
+# empty field collapse into one and every later field shifts. Use a
+# non-whitespace separator such as "|".
+step "no tab-separated read"
+if grep -nE "IFS=\\\$'\\\\t'[[:space:]]+read" "${SH[@]}"; then
+    bad "IFS=\$'\\t' read collapses empty fields; use a non-whitespace separator"
+fi
+
+[ "$fail" = 0 ] && printf '\033[32m✓ all checks pass\033[0m\n'
+exit "$fail"

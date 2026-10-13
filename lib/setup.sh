@@ -276,7 +276,7 @@ stage_card() {
     pause
 }
 
-# "fmt WxH fps" rows for the card's modes, best first: highest fps, then the
+# "fmt|WxH|fps" rows for the card's modes, best first: highest fps, then the
 # largest picture, then uncompressed over compressed.
 list_modes() {
     v4l2-ctl -d "$CARD_DEV" --list-formats-ext 2>/dev/null | awk '
@@ -288,8 +288,8 @@ list_modes() {
             if (fmt == "") next
             split(size, wh, "x")
             raw = (fmt == "mjpeg") ? 0 : 1
-            printf "%d\t%d\t%d\t%s\t%s\t%d\n", fps, wh[1] * wh[2], raw, fmt, size, fps
-        }' | sort -t$'\t' -k1,1nr -k2,2nr -k3,3nr -u | cut -f4- | head -12
+            printf "%d|%d|%d|%s|%s|%d\n", fps, wh[1] * wh[2], raw, fmt, size, fps
+        }' | sort -t'|' -k1,1nr -k2,2nr -k3,3nr -u | cut -d'|' -f4- | head -12
 }
 
 stage_format() {
@@ -311,7 +311,7 @@ stage_format() {
     local r fmt size fps desc cur_key i=0
     cur_key="$(cur FMT) $(cur RES) $(cur FPS)"
     for r in "${rows[@]}"; do
-        IFS=$'\t' read -r fmt size fps <<<"$r"
+        IFS='|' read -r fmt size fps <<<"$r"
         case "$fmt" in
             yuyv422) desc="uncompressed YUYV" ;;
             mjpeg)   desc="MJPEG (compressed, needs decoding)" ;;
