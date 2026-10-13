@@ -195,20 +195,29 @@ resolve_card() {
         [ -z "$CARD_WARNING" ] || DEV=""
     fi
     if [ -z "${DEV:-}" ]; then
-        local n serial port type
+        local n serial port type at_pin=""
         while IFS='|' read -r n serial port type; do
+            # Ignored devices first: never opened, not even at the pin (a
+            # camera plugged into the card's pinned USB port).
+            if card_ignored "$type"; then
+                if { [ -n "${CARD_SERIAL:-}" ] && [ "$serial" = "$CARD_SERIAL" ]; } \
+                   || { [ -z "${CARD_SERIAL:-}" ] && [ -n "${CARD_PORT:-}" ] && [ "$port" = "$CARD_PORT" ]; }; then
+                    at_pin="$n ($type)"
+                fi
+                continue
+            fi
             if [ -n "${CARD_SERIAL:-}" ]; then
                 [ "$serial" = "$CARD_SERIAL" ] || continue
             elif [ -n "${CARD_PORT:-}" ]; then
                 [ "$port" = "$CARD_PORT" ] || continue
-            elif card_ignored "$type"; then
-                continue
             fi
             DEV="$n"; break
         done < <(card_list)
     fi
     if [ -z "${DEV:-}" ]; then
-        if [ -n "${CARD_SERIAL:-}" ]; then
+        if [ -n "${at_pin:-}" ]; then
+            CARD_ERROR="the device at the card pin, $at_pin, is an ignored device (IGNORE_CARDS_RE in $CONFIG_FILE): if it is the capture card, take it off that list; if not, plug the card back in where it was"
+        elif [ -n "${CARD_SERIAL:-}" ]; then
             CARD_ERROR="no capture card with serial $CARD_SERIAL found; is it plugged in? (CARD_SERIAL in $CONFIG_FILE)"
         elif [ -n "${CARD_PORT:-}" ]; then
             CARD_ERROR="no capture card on USB port $CARD_PORT; is it plugged in, and into the same port? Re-run ./view.sh --setup if it moved"
