@@ -297,19 +297,22 @@ start_refresh() {
 # --- interactive A/V sync tuner -------------------------------------------
 # Restarts the loopback with a new delay on each keypress. Video keeps running
 # in another terminal / window; you only nudge audio until it lines up.
+# TUNE_OUT: on q, also write the kept DELAY to this file (the setup wizard
+# reads it). TUNE_EMBEDDED: the caller already runs the video, skip saying so.
 if [ "$MODE" = tune ]; then
     [ "$AUDIO" = "loopback" ] || die "--tune needs AUDIO=loopback"
     start_audio
+    if [ -z "${TUNE_EMBEDDED:-}" ]; then
+        printf '\n  A/V sync tuner. Start the video in another terminal:\n      AUDIO=none ./view.sh\n'
+    fi
     cat <<'EOF'
 
-  A/V sync tuner. Start the video in another terminal:
-      AUDIO=none ./view.sh
-
-  Then, watching something with sharp transients (console menu clicks are ideal):
+  Watch something with sharp transients (console menu clicks are ideal):
       j / k   audio 10 ms earlier / later
       h / l   audio 50 ms earlier / later
       0       reset to 0
-      q       quit and print the DELAY value to keep
+      q       keep this DELAY and quit
+      x       quit without keeping it
 
 EOF
     while true; do
@@ -321,7 +324,10 @@ EOF
             h) DELAY=$(awk -v d="$DELAY" 'BEGIN{v=d-0.050; if(v<0)v=0; printf "%.3f", v}') ;;
             l) DELAY=$(awk -v d="$DELAY" 'BEGIN{printf "%.3f", d+0.050}') ;;
             0) DELAY=0.000 ;;
-            q) echo; info "keep this: DELAY=$DELAY"; exit 0 ;;
+            q) echo; info "keep this: DELAY=$DELAY"
+               [ -z "${TUNE_OUT:-}" ] || printf '%s\n' "$DELAY" >"$TUNE_OUT"
+               exit 0 ;;
+            x) echo; info "discarded"; exit 1 ;;
             *) continue ;;
         esac
         start_audio

@@ -47,7 +47,9 @@ echo $$ >"$RUN_DIR/setup.pid"
 PREVIEW="$RUN_DIR/setup-preview.config"
 
 SAVED=""
+SYNC_SHELL=""
 cleanup() {
+    sync_stop
     if [ -n "$SAVED" ]; then echo saved; else echo cancelled; fi >"$RUN_DIR/setup.done"
     rm -f "$PREVIEW" "$RUN_DIR/setup.pid"
     ui_restore
@@ -59,7 +61,7 @@ trap 'exit 143' TERM HUP
 # The keys this wizard decides. Anything else in the file (DELAY, LAT_MS, ...)
 # is carried over untouched.
 MANAGED=(CARD_SERIAL DEV IGNORE_CARDS_RE FMT RES FPS AUDIO SRC WINDOW WINDOW_SIZE
-         REFRESH BACKEND SCALING FULLSCREEN)
+         REFRESH BACKEND SCALING DELAY FULLSCREEN)
 
 # CUR: what the file says now. NEW: what it will say; "" = not in the file.
 declare -A CUR NEW
@@ -78,6 +80,7 @@ default_of() {
         FMT) echo yuyv422 ;; RES) echo 1920x1080 ;; FPS) echo 60 ;;
         AUDIO) echo loopback ;; WINDOW) echo fullscreen ;; WINDOW_SIZE) echo 1280x720 ;;
         REFRESH) echo keep ;; BACKEND) echo mpv ;; SCALING) echo balanced ;;
+        DELAY) echo 0.05 ;;
         *) echo "" ;;
     esac
 }
@@ -118,7 +121,7 @@ run_child() {
 # --- stage list --------------------------------------------------------------
 STAGES=(welcome card usb format signal audio display)
 desktop_can refresh_match && STAGES+=(refresh)
-STAGES+=(backend review)
+STAGES+=(backend sync review)
 [ -z "$FROM_LAUNCHER$THEN_PLAY" ] && STAGES+=(test)
 TOTAL_STAGES=$(( ${#STAGES[@]} - 1 ))   # the welcome screen is not numbered
 
@@ -464,6 +467,77 @@ stage_backend() {
     else
         NEW[SCALING]=""
     fi
+}
+
+# --- A/V sync -----------------------------------------------------------------
+# A background feed without audio, plus the --tune loop in this terminal.
+# Background jobs of a script ignore Ctrl-C, so the feed is always stopped
+# explicitly: here, and from the EXIT trap if the wizard is interrupted.
+sync_stop() {
+    [ -n "$SYNC_SHELL" ] || return 0
+    local p
+    p=$(cat "$RUN_DIR/video.pid" 2>/dev/null)
+    [ -n "$p" ] && kill "$p" 2>/dev/null          # the player; view.sh then cleans up
+    kill "$SYNC_SHELL" 2>/dev/null
+    wait "$SYNC_SHELL" 2>/dev/null
+    SYNC_SHELL=""
+    rm -f "$RUN_DIR/tune.out"
+}
+
+_lock_free() { ( flock -n 9 ) 9>"$RUN_DIR/$1.lock"; }
+
+stage_sync() {
+    stage "🎚️  Audio sync"
+    if [ "${NEW[AUDIO]}" = none ]; then
+        note "No audio was chosen, so there is nothing to line up."
+        center ""; pause; return
+    fi
+    say "Audio through the PipeWire loopback arrives before the picture, which"
+    say "takes the card, USB and display path. DELAY holds the audio back to match."
+    note "Current: DELAY=$(cur DELAY) s. Needs a live picture with sound, e.g. console menu clicks."
+    center ""
+    confirm_yes "Line them up now? (a video window opens, the tuner runs here)" || return
+    while ! _lock_free video || ! _lock_free audio; do
+        ui_warn "A feed is running. Close it first."
+        confirm_yes "Check again?" || return
+    done
+    local before t0
+    before=$(desktop_active_window)
+    t0=$(date +%s)
+    rm -f "$RUN_DIR/tune.out"
+    run_child env AUDIO=none WINDOW=windowed WINDOW_SIZE=1280x720 REFRESH=keep \
+        "$HERE/view.sh" </dev/null >"$RUN_DIR/setup-video.log" 2>&1 &
+    SYNC_SHELL=$!
+    # Ready when a player newer than this stage has written its pid.
+    local i ok=""
+    for i in $(seq 50); do
+        if [ -s "$RUN_DIR/video.pid" ] && [ "$(stat -c %Y "$RUN_DIR/video.pid")" -ge "$t0" ] \
+           && kill -0 "$(cat "$RUN_DIR/video.pid")" 2>/dev/null; then ok=1; break; fi
+        kill -0 "$SYNC_SHELL" 2>/dev/null || break
+        sleep 0.1
+    done
+    if [ -z "$ok" ]; then
+        ui_bad "The video did not start. Last lines of its log:"
+        tail -4 "$RUN_DIR/setup-video.log" | sed 's/\x1b\[[0-9;]*m//g' | while IFS= read -r l; do note "$l"; done
+        sync_stop; center ""; pause; return
+    fi
+    sleep 1   # let the window map before taking focus back
+    desktop_focus_window "$before" || note "Click back into this terminal to use the tuner keys."
+    center ""
+    run_child env TUNE_EMBEDDED=1 TUNE_OUT="$RUN_DIR/tune.out" DELAY="$(cur DELAY)" \
+        "$HERE/view.sh" --tune
+    local kept=""
+    [ -s "$RUN_DIR/tune.out" ] && kept=$(cat "$RUN_DIR/tune.out")
+    sync_stop
+    center ""
+    if [ -n "$kept" ]; then
+        NEW[DELAY]="$kept"
+        ui_ok "DELAY=$kept will be saved."
+    else
+        note "DELAY left at $(cur DELAY)."
+    fi
+    center ""
+    pause
 }
 
 CHANGED=0
