@@ -22,9 +22,12 @@ dbg() {
     printf '\033[2m%s [dbg] %s\033[0m\n' "$(date +%T.%3N)" "$*"
 }
 
+# The tees outlive this script while a child still writes to them, so they
+# drop the caller's lock fds first when it has any (view.sh's _close_locks).
 debug_tee() {
     : >"$1"
-    exec > >(tee -a "$1") 2> >(tee -a "$1" >&2)
+    exec > >(! declare -F _close_locks >/dev/null || _close_locks; exec tee -a "$1") \
+        2> >(! declare -F _close_locks >/dev/null || _close_locks; exec tee -a "$1" >&2)
 }
 
 # Every setting with its value and where it came from (SETTING_FROM, from

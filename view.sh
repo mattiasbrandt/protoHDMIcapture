@@ -151,7 +151,10 @@ fi
 # (AUDIO=none ./view.sh beside ./view.sh --tune) is one video holder plus one
 # audio holder and must be allowed. What is refused is a second window, or a
 # second loopback (double audio). flock locks drop when their holder exits,
-# however it dies, so there is nothing stale to clean up.
+# however it dies. Only this script holds them: every child closes the lock
+# fds (_close_locks), so a player or loopback orphaned by a hard kill of this
+# script cannot keep the next session out; that session stops the orphan
+# instead (kill_orphan).
 RUN_DIR="${XDG_RUNTIME_DIR:-/tmp}/protohdmicapture"
 mkdir -p "$RUN_DIR" || die "cannot create $RUN_DIR"
 
@@ -170,9 +173,37 @@ if [ "$MODE" = tune ] && [ -z "${TUNE_EMBEDDED:-}" ]; then
     fi
 fi
 
+# Run first in every child this script starts, process substitutions
+# included: an inherited lock fd would keep the lock held by a child that
+# outlives this script (the stderr filter lives as long as its player).
+_close_locks() {
+    [ -z "${VIDEO_LOCK:-}" ] || exec {VIDEO_LOCK}>&-
+    [ -z "${AUDIO_LOCK:-}" ] || exec {AUDIO_LOCK}>&-
+}
+
+# A player or loopback that a session killed outright (no EXIT trap) left
+# running: double audio, or a card that will not open. Called with the lock
+# held, so the session that wrote the PID file is gone; a process still at
+# that PID is its orphan only if it is ours and its command line matches
+# (the PID may be anyone's by now). FILE REGEX WHAT
+kill_orphan() {
+    local pid cmd i
+    pid=$(cat "$RUN_DIR/$1" 2>/dev/null) || return 0
+    [[ "$pid" =~ ^[0-9]+$ ]] && [ -O "/proc/$pid" ] || return 0
+    cmd=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null) || return 0
+    [[ "$cmd" =~ $2 ]] || return 0
+    kill "$pid" 2>/dev/null
+    for i in {1..20}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+    warn "stopped the $3 (pid $pid) that a killed session left running"
+}
+
 take_video_lock() {
     exec {VIDEO_LOCK}>"$RUN_DIR/video.lock"
-    flock -n "$VIDEO_LOCK" && return 0
+    if flock -n "$VIDEO_LOCK"; then
+        kill_orphan video.pid '^(mpv .*--title=protoHDMIcapture|ffplay .*-window_title protoHDMIcapture|gst-launch-1\.0 .*v4l2src device=)' player
+        return 0
+    fi
     local pid
     pid=$(cat "$RUN_DIR/video.pid" 2>/dev/null)
     if [ -n "$pid" ] && desktop_focus_pid "$pid"; then
@@ -192,6 +223,7 @@ take_audio_lock() {
     flock -n "$AUDIO_LOCK" \
         || die "another session is already playing the card's audio; stop it, or start this one with AUDIO=none"
     dbg "audio lock: held"
+    kill_orphan audio.pid '^pw-loopback -n protohdmicapture-audio ' "audio loopback"
     # A new session starts from what WirePlumber restores for the stream,
     # not from the previous session's file; only the lock holder may clear it.
     rm -f "$RUN_DIR/audio.state"
@@ -253,10 +285,10 @@ start_audio() {
     stop_audio
     # -C capture source, -P playback sink (omitted = follow default sink),
     # --latency = loopback buffer, --delay = deliberate offset to match video.
-    pw-loopback -n protohdmicapture-audio \
+    ( _close_locks; exec pw-loopback -n protohdmicapture-audio \
         -C "$SRC" ${SINK:+-P "$SINK"} \
         --latency "$LAT_MS" \
-        --delay "$DELAY" >/dev/null 2>&1 &
+        --delay "$DELAY" ) >/dev/null 2>&1 &
     LOOPBACK_PID=$!
     echo "$LOOPBACK_PID" >"$RUN_DIR/audio.pid"
     printf 'DELAY=%s\nLAT_MS=%s\nSRC=%s\n' "$DELAY" "$LAT_MS" "$SRC" >"$RUN_DIR/audio.env"
@@ -307,8 +339,7 @@ REAPER_PID=""
 arm_reaper() {
     [ -n "$PLAYER_PID" ] && [ -z "$REAPER_PID" ] || return 0
     (
-        exec {VIDEO_LOCK}>&-
-        [ -z "$AUDIO_LOCK" ] || exec {AUDIO_LOCK}>&-
+        _close_locks
         trap 'kill "$s" 2>/dev/null; exit' TERM
         sleep 2 & s=$!; wait "$s"
         kill -KILL "$PLAYER_PID" 2>/dev/null \
@@ -343,8 +374,7 @@ run_player() {
     # this session's lock fds, and nothing here waits on it or checks it.
     if [ "$DEBUG" = window ] && [ "$MODE" = play ]; then
         (
-            exec {VIDEO_LOCK}>&-
-            [ -z "$AUDIO_LOCK" ] || exec {AUDIO_LOCK}>&-
+            _close_locks
             desktop_open_terminal protohdmicapture.debug "protoHDMIcapture debug" "$HERE/view.sh" --dashboard \
                 || warn "DEBUG=window: no terminal found for the dashboard; the log still runs"
         )
@@ -353,15 +383,13 @@ run_player() {
     # helper closes the lock fds it inherited: it can outlive a short-lived
     # player by a moment, and must not keep a relaunch locked out.
     (
-        exec {VIDEO_LOCK}>&-
-        [ -z "$AUDIO_LOCK" ] || exec {AUDIO_LOCK}>&-
+        _close_locks
         if desktop_place_window "$PLAYER_PID" "$WINDOW" "$WINDOW_SIZE"; then info "$DESKTOP_MSG"
         else dbg "$DESKTOP_MSG"; fi
     ) &
     if [ "$DEBUG" != off ]; then
         (
-            exec {VIDEO_LOCK}>&-
-            [ -z "$AUDIO_LOCK" ] || exec {AUDIO_LOCK}>&-
+            _close_locks
             debug_after_start "$PLAYER_PID"
         ) &
         DEBUG_JOB=$!
@@ -598,8 +626,8 @@ mpv)
     # an overlay draw to every frame. Not wanted in a latency path.
     # The VIDIOC_QBUF line is libavdevice's noisy v4l2 teardown on exit; it is
     # harmless (verified: no re-enumeration) and only that exact line is dropped.
-    MANGOHUD=0 mpv "${args[@]}" \
-        2> >(grep -vE 'ioctl\(VIDIOC_QBUF\): Inappropriate ioctl for device' >&2) &
+    ( _close_locks; MANGOHUD=0 exec mpv "${args[@]}" ) \
+        2> >(_close_locks; exec grep -vE 'ioctl\(VIDIOC_QBUF\): Inappropriate ioctl for device' >&2) &
     run_player $!
     ;;
 
@@ -635,9 +663,9 @@ gst)
     if [ "$DEBUG" != off ]; then
         # Element warnings, source and sink at info, QoS (late/dropped
         # buffers) at debug; -v prints the negotiated caps once.
-        GST_DEBUG="2,v4l2src:4,waylandsink:4,qos:5" GST_DEBUG_NO_COLOR=1 gst-launch-1.0 -v -e $PIPE &
+        ( _close_locks; GST_DEBUG="2,v4l2src:4,waylandsink:4,qos:5" GST_DEBUG_NO_COLOR=1 exec gst-launch-1.0 -v -e $PIPE ) &
     else
-        gst-launch-1.0 -e $PIPE &
+        ( _close_locks; exec gst-launch-1.0 -e $PIPE ) &
     fi
     run_player $!
     ;;
@@ -663,9 +691,9 @@ ffplay)
     info "ffplay ${args[*]} $DEV"
     if [ "$DEBUG" != off ]; then
         args=("${args[@]/warning/verbose}" -stats)
-        ffplay "${args[@]}" "$DEV" 2> >(debug_ffplay_filter >&2) &
+        ( _close_locks; exec ffplay "${args[@]}" "$DEV" ) 2> >(_close_locks; debug_ffplay_filter >&2) &
     else
-        ffplay "${args[@]}" "$DEV" &
+        ( _close_locks; exec ffplay "${args[@]}" "$DEV" ) &
     fi
     run_player $!
     ;;

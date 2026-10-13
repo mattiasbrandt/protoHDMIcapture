@@ -10,7 +10,11 @@ Rules for reviewing a change to this repo. Mechanical ones are enforced by
 2. **Signal only processes you own.** Keep `$!` of what you start, or verify
    ownership (its parent is your child) before signalling; a PID read from
    the shared run directory may belong to another session. See
-   [`docs/run-dir.md`](docs/run-dir.md).
+   [`docs/run-dir.md`](docs/run-dir.md). One exception: an orphan a killed
+   session left running (`view.sh` `kill_orphan`), signalled only while
+   holding the lock its session held, and only if it is the user's own and
+   its command line is ours. Children close the lock fds (`_close_locks`),
+   process substitutions included, so an orphan never holds a lock.
 3. **A setting whose empty value means something carries the `empty` flag**
    in `lib/settings.sh` (`IPC=` disables the socket). Without it, an empty
    value counts as unset and falls back to the saved setting, then the
