@@ -433,8 +433,13 @@ stop_player() {
 SYNC_REQUESTED=""
 apply_sync_request() {
     local want
-    want=$(sed -n 's/^DELAY=//p' "$RUN_DIR/audio.request" 2>/dev/null)
-    rm -f "$RUN_DIR/audio.request"
+    # Claimed by a rename before reading, so a request written meanwhile is
+    # the next one, not deleted unread. None left: an earlier signal already
+    # served the newest request.
+    mv -f "$RUN_DIR/audio.request" "$RUN_DIR/audio.request.claimed" 2>/dev/null \
+        || { dbg "audio sync: no request waiting"; return; }
+    want=$(sed -n 's/^DELAY=//p' "$RUN_DIR/audio.request.claimed")
+    rm -f "$RUN_DIR/audio.request.claimed"
     if ! [[ "$want" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
         warn "audio sync request ignored: '$want' is not a delay in seconds"; return
     fi

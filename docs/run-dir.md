@@ -9,8 +9,8 @@ contract; change a writer or a reader, update the row.
 | `video.lock` | `view.sh` (flock, held while a player runs) | `view.sh`, setup sync stage (probe only) | one video window at a time |
 | `video.pid` | `view.sh` `run_player` | `view.sh` (second launch focuses it), `--place-window`, dashboard, setup sync readiness | PID of the **player** (mpv/gst/ffplay), not of `view.sh` |
 | `audio.lock` | `view.sh` (flock, held while pw-loopback runs) | `view.sh`, setup sync stage (probe only) | one audio loopback at a time |
-| `audio.pid` / `audio.env` | `view.sh` `start_audio` (removed by `stop_audio`) | dashboard, `debug_after_start` | loopback PID; `DELAY`, `LAT_MS`, `SRC` |
-| `audio.request` | mpv script (overlay's ctrl/alt −/+), then USR1 to `view.sh` (its parent, PID passed as a script option) | `view.sh` `apply_sync_request`, which removes it | the wanted `DELAY`; `view.sh` restarts its own loopback with it |
+| `audio.pid` / `audio.env` | `view.sh` `start_audio` (removed by `stop_audio`) | dashboard, `debug_after_start`, mpv script (`audio.env`: confirms a sync change) | loopback PID; `DELAY`, `LAT_MS`, `SRC` |
+| `audio.request` | mpv script (overlay's ctrl/alt −/+), written as `.tmp` and renamed, then USR1 to `view.sh` (its parent, PID passed as a script option and checked against mpv's own parent first) | `view.sh` `apply_sync_request`, which claims it by renaming to `.claimed`, then removes it | the wanted `DELAY`; `view.sh` restarts its own loopback with it |
 | `audio.ctl.lock` | `lib/audio.sh` (flock, held while one control runs) | `view.sh --audio`, `audio_state_apply` | one mute/volume change or restore at a time |
 | `audio.state` | `view.sh --audio` (overlay's m, 9, 0); cleared by `take_audio_lock` at a session's start | `start_audio` (`audio_state_apply`) | the session's loopback `VOLUME` and `MUTE`, re-applied to a restarted loopback; written via `audio.state.tmp` and renamed |
 | `backend`, `ipc.path` | `view.sh` `run_player` | dashboard | which player; mpv IPC socket (absent for gst/ffplay) |

@@ -38,6 +38,16 @@ local function helper(...)
                               playback_only = false, capture_stderr = true }, function() end)
 end
 
+-- Why a subprocess failed. error_string is "" (not nil) after a plain
+-- non-zero exit, so it cannot be the fallback in an `or` chain.
+local function why_failed(r)
+    if not r then return "could not be started" end
+    local err = (r.stderr or ""):gsub("%s+$", "")
+    if err ~= "" then return err end
+    if r.error_string and r.error_string ~= "" then return r.error_string end
+    return "exit " .. tostring(r.status)
+end
+
 local function set(prop, value)
     local ok, err = mp.set_property(prop, value)
     if not ok then msg.error("cannot set " .. prop .. "=" .. tostring(value) .. ": " .. tostring(err)) end
@@ -108,6 +118,7 @@ local function apply_levels(value)
         if f.label == "phc-levels" then
             local _, err = mp.command_native({ "vf", "remove", "@phc-levels" })
             if err then msg.error("cannot remove the levels filter: " .. err); return end
+            levels = "auto"   -- what the frames are now, should the add below fail
         end
     end
     if value ~= "auto" then
@@ -132,15 +143,16 @@ local function audio_ctl(action, ...)
     local args = { opts.helper, "--audio", action, ... }
     mp.command_native_async({ name = "subprocess", args = args, playback_only = false,
                               capture_stdout = true, capture_stderr = true }, function(_, r)
-        if r and r.status == 0 then
-            audio.volume = tonumber(r.stdout:match("volume=(%d+)"))
+        local vol = r and r.status == 0 and tonumber((r.stdout or ""):match("volume=(%d+)"))
+        if vol then
+            audio.volume = vol
             audio.mute = r.stdout:match("mute=(%a+)") == "yes"
             audio.error = nil
             if action ~= "status" then
                 mp.osd_message(audio.mute and "Audio muted" or ("Volume " .. audio.volume .. "%"), 1.5)
             end
         else
-            audio.error = ((r and r.stderr ~= "" and r.stderr) or (r and r.error_string) or "failed"):gsub("%s+$", "")
+            audio.error = (r and r.status == 0) and "unexpected reply from view.sh --audio" or why_failed(r)
             msg.error("audio: " .. audio.error)
             mp.osd_message("Audio: " .. audio.error, 3)
         end
@@ -171,18 +183,36 @@ local function sync_confirm()
     render_page()
 end
 
+-- Is `owner` still mpv's parent? If view.sh died without its EXIT trap,
+-- its PID may belong to another process by now, and USR1 would kill it.
+local function owner_is_parent()
+    local f = io.open("/proc/" .. tostring(mp.get_property_number("pid", -1)) .. "/stat", "r")
+    if not f then return false end
+    local stat = f:read("*l") or ""
+    f:close()
+    -- "pid (comm) state ppid ...": comm may hold spaces or ")", so read after the last ")".
+    local ppid = stat:match(".*%)%s+%S+%s+(%d+)")
+    return ppid ~= nil and ppid == opts.owner
+end
+
+local function sync_fail(text)
+    msg.error("audio sync: " .. text)
+    mp.osd_message("Audio sync: " .. text, 3)
+end
+
 local function sync_send()
     sync_timer = nil
-    local f, err = io.open(opts.rundir .. "/audio.request", "w")
-    if not f then msg.error("audio sync: " .. tostring(err)); mp.osd_message("Audio sync: " .. tostring(err), 3); return end
+    if not owner_is_parent() then sync_fail("view.sh is gone; not signalling PID " .. opts.owner); return end
+    -- Written whole and renamed, so view.sh never reads half a request.
+    local path = opts.rundir .. "/audio.request"
+    local f, err = io.open(path .. ".tmp", "w")
+    if not f then sync_fail(tostring(err)); return end
     f:write(string.format("DELAY=%.3f\n", delay)); f:close()
+    local ok, rerr = os.rename(path .. ".tmp", path)
+    if not ok then sync_fail(tostring(rerr)); return end
     local r = mp.command_native({ name = "subprocess", args = { "kill", "-USR1", opts.owner },
                                   playback_only = false, capture_stderr = true })
-    if r.status ~= 0 then
-        msg.error("audio sync: cannot signal view.sh (" .. opts.owner .. "): " .. (r.stderr or ""))
-        mp.osd_message("Audio sync: view.sh is not reachable", 3)
-        return
-    end
+    if not r or r.status ~= 0 then sync_fail("cannot signal view.sh: " .. why_failed(r)); return end
     -- start_audio waits half a second to verify the new link.
     mp.add_timeout(1.2, sync_confirm)
 end
@@ -368,11 +398,11 @@ local function save()
     for _, kv in ipairs(ch) do args[#args + 1] = kv end
     local r = mp.command_native({ name = "subprocess", args = args, playback_only = false,
                                   capture_stdout = true, capture_stderr = true })
-    if r.status == 0 then
+    if r and r.status == 0 then
         baseline = current_settings()
         mp.osd_message("Saved: " .. table.concat(ch, " "), 3)
     else
-        local why = (r.stderr ~= "" and r.stderr or r.error_string or ("exit " .. tostring(r.status))):gsub("%s+$", "")
+        local why = why_failed(r)
         msg.error("save failed: " .. why)
         mp.osd_message("Save failed: " .. why, 5)
     end
