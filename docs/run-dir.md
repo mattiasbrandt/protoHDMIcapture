@@ -11,7 +11,8 @@ contract; change a writer or a reader, update the row.
 | `audio.lock` | `view.sh` (flock, held while pw-loopback runs) | `view.sh`, setup sync stage (probe only) | one audio loopback at a time |
 | `audio.pid` / `audio.env` | `view.sh` `start_audio` (removed by `stop_audio`) | dashboard, `debug_after_start` | loopback PID; `DELAY`, `LAT_MS`, `SRC` |
 | `audio.request` | mpv script (overlay's ctrl/alt −/+), then USR1 to `view.sh` (its parent, PID passed as a script option) | `view.sh` `apply_sync_request`, which removes it | the wanted `DELAY`; `view.sh` restarts its own loopback with it |
-| `audio.state` | `view.sh --audio` (overlay's m, 9, 0); cleared by `take_audio_lock` at a session's start | `start_audio` (`audio_state_apply`) | the session's loopback `VOLUME` and `MUTE`, re-applied to a restarted loopback |
+| `audio.ctl.lock` | `lib/audio.sh` (flock, held while one control runs) | `view.sh --audio`, `audio_state_apply` | one mute/volume change or restore at a time |
+| `audio.state` | `view.sh --audio` (overlay's m, 9, 0); cleared by `take_audio_lock` at a session's start | `start_audio` (`audio_state_apply`) | the session's loopback `VOLUME` and `MUTE`, re-applied to a restarted loopback; written via `audio.state.tmp` and renamed |
 | `backend`, `ipc.path` | `view.sh` `run_player` | dashboard | which player; mpv IPC socket (absent for gst/ffplay) |
 | `window.mode`, `window.size` | `view.sh` `run_player`, `--place-window` | `--place-window` | current `WINDOW` and `WINDOW_SIZE` for the f key |
 | `player.quit` | mpv script `shutdown` event (via `quitfile`) | `view.sh` after the player exits | mpv began a normal quit; a later signal death is its teardown bug |

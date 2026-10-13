@@ -7,6 +7,10 @@
 # The wanted state is kept in $RUN_DIR/audio.state, so a loopback restarted
 # for an audio sync change comes back with it (audio_state_apply).
 #
+# The overlay starts helpers without waiting, so two can run at once: each
+# reads, changes and records under audio.ctl.lock, or a volume change can
+# write back the mute state another just replaced.
+#
 #   audio_stream_id          the stream's sink-input index, or nothing
 #   audio_status ID          "volume=N mute=yes|no"
 #   audio_control ACTION     status | mute | volume +N | volume -N; prints
@@ -27,7 +31,22 @@ audio_status() {
         END { if (v == "") exit 1; print "volume=" v " mute=" m }'
 }
 
-audio_control() {
+# _audio_locked FN ARGS...: run FN holding audio.ctl.lock.
+_audio_locked() {
+    local lk rc
+    exec {lk}>>"$RUN_DIR/audio.ctl.lock" || { echo "cannot open $RUN_DIR/audio.ctl.lock" >&2; return 1; }
+    if ! flock -w 5 "$lk"; then
+        exec {lk}>&-
+        echo "audio controls are busy (audio.ctl.lock held for 5 s)" >&2
+        return 1
+    fi
+    "$@"; rc=$?
+    exec {lk}>&-
+    return "$rc"
+}
+
+audio_control() { _audio_locked _audio_control "$@"; }
+_audio_control() {
     local id st vol mute
     id=$(audio_stream_id)
     [ -n "$id" ] || { echo "no audio loopback is running" >&2; return 1; }
@@ -45,7 +64,10 @@ audio_control() {
             pactl set-sink-input-volume "$id" "$vol%" || { echo "pactl could not set the volume" >&2; return 1; } ;;
         *) echo "audio: status | mute | volume +N | volume -N" >&2; return 2 ;;
     esac
-    printf 'VOLUME=%s\nMUTE=%s\n' "$vol" "$mute" >"$RUN_DIR/audio.state"
+    # Written whole and renamed: a reader never sees half of it.
+    printf 'VOLUME=%s\nMUTE=%s\n' "$vol" "$mute" >"$RUN_DIR/audio.state.tmp" \
+        && mv -f "$RUN_DIR/audio.state.tmp" "$RUN_DIR/audio.state" \
+        || { echo "cannot write $RUN_DIR/audio.state" >&2; return 1; }
     echo "volume=$vol mute=$mute"
 }
 
@@ -54,7 +76,8 @@ audio_control() {
 # the volume from one session to the next); applying it here keeps the
 # restart independent of that. The stream appears a moment after
 # pw-loopback starts.
-audio_state_apply() {
+audio_state_apply() { _audio_locked _audio_state_apply; }
+_audio_state_apply() {
     [ -r "$RUN_DIR/audio.state" ] || return 0
     local vol mute id _
     vol=$(sed -n 's/^VOLUME=//p' "$RUN_DIR/audio.state")
