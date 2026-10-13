@@ -268,6 +268,11 @@ fi
 if [ -n "${VIDEO_LOCK:-}" ]; then
     dbg "video lock: held"
     kill_orphan video.pid '^(mpv .*--title=protoHDMIcapture|ffplay .*-window_title protoHDMIcapture|gst-launch-1\.0 .*v4l2src device=)' player
+    # A refresh switch a killed session never undid (only a video lock
+    # holder switches, so with the lock held it is not a live session's).
+    if [ -e "$RUN_DIR/refresh.restore" ]; then
+        if desktop_refresh_recover "$RUN_DIR/refresh.restore"; then info "$DESKTOP_MSG"; else warn "$DESKTOP_MSG"; fi
+    fi
 else
     dbg "video lock: not taken (tune mode)"
 fi
@@ -456,14 +461,14 @@ trap 'SYNC_REQUESTED=1' USR1
 trap arm_reaper USR2
 
 DEBUG_JOB=""
-trap 'stop_player; stop_audio; desktop_refresh_restore; [ -z "$DEBUG_JOB" ] || kill "$DEBUG_JOB" 2>/dev/null' EXIT
+trap 'stop_player; stop_audio; desktop_refresh_restore || warn "$DESKTOP_MSG"; [ -z "$DEBUG_JOB" ] || kill "$DEBUG_JOB" 2>/dev/null' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # --- display refresh matching ---------------------------------------------
 start_refresh() {
     [ "$REFRESH" = "match" ] || return 0
-    if desktop_refresh_match "$FPS"; then info "$DESKTOP_MSG"; else warn "$DESKTOP_MSG"; fi
+    if desktop_refresh_match "$FPS" "$RUN_DIR/refresh.restore"; then info "$DESKTOP_MSG"; else warn "$DESKTOP_MSG"; fi
     dbg "refresh: $DESKTOP_MSG"
 }
 

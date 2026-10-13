@@ -5,8 +5,14 @@
 #
 #   desktop_notify URGENCY SUMMARY [BODY]  desktop notification; no-op without notify-send
 #   desktop_focus_pid PID                  raise that process's window; 1 if this desktop can't
-#   desktop_refresh_match FPS              switch the focused monitor to its mode nearest FPS
-#   desktop_refresh_restore                undo desktop_refresh_match; safe to call twice
+#   desktop_refresh_match FPS RECORD       switch the focused monitor to its mode nearest FPS;
+#                                          RECORD (a file) keeps the way back until restored
+#   desktop_refresh_restore                undo desktop_refresh_match; safe to call twice;
+#                                          1 (DESKTOP_MSG says why) if the undo failed
+#   desktop_refresh_recover RECORD         a RECORD left by a session that was killed:
+#                                          restore that monitor if it is still at the
+#                                          rate the session set, else leave it; 1 if it
+#                                          could not tell (DESKTOP_MSG says what it did)
 #   desktop_place_window PID WINDOW SIZE   shape the player's window where its own flags
 #                                          cannot (size, border); 1 if nothing was done
 #   desktop_can FEATURE                    0 if this adapter implements refresh_match or
@@ -43,6 +49,7 @@ desktop_notify() {
 }
 
 _DESKTOP_RESTORE=""
+_DESKTOP_RECORD=""
 
 # Any desktop: the default-terminal spec first, then $TERMINAL, then Debian's
 # alternative. Detached with setsid so it outlives the caller, and so whether
@@ -137,18 +144,47 @@ hyprland)
             DESKTOP_MSG="display: $name already at ${cur}Hz, nothing to change"
             return 0
         fi
+        # Recorded before the switch: a kill between the two must not lose
+        # the way back (desktop_refresh_recover sorts out which it was).
+        printf '%s|%s|%s|%s\n' "$name" "$chosen" "$cur" "$restore" >"$2"
         if ! hyprctl eval "$target" >/dev/null 2>&1; then
+            rm -f "$2"
             DESKTOP_MSG="refresh switch failed; leaving the display alone"
             return 1
         fi
         _DESKTOP_RESTORE="$restore"
+        _DESKTOP_RECORD="$2"
         DESKTOP_MSG="display: $name ${cur}Hz -> ${chosen}Hz (restored on exit)"
     }
 
     desktop_refresh_restore() {
         [ -n "$_DESKTOP_RESTORE" ] || return 0
-        hyprctl eval "$_DESKTOP_RESTORE" >/dev/null 2>&1
+        local restore="$_DESKTOP_RESTORE"
         _DESKTOP_RESTORE=""
+        rm -f "$_DESKTOP_RECORD"
+        hyprctl eval "$restore" >/dev/null 2>&1 && return 0
+        DESKTOP_MSG="could not restore the display's refresh rate; run: hyprctl eval '$restore'"
+        return 1
+    }
+
+    desktop_refresh_recover() {
+        local name set was restore now
+        IFS='|' read -r name set was restore <"$1" || { rm -f "$1"; DESKTOP_MSG="unreadable $1; dropped"; return 1; }
+        rm -f "$1"
+        now=$(hyprctl monitors -j 2>/dev/null | jq -r --arg n "$name" '.[] | select(.name == $n) | .refreshRate' 2>/dev/null)
+        if [ -z "$now" ]; then
+            DESKTOP_MSG="a killed session left $name at ${set}Hz, but its rate cannot be read now; to restore: hyprctl eval '$restore'"
+            return 1
+        fi
+        if ! awk -v a="$now" -v b="$set" 'BEGIN { exit !((a - b) ^ 2 < 0.0001) }'; then
+            DESKTOP_MSG="display: $name is at ${now}Hz, not the ${set}Hz a killed session set; left as it is"
+            return 0
+        fi
+        if ! hyprctl eval "$restore" >/dev/null 2>&1; then
+            DESKTOP_MSG="could not restore $name to ${was}Hz after a killed session; run: hyprctl eval '$restore'"
+            return 1
+        fi
+        DESKTOP_MSG="display: $name ${set}Hz -> ${was}Hz, restored after a killed session"
     }
     ;;
 generic)
@@ -166,6 +202,12 @@ generic)
         return 1
     }
     desktop_refresh_restore() { :; }
+    # Only the hyprland adapter switches rates, so a record here came from a
+    # session under another adapter (DESKTOP=generic forced); leave it.
+    desktop_refresh_recover() {
+        DESKTOP_MSG="a killed session's refresh record is left for the hyprland adapter: $1"
+        return 1
+    }
     ;;
 *)
     printf '!! unknown DESKTOP=%s (hyprland | generic)\n' "$DESKTOP" >&2
