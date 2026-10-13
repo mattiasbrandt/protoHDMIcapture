@@ -65,6 +65,10 @@ case "${1:-}" in
     # only the settings the overlay changes live.
     shift
     [ "$#" -gt 0 ] || { echo "--save KEY=VALUE..." >&2; exit 2; }
+    # The wizard's test feed reads a preview config that the wizard deletes;
+    # a save there would vanish.
+    [ -z "${PROTOHDMI_SETUP_CHILD:-}" ] \
+        || { echo "this is the wizard's test feed; change settings in the wizard" >&2; exit 1; }
     for _kv in "$@"; do
         [[ " WINDOW LEVELS SCALING BRIGHTNESS CONTRAST SATURATION GAMMA DELAY " == *" ${_kv%%=*} "* ]] \
             || { echo "--save: ${_kv%%=*} is not a setting the overlay saves" >&2; exit 2; }
@@ -214,6 +218,7 @@ take_video_lock() {
         info "already running (pid ${pid:-unknown})"
         [ -t 1 ] || desktop_notify normal "protoHDMIcapture is already running"
     fi
+    [ -z "$OPEN_OVERLAY" ] || info "audio sync is in that window: ctrl -/+ (Tab shows it, w saves it)"
     exit 0
 }
 
