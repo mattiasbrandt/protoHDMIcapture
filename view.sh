@@ -345,7 +345,7 @@ run_player() {
         ) &
         DEBUG_JOB=$!
     fi
-    dbg "player: $BACKEND pid $PLAYER_PID, window $WINDOW${WINDOW_SIZE:+ ($WINDOW_SIZE)}"
+    dbg "player: $BACKEND pid $PLAYER_PID, window $WINDOW$([ "$WINDOW" = windowed ] && echo " ($WINDOW_SIZE)")"
     wait "$PLAYER_PID"
     local rc=$?
     dbg "player exited with status $rc"
