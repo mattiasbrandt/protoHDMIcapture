@@ -61,7 +61,7 @@ trap 'exit 143' TERM HUP
 # The keys this wizard decides. Anything else in the file (DELAY, LAT_MS, ...)
 # is carried over untouched.
 MANAGED=(CARD_SERIAL DEV IGNORE_CARDS_RE FMT RES FPS AUDIO SRC WINDOW WINDOW_SIZE
-         REFRESH BACKEND SCALING DELAY FULLSCREEN)
+         REFRESH BACKEND SCALING DELAY DEBUG FULLSCREEN)
 
 # CUR: what the file says now. NEW: what it will say; "" = not in the file.
 declare -A CUR NEW
@@ -80,7 +80,7 @@ default_of() {
         FMT) echo yuyv422 ;; RES) echo 1920x1080 ;; FPS) echo 60 ;;
         AUDIO) echo loopback ;; WINDOW) echo fullscreen ;; WINDOW_SIZE) echo 1280x720 ;;
         REFRESH) echo keep ;; BACKEND) echo mpv ;; SCALING) echo balanced ;;
-        DELAY) echo 0.05 ;;
+        DELAY) echo 0.05 ;; DEBUG) echo off ;;
         *) echo "" ;;
     esac
 }
@@ -121,7 +121,7 @@ run_child() {
 # --- stage list --------------------------------------------------------------
 STAGES=(welcome card usb format signal audio display)
 desktop_can refresh_match && STAGES+=(refresh)
-STAGES+=(backend sync review)
+STAGES+=(backend sync debug review)
 [ -z "$FROM_LAUNCHER$THEN_PLAY" ] && STAGES+=(test)
 TOTAL_STAGES=$(( ${#STAGES[@]} - 1 ))   # the welcome screen is not numbered
 
@@ -538,6 +538,19 @@ stage_sync() {
     fi
     center ""
     pause
+}
+
+stage_debug() {
+    stage "🐞 Troubleshooting"
+    say "Normally off. Turn it on while chasing stutter, drops or audio drift;"
+    say "./view.sh --debug does the same for a single run."
+    center ""
+    local pick
+    choose pick "Debug output" "$(cur DEBUG)" \
+        "off|Off|recommended" \
+        "log|Log · every decision, verbose player output, a perf line every 5 s" \
+        "window|Log + live dashboard in its own terminal" || exit 1
+    if [ "$pick" = off ]; then NEW[DEBUG]=""; else NEW[DEBUG]="$pick"; fi
 }
 
 CHANGED=0
