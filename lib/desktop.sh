@@ -14,6 +14,9 @@
 #   desktop_outputs                        "name WxH@Hz [focused]" per monitor, if known
 #   desktop_active_window / desktop_focus_window ID
 #                                          remember and restore which window has focus
+#   desktop_open_terminal APPID TITLE CMD...
+#                                          run CMD in a new terminal window, detached;
+#                                          1 if no terminal could be found
 #
 # desktop_place_window and desktop_refresh_match leave a one-line report in
 # DESKTOP_MSG. desktop_refresh_match returns 0 when
@@ -39,6 +42,22 @@ desktop_notify() {
 }
 
 _DESKTOP_RESTORE=""
+
+# Any desktop: the default-terminal spec first, then $TERMINAL, then Debian's
+# alternative. Detached with setsid so it outlives the caller, and so whether
+# the terminal command blocks until its window closes does not matter.
+desktop_open_terminal() {
+    local app="$1" title="$2"; shift 2
+    if command -v xdg-terminal-exec >/dev/null 2>&1; then
+        setsid -f xdg-terminal-exec --app-id="$app" --title="$title" -- "$@" >/dev/null 2>&1
+    elif [ -n "${TERMINAL:-}" ] && command -v "$TERMINAL" >/dev/null 2>&1; then
+        setsid -f "$TERMINAL" -e "$@" >/dev/null 2>&1
+    elif command -v x-terminal-emulator >/dev/null 2>&1; then
+        setsid -f x-terminal-emulator -e "$@" >/dev/null 2>&1
+    else
+        return 1
+    fi
+}
 
 case "$DESKTOP" in
 hyprland)

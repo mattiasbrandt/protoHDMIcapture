@@ -37,17 +37,8 @@ mkdir -p "$RUN_DIR"
 # and blocking on that lock returns however it ends, closed window included.
 run_setup_in_terminal() {
     rm -f "$RUN_DIR/setup.done" "$RUN_DIR/setup.pid"
-    local -a cmd=("$HERE/view.sh" --setup --from-launcher)
-    if command -v xdg-terminal-exec >/dev/null 2>&1; then
-        setsid -f xdg-terminal-exec --app-id=protohdmicapture.setup \
-            --title="protoHDMIcapture setup" -- "${cmd[@]}" >/dev/null 2>&1
-    elif [ -n "${TERMINAL:-}" ] && command -v "$TERMINAL" >/dev/null 2>&1; then
-        setsid -f "$TERMINAL" -e "${cmd[@]}" >/dev/null 2>&1
-    elif command -v x-terminal-emulator >/dev/null 2>&1; then
-        setsid -f x-terminal-emulator -e "${cmd[@]}" >/dev/null 2>&1
-    else
-        return 1
-    fi
+    desktop_open_terminal protohdmicapture.setup "protoHDMIcapture setup" \
+        "$HERE/view.sh" --setup --from-launcher || return 1
     local i
     for i in $(seq 150); do
         [ -s "$RUN_DIR/setup.pid" ] && break

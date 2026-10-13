@@ -36,12 +36,16 @@ if [ "${1:-}" = "--setup" ]; then
     shift
     exec "$HERE/lib/setup.sh" "$@"
 fi
+# --dashboard is the live debug window; like --setup it needs no config.
+[ "${1:-}" = "--dashboard" ] && exec "$HERE/lib/dashboard.sh"
 MODE=play
+DEBUG_FLAG=""
 for _arg in "$@"; do
     case "$_arg" in
         --tune) MODE=tune ;;
+        --debug) DEBUG_FLAG=1 ;;
         -h|--help)
-            echo "usage: ./view.sh [--setup | --tune]   (knobs: env vars or the config file)"
+            echo "usage: ./view.sh [--setup | --tune | --debug]   (knobs: env vars or the config file)"
             exit 0 ;;
         *) echo "view.sh: unknown option $_arg (try --help)" >&2; exit 2 ;;
     esac
@@ -130,7 +134,9 @@ REFRESH="${REFRESH:-keep}"      # keep | match
 GST_IO_MODE="${GST_IO_MODE:-mmap}"   # mmap | dmabuf  (dmabuf is zero-copy but not all cards do it)
 # off | log = every decision, the negotiated format, verbose player output and
 # a perf line every 5 s, on screen and in $XDG_RUNTIME_DIR/protohdmicapture/debug.log
-DEBUG="${DEBUG:-off}"           # off | log
+# window = log, plus a live dashboard in its own terminal. --debug = window.
+DEBUG="${DEBUG:-off}"           # off | log | window
+[ -z "$DEBUG_FLAG" ] || DEBUG=window
 
 # Exit status 3 means "failed, and the reason was already reported": printed
 # on a terminal, and also sent as a desktop notification when there is none
@@ -214,7 +220,13 @@ fi
 [ "$AUDIO" != "mpv" ] || [ "$BACKEND" = "mpv" ] \
     || die "AUDIO=mpv needs BACKEND=mpv; use AUDIO=loopback with $BACKEND"
 
-case "$DEBUG" in off|log) ;; *) die "unknown DEBUG=$DEBUG (off | log)" ;; esac
+case "$DEBUG" in off|log|window) ;; *) die "unknown DEBUG=$DEBUG (off | log | window)" ;; esac
+# The dashboard reads mpv over its IPC socket; with IPC disabled, use a
+# private one for this session rather than showing no numbers.
+if [ "$DEBUG" = window ] && [ "$BACKEND" = mpv ] && [ -z "$IPC" ]; then
+    IPC="$RUN_DIR/mpv.sock"
+    warn "IPC is disabled; the debug window uses a private socket for this session ($IPC)"
+fi
 if [ "$DEBUG" != off ] && [ "$MODE" = play ]; then
     debug_tee "$RUN_DIR/debug.log"
     dbg "protoHDMIcapture $(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo '?') · desktop $DESKTOP · log $RUN_DIR/debug.log"
@@ -287,6 +299,18 @@ PLAYER_PID=""
 run_player() {
     PLAYER_PID=$1
     echo "$PLAYER_PID" >"$RUN_DIR/video.pid"
+    echo "$BACKEND" >"$RUN_DIR/backend"
+    if [ "$BACKEND" = mpv ]; then echo "$IPC" >"$RUN_DIR/ipc.path"; else rm -f "$RUN_DIR/ipc.path"; fi
+    # The dashboard is fire-and-forget: in its own terminal, holding none of
+    # this session's lock fds, and nothing here waits on it or checks it.
+    if [ "$DEBUG" = window ] && [ "$MODE" = play ]; then
+        (
+            exec {VIDEO_LOCK}>&-
+            [ -z "$AUDIO_LOCK" ] || exec {AUDIO_LOCK}>&-
+            desktop_open_terminal protohdmicapture.debug "protoHDMIcapture debug" "$HERE/view.sh" --dashboard \
+                || warn "DEBUG=window: no terminal found for the dashboard; the log still runs"
+        )
+    fi
     # Shape the window once it maps, without holding up the wait below. The
     # helper closes the lock fds it inherited: it can outlive a short-lived
     # player by a moment, and must not keep a relaunch locked out.
