@@ -115,7 +115,10 @@ run_child() {
     local -a envargs=()
     local k
     for k in "${MANAGED[@]}"; do envargs+=(-u "$k"); done
-    $ex env "${envargs[@]}" CONFIG_FILE="$PREVIEW" PROTOHDMI_SETUP_CHILD=1 "$@"
+    # Without setup.lock: a child that outlives the wizard (the dashboard
+    # terminal a DEBUG=window feed opens) would hold it, and launch.sh,
+    # blocking on it for "the wizard ended", would never start the feed.
+    $ex env "${envargs[@]}" CONFIG_FILE="$PREVIEW" PROTOHDMI_SETUP_CHILD=1 "$@" {SETUP_LOCK}>&-
 }
 
 # --- stage list --------------------------------------------------------------
@@ -150,8 +153,8 @@ stage_welcome() {
         ui_warn "Set in your environment, and winning over the file: ${ENV_OVERRIDES[*]}"
     fi
     # What the feed it sets up will need (mpv, the loopback), plus ffmpeg
-    # for the signal check.
-    if ! preflight_check mpv loopback match off ffmpeg; then
+    # for the signal check and ps for the sync stage.
+    if ! preflight_check mpv loopback match off ffmpeg ps; then
         center ""
         ui_bad "Missing, needed before setup can go on:"
         ui_list "${PREFLIGHT_MISSING[@]}"

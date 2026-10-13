@@ -18,7 +18,7 @@
 declare -A _PF_PKG=(
     [v4l2-ctl]=v4l-utils [flock]=util-linux [mpv]=mpv [gst-launch-1.0]=gstreamer
     [ffplay]=ffmpeg [ffmpeg]=ffmpeg [pactl]=libpulse [pw-loopback]=pipewire-audio
-    [pw-link]=pipewire [jq]=jq [socat]=socat [python3]=python
+    [pw-link]=pipewire [jq]=jq [socat]=socat [python3]=python [ps]=procps-ng
 )
 
 _PF_ARCH=""; command -v pacman >/dev/null 2>&1 && _PF_ARCH=1
