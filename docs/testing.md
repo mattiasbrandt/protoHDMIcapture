@@ -37,6 +37,12 @@ against the card. These are the harness traps that produce false results.
   timeout rather than failing: a "hang" usually means one answer too few.
 - **Keys in the mpv window** go through its IPC socket:
   `echo '{"command":["keypress","f"]}' | socat - /tmp/mpv-protohdmicapture.sock`.
+- **See the overlay** by screenshotting the window with its OSD, then reading
+  the PNG: `{"command":["screenshot-to-file","/path/shot.png","window"]}`.
+  The MS2109 with no source streams black, so the panel reads cleanly.
+- **Volume persists** through WirePlumber by stream name: a test that
+  changes the loopback's volume leaves the next real session at it. Put it
+  back to 100 % before finishing.
 - **The menu path**: `gtk-launch protohdmicapture`. A stand-in
   `xdg-terminal-exec` first on `PATH` can run the wizard with scripted answers.
 
