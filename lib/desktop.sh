@@ -42,7 +42,7 @@ if [ -z "${DESKTOP:-}" ]; then
             DESKTOP=hyprland
         else
             DESKTOP=generic
-            DESKTOP_NOTE="Hyprland extras are off (window placement, focusing the running window, REFRESH=match): they need jq (Arch package: jq)"
+            DESKTOP_NOTE="Hyprland extras are off (window placement, focusing the running window, REFRESH=match): they need jq"
         fi
     else
         DESKTOP=generic

@@ -5,13 +5,15 @@
 # lib/setup.sh.
 #
 #   preflight_check BACKEND AUDIO REFRESH DEBUG [TOOL...]
-#       fills PREFLIGHT_MISSING (required, each "tool (Arch package: pkg)")
+#       fills PREFLIGHT_MISSING (required, each the tool, plus its package
+#       on Arch)
 #       and PREFLIGHT_OFF (extras, each "what is off, and why"); 1 if
 #       anything required is missing. TOOL...: more required tools (the
 #       wizard's ffmpeg).
 #
 # Required stops a run; an extra only turns a feature off. Package names are
-# Arch's, from `pacman -Qo` (2026-10-13); elsewhere the tool name is the hint.
+# Arch's, from `pacman -Qo` (2026-10-13), and shown only where pacman is;
+# elsewhere the tool name is the hint.
 
 declare -A _PF_PKG=(
     [v4l2-ctl]=v4l-utils [flock]=util-linux [mpv]=mpv [gst-launch-1.0]=gstreamer
@@ -19,9 +21,12 @@ declare -A _PF_PKG=(
     [pw-link]=pipewire [jq]=jq [socat]=socat [python3]=python
 )
 
+_PF_ARCH=""; command -v pacman >/dev/null 2>&1 && _PF_ARCH=1
+_pf_pkg() { [ -n "$_PF_ARCH" ] && [ -n "${_PF_PKG[$1]:-}" ] && printf ' (Arch package: %s)' "${_PF_PKG[$1]}"; }
+
 _pf_need() {
     command -v "$1" >/dev/null 2>&1 && return 0
-    PREFLIGHT_MISSING+=("$1${_PF_PKG[$1]:+ (Arch package: ${_PF_PKG[$1]})}")
+    PREFLIGHT_MISSING+=("$1$(_pf_pkg "$1")")
 }
 
 preflight_check() {
@@ -49,10 +54,10 @@ preflight_check() {
     # lib/desktop.sh fell back to its generic adapter for want of jq.
     [ -z "${DESKTOP_NOTE:-}" ] || PREFLIGHT_OFF+=("$DESKTOP_NOTE")
     if [ "$refresh" = match ] && [ "${DESKTOP:-}" = hyprland ] && ! command -v python3 >/dev/null 2>&1; then
-        PREFLIGHT_OFF+=("REFRESH=match is off: it needs python3 (Arch package: python)")
+        PREFLIGHT_OFF+=("REFRESH=match is off: it needs python3$(_pf_pkg python3)")
     fi
     if [ "$debug" = window ] && ! command -v socat >/dev/null 2>&1; then
-        PREFLIGHT_OFF+=("the dashboard shows no player numbers: it reads mpv through socat (Arch package: socat)")
+        PREFLIGHT_OFF+=("the dashboard shows no player numbers: it reads mpv through socat$(_pf_pkg socat)")
     fi
     [ "${#PREFLIGHT_MISSING[@]}" -eq 0 ]
 }

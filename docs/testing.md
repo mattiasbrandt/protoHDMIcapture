@@ -39,7 +39,9 @@ against the card. These are the harness traps that produce false results.
   printf '\n\n\n...y\n' | CONFIG_FILE=$scratch timeout 60 script -qec './view.sh --setup' out.ts >/dev/null
   ```
 
-  Count the answers against the stages actually shown. When the piped input
+  Count the answers against the stages actually shown. The card stage asks
+  once more for each other video device not yet ignored (a webcam), so the
+  count depends on what is plugged in and on `IGNORE_CARDS_RE`. When the piped input
   runs out the pty stays open, so the next prompt **blocks** until the
   timeout rather than failing: a "hang" usually means one answer too few.
 - **Keys in the mpv window** go through its IPC socket:

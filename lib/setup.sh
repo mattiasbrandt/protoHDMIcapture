@@ -157,6 +157,9 @@ stage_welcome() {
         ui_list "${PREFLIGHT_MISSING[@]}"
         center ""
         say "Install them, then run ./view.sh --setup again."
+        center ""
+        # From the menu this terminal closes when the wizard exits.
+        pause
         exit 1
     fi
     if [ "${#PREFLIGHT_OFF[@]}" -gt 0 ]; then
