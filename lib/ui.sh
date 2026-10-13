@@ -126,7 +126,7 @@ choose() {
     local rw=0
     for i in "${!values[@]}"; do
         local mark=""
-        [ "${values[$i]}" = "$default" ] && { mark=" ${GREEN}◂ current${RESET}"; def_i=$((i + 1)); }
+        [ "${values[$i]}" = "$default" ] && { mark=" ${GREEN}◂ ${CHOOSE_DEFAULT_LABEL:-current}${RESET}"; def_i=$((i + 1)); }
         [ -n "${tags[$i]}" ] && mark="$mark ${BLUE}◂ ${tags[$i]}${RESET}"
         local pad=$(( w - $(_ui_width "${labels[$i]}") ))
         rows+=("$(printf '%s%2d%s  %s%*s%s' "$BOLD" $((i + 1)) "$RESET" "${labels[$i]}" "$pad" '' "$mark")")

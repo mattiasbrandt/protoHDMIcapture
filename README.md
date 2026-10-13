@@ -44,25 +44,27 @@ audio. The tuning pair above is one of each, so it is allowed.
 1. **Capture card**: every capture device with its serial; the one with a
    known capture-chip USB id is recommended. Pinned by USB serial
    (`CARD_SERIAL`), or by USB port (`CARD_PORT`) when the card reports none.
-2. **USB link**: the chip the id implies (from its profile in
-   `capture-cards/`, with what is known about that card and its support
-   status, see [docs/capture-cards.md](docs/capture-cards.md)) and the
-   negotiated speed; 480 Mbit/s
-   (USB 2) is flagged, since uncompressed 1080p60 needs USB 3, unless the
-   chip is a USB 2 one (MS2109) anyway.
-3. **Picture format**: the card's own mode list, best first (frame rate, then
-   size, then uncompressed).
-4. **Signal check**: 2 seconds of capture at that mode, measuring the real
+2. **USB link**: the chip the id implies, with what is known about that
+   card and its support status (its profile in `capture-cards/`; see
+   [docs/capture-cards.md](docs/capture-cards.md)), and the negotiated
+   speed. 480 Mbit/s (USB 2) is flagged, since uncompressed 1080p60 needs
+   USB 3, unless the chip is a USB 2 one (MS2109) anyway.
+3. **Source**: what is plugged into the card (a profile from `sources/`, or
+   any HDMI source), and that source's setup tips to apply now (`SOURCE`).
+4. **Picture format**: the card's own mode list, best first (frame rate, then
+   size, then uncompressed), starting on the mode the source suggests or the
+   closest one the card has, with a note when the card cannot do it.
+5. **Signal check**: 2 seconds of capture at that mode, measuring the real
    frame rate. UVC cards cannot report signal lock, so frames are the test,
    and a few frames are checked for a uniformly black picture: some cards
    (the MS2109) stream black at full rate with nothing plugged in.
-5. **Audio**: the card's own input (found on the card's USB device at every
+6. **Audio**: the card's own input (found on the card's USB device at every
    start), another source, or none.
-6. **Display mode** and window size, **refresh matching** (where the desktop
+7. **Display mode** and window size, **refresh matching** (where the desktop
    adapter can), **player** and scaling.
-7. **Audio sync**: optional; a windowed feed without audio opens and the
+8. **Audio sync**: optional; a windowed feed without audio opens and the
    j/k/h/l tuner runs in the wizard's terminal.
-8. **Review**: a diff of exactly what will change; nothing is written before
+9. **Review**: a diff of exactly what will change; nothing is written before
    this. Then an optional test feed that behaves exactly as the saved config.
 
 Re-running it edits: every question starts on the current value. Each run
@@ -200,25 +202,19 @@ Two gotchas found in the current state:
 
 ---
 
-## Preconditions on the source side (PS5 as tested)
+## Preconditions on the source side
 
-The menu paths are the PS5's; other sources have the same four switches under
-their own names. These are the ones that produce a black screen or bad audio, in order of how
-often they bite:
+The settings on the source itself that produce a black screen or bad audio
+when wrong (HDCP, audio format, HDR, resolution and refresh) live in one
+profile per source in [`sources/`](sources/): [PlayStation 5](sources/ps5.md)
+(tested) and [any HDMI source](sources/generic.md). The setup wizard asks what
+is plugged in, shows that source's tips before the signal check, and starts
+the mode list on the mode the source suggests, or the closest one the card
+can capture. **HDCP off first**: everything else is moot until it is.
 
-- **Settings → System → HDMI → Enable HDCP: OFF.** PS5 ships with it on, and
-  capture cards give you a black screen or an error until it's off. Netflix /
-  Disney+ / Prime stop working while it's off; toggle it back for those.
-- **Settings → Sound → Audio Output → Audio Format (Priority): Linear PCM.**
-  Capture cards expose a USB Audio Class device, which is PCM. Bitstream
-  (Dolby/DTS) gives you silence or noise.
-- **Settings → Screen and Video → Video Output → HDR: Off.** HDR10 over a
-  capture card either gets crushed to a washed-out SDR image or needs tone
-  mapping in the player. Not worth it for playing in a window.
-- **Video Output → Resolution: 1080p**, and **120 Hz Output: Off**, **VRR: Off**
-  — unless the setup wizard's format list shows the card genuinely captures more. Cards advertise
-  "4K" for their *input/passthrough* far more often than for what they actually
-  hand to USB.
+Each profile is a small Markdown file: a `Suggest:` line of settings
+(`RES`, `FPS`) the wizard starts from, a `Status:` line, and one bullet per
+tip with its menu path.
 
 ---
 
@@ -501,7 +497,7 @@ misbehaves.
 
 ## Test protocol, in order
 
-1. Set the source-side options above. **HDCP off first** — everything else is moot.
+1. Set the source-side options (see [`sources/`](sources/)). **HDCP off first** — everything else is moot.
 2. Plug the card into a **rear USB 3 port**, powered via its DC5V jack, and not
    into the `3-5` hub. Source on and outputting 1080p.
 3. `./view.sh --setup` — this is the step that decides the real settings. It names the
@@ -741,6 +737,8 @@ v4l2-ctl -d /dev/video2 --get-fmt-video
   them; [`docs/capture-cards.md`](docs/capture-cards.md) is the support
   table, generated from them by `tools/capture-cards-table`
 - `lib/capture-cards.sh` — reads those profiles
+- `sources/` — one profile per kind of source: suggested `RES`/`FPS` and the
+  setup tips with menu paths; `lib/sources.sh` reads them
 - `lib/setup.sh` — the setup wizard (`./view.sh --setup`): identifies the card
   and its USB link, lists its modes, checks the signal, picks audio, display
   mode and player, writes the config and a Markdown diagnostics report to

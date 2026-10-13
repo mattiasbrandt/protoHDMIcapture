@@ -2,6 +2,10 @@
 # One KEY=value per line; the file is parsed, not executed. Environment
 # variables win over this file, so `DELAY=0.1 ./view.sh` still works.
 
+# What is plugged into the card: a profile name from sources/ (ps5, ...).
+# Unset means any HDMI source. ./view.sh --setup asks and writes it.
+#SOURCE=
+
 # Pin the card by USB serial so other cameras and /dev/video renumbering never
 # matter. ./view.sh --setup finds it and writes this line.
 #CARD_SERIAL=

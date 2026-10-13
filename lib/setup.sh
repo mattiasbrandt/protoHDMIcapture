@@ -28,6 +28,8 @@ HERE=$(dirname "$(dirname "$(readlink -f "$0")")")
 . "$HERE/lib/ui.sh"
 # shellcheck source=lib/capture-cards.sh
 . "$HERE/lib/capture-cards.sh"
+# shellcheck source=lib/sources.sh
+. "$HERE/lib/sources.sh"
 
 FROM_LAUNCHER=""; THEN_PLAY=""
 for arg in "$@"; do
@@ -62,7 +64,7 @@ trap 'exit 143' TERM HUP
 
 # The keys this wizard decides. Anything else in the file (DELAY, LAT_MS, ...)
 # is carried over untouched.
-MANAGED=(CARD_SERIAL CARD_PORT DEV IGNORE_CARDS_RE FMT RES FPS AUDIO SRC WINDOW WINDOW_SIZE
+MANAGED=(SOURCE CARD_SERIAL CARD_PORT DEV IGNORE_CARDS_RE FMT RES FPS AUDIO SRC WINDOW WINDOW_SIZE
          REFRESH BACKEND SCALING DELAY DEBUG FULLSCREEN)
 
 # CUR: what the file says now. NEW: what it will say; "" = not in the file.
@@ -125,7 +127,7 @@ run_child() {
 }
 
 # --- stage list --------------------------------------------------------------
-STAGES=(welcome card usb format signal audio display)
+STAGES=(welcome card usb source format signal audio display)
 desktop_can refresh_match && STAGES+=(refresh)
 STAGES+=(backend sync debug review)
 [ -z "$FROM_LAUNCHER$THEN_PLAY" ] && STAGES+=(test)
@@ -294,6 +296,48 @@ stage_card() {
     pause
 }
 
+stage_source() {
+    stage "🎮 Source"
+    say "What is plugged into the capture card's HDMI input?"
+    center ""
+    local -a items=()
+    local id
+    while read -r id; do
+        if [ "$id" = generic ]; then
+            items+=("generic|Something else · the checklist for any HDMI source")
+        else
+            local level date
+            read -r level date <<<"$(source_status "$id")"
+            items+=("$id|$(source_name "$id")${level:+|$level}")
+        fi
+    done < <(source_ids)
+    local def="${NEW[SOURCE]:-generic}"
+    [ -e "$SOURCES_DIR/$def.md" ] || def=generic
+    local pick
+    choose pick "Source" "$def" "${items[@]}" || exit 1
+    if [ "$pick" = generic ]; then NEW[SOURCE]=""; else NEW[SOURCE]="$pick"; fi
+    center ""
+    say "Set these on the $(source_name "$pick") now; the signal check comes next:"
+    local -a tips=()
+    mapfile -t tips < <(source_tips "$pick")
+    ui_list "${tips[@]}"
+    center ""
+    pause
+}
+
+# _closest_mode RES FPS ROW...: the row ("fmt|WxH|fps") nearest the source's
+# suggested RES and FPS, frame rate first (a game at 30 fps feels worse than
+# one at 720p), then picture size; ties keep list order, which is best first.
+_closest_mode() {
+    local sres="$1" sfps="$2"; shift 2
+    local sa=$(( ${sres%x*} * ${sres#*x} ))
+    printf '%s\n' "$@" | awk -F'|' -v sa="$sa" -v sf="$sfps" '
+        function abs(x) { return x < 0 ? -x : x }
+        { split($2, wh, "x"); df = abs($3 - sf); da = abs(wh[1] * wh[2] - sa)
+          if (NR == 1 || df < bf || (df == bf && da < ba)) { best = $0; bf = df; ba = da } }
+        END { print best }'
+}
+
 # "fmt|WxH|fps" rows for the card's modes, best first: highest fps, then the
 # largest picture, then uncompressed over compressed.
 list_modes() {
@@ -325,8 +369,19 @@ stage_format() {
         NEW[RES]="$RES_IN"; NEW[FPS]="$FPS_IN"; NEW[FMT]="$FMT_IN"
         return
     fi
+    # The source's suggestion, if it has one, picks the starting row; the
+    # card's own list always decides what can be chosen.
+    local sname="" sres="" sfps="" kv near="" near_key=""
+    while read -r kv; do
+        case "$kv" in RES=*) sres="${kv#RES=}" ;; FPS=*) sfps="${kv#FPS=}" ;; esac
+    done < <(source_suggest "${NEW[SOURCE]}")
+    if [ -n "$sres" ] && [ -n "$sfps" ]; then
+        sname=$(source_name "${NEW[SOURCE]}")
+        near=$(_closest_mode "$sres" "$sfps" "${rows[@]}")
+        near_key="${near//|/ }"
+    fi
     local -a items=()
-    local r fmt size fps desc cur_key i=0
+    local r fmt size fps desc cur_key def_key i=0 have_cur=""
     cur_key="$(cur FMT) $(cur RES) $(cur FPS)"
     for r in "${rows[@]}"; do
         IFS='|' read -r fmt size fps <<<"$r"
@@ -337,14 +392,37 @@ stage_format() {
         esac
         local tag=""
         [ "$i" = 0 ] && tag="recommended"
+        if [ "$fmt $size $fps" = "$near_key" ]; then
+            local why="closest to $sname's suggestion"
+            [ "$size" = "$sres" ] && [ "$fps" = "$sfps" ] && why="$sname suggests this"
+            tag="${tag:+$tag · }$why"
+        fi
         items+=("$fmt $size $fps|${size} @ ${fps} fps · ${desc}${tag:+|$tag}")
+        [ "$fmt $size $fps" = "$cur_key" ] && have_cur=1
         i=$((i + 1))
     done
+    # Start on the saved mode if this card offers it, else on the source's
+    # nearest, else on the best.
+    local def_label="current"
+    if [ -n "$have_cur" ]; then def_key="$cur_key"
+    elif [ -n "$near_key" ]; then def_key="$near_key"; def_label="suggested"
+    else def_key="${rows[0]//|/ }"; def_label="best"
+    fi
     say "Modes $CARD_TYPE offers, best first:"
     note "Uncompressed skips a decode step; it needs the USB 3 bandwidth."
+    if [ -n "$near" ]; then
+        local nsize="${near#*|}"; nsize="${nsize%|*}"
+        local nfps="${near##*|}"
+        if [ "$nsize" != "$sres" ] || [ "$nfps" != "$sfps" ]; then
+            center ""
+            ui_warn "$sname suggests $sres @ $sfps; this card can't capture that."
+            note "Closest at the best frame rate: $nsize @ $nfps."
+            [ "$nsize" != "$sres" ] && note "Tip: set the $sname's output resolution to ${nsize#*x}p, so the card is not scaling."
+        fi
+    fi
     center ""
     local pick
-    choose pick "Mode" "$cur_key" "${items[@]}" || exit 1
+    CHOOSE_DEFAULT_LABEL="$def_label" choose pick "Mode" "$def_key" "${items[@]}" || exit 1
     local f r p
     read -r f r p <<<"$pick"
     NEW[FMT]="$f"; NEW[RES]="$r"; NEW[FPS]="$p"
@@ -706,6 +784,7 @@ write_report() {
         echo "| Check | Result | |"
         echo "|---|---|---|"
         echo "| Card | ${CARD_TYPE:-?} (\`${CARD_DEV:-?}\`, serial \`${NEW[CARD_SERIAL]:-none}\`, port \`${NEW[CARD_PORT]:-${CARD_DEV:+$(card_port "$CARD_DEV")}}\`) | |"
+        echo "| Source | $(source_name "${NEW[SOURCE]}")${NEW[SOURCE]:+ (\`${NEW[SOURCE]}\`)} | |"
         echo "| Chip | ${CHIP:-?} (\`${VIDPID:-?}\`)${SUPPORT:+ · support: $SUPPORT} | |"
         verdict="✅"; [ "${USB_RESULT:-}" = ok ] || verdict="⚠️"
         echo "| USB link | ${LINK_SPEED:-?} Mbit/s | $verdict |"
