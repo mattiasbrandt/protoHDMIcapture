@@ -408,7 +408,7 @@ tidy-up sometime, no functional effect.
 | `DEBUG` | `off` | `log` \| `window`; see "Debug mode". `--debug` = `window` for one run |
 | `FULLSCREEN` | — | deprecated: `yes` = `WINDOW=fullscreen`, `no` = `WINDOW=windowed` |
 | `SCALING` | `balanced` | `balanced` = spline36/mitchell, no deband, no dither. `fast` = `--profile=fast`, bilinear throughout, lowest GPU time and visibly softer. `config` = leave mpv.conf's high-quality settings alone |
-| `LEVELS` | `auto` | `limited` or `full` if blacks look crushed or washed. The card reports `Quantization: Default (maps to Limited Range)` and PS5 outputs limited over HDMI, so `auto` should be right — this is the knob if it isn't |
+| `LEVELS` | `auto` | the colour range of the card's frames: `limited` or `full` if blacks look crushed or washed (mpv `--vf=format:colorlevels=`; the display's own range is untouched). `auto` trusts the frames: YUYV is read as limited, while MJPEG frames (MS2109) arrive flagged full. The MS2130 reports `Quantization: Default (maps to Limited Range)` and the PS5 outputs limited, so `auto` is right there |
 | `IPC` | `/tmp/mpv-protohdmicapture.sock` | mpv IPC socket, so you can drive it from a keybind or script |
 | `REFRESH` | `keep` | `match` switches the focused monitor to its mode nearest `FPS` for the session and restores it on exit (Hyprland only). No output hardcoded; resolution, position, scale and transform all preserved |
 

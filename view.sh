@@ -138,7 +138,7 @@ AUDIO="${AUDIO:-loopback}"      # loopback | mpv | none
 WINDOW="${WINDOW:-fullscreen}"  # fullscreen | borderless | windowed
 WINDOW_SIZE="${WINDOW_SIZE:-1280x720}"  # WxH, for WINDOW=windowed
 SCALING="${SCALING:-balanced}"  # balanced | fast | config  (see the mpv block below)
-LEVELS="${LEVELS:-auto}"        # auto | limited | full  (fix for crushed/washed blacks)
+LEVELS="${LEVELS:-auto}"        # auto | limited | full: the range the card sends (fix for crushed/washed blacks)
 IPC="${IPC-/tmp/mpv-protohdmicapture.sock}"  # mpv IPC socket; empty to disable
 # keep  = leave the display alone (default)
 # match = for the session only, switch the monitor the window opens on to its
@@ -486,7 +486,10 @@ mpv)
         --stop-screensaver=always
     )
     [ -n "$IPC" ] && args+=(--input-ipc-server="$IPC")
-    [ "$LEVELS" != "auto" ] && args+=(--video-output-levels="$LEVELS")
+    # The range of the card's frames, not of the display: --video-output-levels
+    # would send studio-range RGB to a PC monitor. The format filter only
+    # relabels the frames, no copy.
+    [ "$LEVELS" != "auto" ] && args+=(--vf-append="format:colorlevels=$LEVELS")
     case "$WINDOW" in
         fullscreen) args+=(--fs) ;;
         borderless) args+=(--border=no --title-bar=no --window-maximized=yes) ;;
