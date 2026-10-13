@@ -345,16 +345,17 @@ start_audio() {
     if [ -z "$linked" ]; then
         audio_failed "the audio loopback found no source to link to within 2 s"; return
     fi
-    printf 'DELAY=%s\nLAT_MS=%s\nSRC=%s\n' "$DELAY" "$LAT_MS" "$SRC" >"$RUN_DIR/audio.env"
-    info "audio loopback up (pid $LOOPBACK_PID, delay ${DELAY}s, buffer ${LAT_MS}ms)"
-    audio_state_apply
     dbg "audio link: $linked -> input.protohdmicapture-audio -> ${SINK:-default sink}"
     # The fallback is usually the microphone, which would play on the
-    # speakers (feedback): stop it like any failed loopback.
+    # speakers (feedback): stopped at once, like any failed loopback, and
+    # before audio.env could tell the overlay it is up.
     if [ "$linked" != "$SRC" ]; then
         audio_failed "the audio loopback linked to \"$linked\", not the card's \"$SRC\" (unavailable? check: pactl list short sources)"
         return
     fi
+    printf 'DELAY=%s\nLAT_MS=%s\nSRC=%s\n' "$DELAY" "$LAT_MS" "$SRC" >"$RUN_DIR/audio.env"
+    info "audio loopback up (pid $LOOPBACK_PID, delay ${DELAY}s, buffer ${LAT_MS}ms)"
+    audio_state_apply
 }
 stop_audio() {
     [ -n "$LOOPBACK_PID" ] || return 0
