@@ -16,8 +16,8 @@
 # here, e.g. `CARD_PORT=pci-0000:16:00.4-usb-0:2:1.0 ./view.sh` for one run.
 #CARD_PORT=
 
-# Without a pin: card types (v4l2 "Card type", extended regex) to skip
-# while scanning for the card.
+# Ignored devices: card types (v4l2 "Card type", extended regex) never opened
+# as the capture card, by the scan or as DEV. The wizard adds to it.
 #IGNORE_CARDS_RE='OBSBOT|Integrated Camera'
 
 # Audio delay in seconds that lines audio up with video (tune with --tune).

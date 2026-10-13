@@ -81,7 +81,8 @@ audio. The tuning pair above is one of each, so it is allowed.
    known capture-chip USB id is recommended. Pinned by USB serial
    (`CARD_SERIAL`), or by USB port (`CARD_PORT`) when the card reports none,
    or as a last resort by its node (`DEV=/dev/videoN`, which can change on a
-   replug).
+   replug). Each other device can be marked as not the capture card: it is
+   then an ignored device (`IGNORE_CARDS_RE`), never opened as the card.
 2. **USB link**: the chip the id implies, with what is known about that
    card and its support status (its profile in `capture-cards/`; see
    [docs/capture-cards.md](docs/capture-cards.md)), and the negotiated
@@ -452,7 +453,7 @@ shows the lot without starting anything.
 |---|---|---|
 | `CARD_SERIAL` | — | USB serial of the card; pins it among other cameras and across `/dev/video` renumbering. The setup wizard writes it |
 | `CARD_PORT` | — | USB port path (udev `ID_PATH`) of a card that reports no serial; found again after a replug into the same port. The setup wizard writes it. Any of `CARD_SERIAL`, `CARD_PORT`, `DEV` set in the environment overrides all three in the config file, so `CARD_PORT=... ./view.sh` plays a second card for one run |
-| `IGNORE_CARDS_RE` | — | without a pin: v4l2 card types to skip while scanning, e.g. `OBSBOT\|Integrated Camera` |
+| `IGNORE_CARDS_RE` | — | ignored devices: v4l2 card types (extended regex) never opened as the capture card, e.g. `OBSBOT\|Integrated Camera`. Skipped while scanning, and a `DEV` naming one is set aside for the pin. The wizard adds the devices you mark as not the capture card |
 | `WINDOW` | `fullscreen` | `fullscreen` \| `borderless` \| `windowed`; see "Display modes". Opens on whatever monitor the desktop picks, none is hardcoded. **f** cycles it live |
 | `WINDOW_SIZE` | `1280x720` | window size for `WINDOW=windowed` |
 | `DEBUG` | `off` | `log` \| `window`; see "Debug mode". `--debug` = `window` for one run |
@@ -463,7 +464,7 @@ shows the lot without starting anything.
 | `LEVELS` | `auto` | the colour range of the card's frames: `limited` or `full` if blacks look crushed or washed (mpv `--vf=format:colorlevels=`; the display's own range is untouched). `auto` trusts the frames: YUYV is read as limited, while MJPEG frames (MS2109) arrive flagged full. The MS2130 reports `Quantization: Default (maps to Limited Range)` and the PS5 outputs limited, so `auto` is right there |
 | `IPC` | `/tmp/mpv-protohdmicapture.sock` | mpv IPC socket, so you can drive it from a keybind or script |
 | `REFRESH` | `keep` | `match` switches the focused monitor to its mode nearest `FPS` for the session and restores it on exit (Hyprland only). No output hardcoded; resolution, position, scale and transform all preserved |
-| `DEV` | — | the card's video node (`/dev/videoN`) instead of finding it; a pin like `CARD_SERIAL`, but node numbers move on replug, so prefer the serial or the port |
+| `DEV` | — | the card's video node (`/dev/videoN`) instead of finding it; a pin like `CARD_SERIAL`, but node numbers move on replug, so prefer the serial or the port. A `DEV` that is gone, not a capture node, or an ignored device is set aside with a warning, and the card is found by the pin or the scan |
 | `SRC` | — | the PipeWire source to take the audio from; default: the card's own audio input, found on its USB device |
 | `SINK` | — | the PipeWire sink to play it on; default: the desktop's default sink, followed when it changes |
 | `RES` | `1920x1080` | capture resolution; the wizard picks it from the card's own mode list |

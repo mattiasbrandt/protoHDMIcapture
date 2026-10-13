@@ -228,6 +228,25 @@ stage_usb() {
     pause
 }
 
+# A device name as a regex matching only itself, for IGNORE_CARDS_RE. A
+# single quote becomes "." (any character): the config cannot hold one.
+_regex_literal() { printf '%s' "$1" | sed "s/[][\\.*^\$+?(){}|]/\\\\&/g; s/'/./g"; }
+
+# PATTERN without its alternatives that match NAME. Splits on the "|" between
+# alternatives, not on an escaped one inside a name; a hand-written group
+# like (a|b) is split too, which only matters if it matches the card.
+_ignore_without() {
+    local p="${1//\\|/$'\x01'}" out="" a
+    local -a parts
+    IFS='|' read -ra parts <<<"$p"
+    for a in "${parts[@]}"; do
+        a="${a//$'\x01'/\\|}"
+        grep -Eq -- "$a" <<<"$2" && continue
+        out+="${out:+|}$a"
+    done
+    printf '%s' "$out"
+}
+
 stage_card() {
     stage "🎥 Capture card"
     local -a nodes=() serials=() ports=() types=() items=()
@@ -247,7 +266,11 @@ stage_card() {
         local id="${serials[$i]:+serial ${serials[$i]}}"
         [ -n "$id" ] || id="${ports[$i]:+port ${ports[$i]}}"
         local label="${types[$i]}  ${DIM}${nodes[$i]}${id:+ · $id}${RESET}"
-        items+=("$i|$label")
+        if IGNORE_CARDS_RE="${NEW[IGNORE_CARDS_RE]}" card_ignored "${types[$i]}"; then
+            items+=("$i|$label|ignored")
+        else
+            items+=("$i|$label")
+        fi
         if [ -n "${serials[$i]}" ] && [ "${serials[$i]}" = "${CUR[CARD_SERIAL]:-}" ]; then def=$i; fi
         if [ -z "$def" ] && [ -n "${ports[$i]}" ] && [ "${ports[$i]}" = "${CUR[CARD_PORT]:-}" ]; then def=$i; fi
         [ -z "$def" ] && [ "${nodes[$i]}" = "${CUR[DEV]:-}" ] && def=$i
@@ -298,8 +321,45 @@ stage_card() {
         ui_warn "This card reports no serial, so it is pinned by node ($CARD_DEV)."
         note "Node numbers can change when devices are replugged; re-run setup if it moves."
     fi
+    ignore_others "$pick" nodes types
     center ""
     pause
+}
+
+# Ignored devices (IGNORE_CARDS_RE): the other video devices, offered one by
+# one so no scan, and no DEV left over from a replug, opens them as the
+# capture card. A name that would also match the chosen card is refused, and
+# a chosen card the list already matched is taken off it.
+ignore_others() {
+    local pick="$1" i lit vp
+    local -n _nodes="$2" _types="$3"
+    local pat="${NEW[IGNORE_CARDS_RE]}"
+    if IGNORE_CARDS_RE="$pat" card_ignored "$CARD_TYPE"; then
+        pat=$(_ignore_without "$pat" "$CARD_TYPE")
+        center ""
+        ui_warn "This card was on the ignored list; it is taken off."
+    fi
+    for i in "${!_nodes[@]}"; do
+        [ "$i" = "$pick" ] && continue
+        IGNORE_CARDS_RE="$pat" card_ignored "${_types[$i]}" && continue
+        lit=$(_regex_literal "${_types[$i]}")
+        center ""
+        if grep -Eq -- "$lit" <<<"$CARD_TYPE"; then
+            note "${_types[$i]} (${_nodes[$i]}) has the capture card's name, so it cannot be ignored by name."
+            continue
+        fi
+        vp=$(_usb_id "${_nodes[$i]}")
+        capture_card_lookup "$vp"
+        if [ $? -le 1 ]; then
+            say "${_types[$i]} (${_nodes[$i]}) is a capture card too."
+            confirm "Ignore it from now on?" || continue
+        else
+            say "${_types[$i]} (${_nodes[$i]}) is not the capture card."
+            confirm_yes "Ignore it from now on (a camera)?" || continue
+        fi
+        pat+="${pat:+|}$lit"
+    done
+    NEW[IGNORE_CARDS_RE]="$pat"
 }
 
 stage_source() {
