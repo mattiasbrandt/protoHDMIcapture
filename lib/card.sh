@@ -20,7 +20,7 @@ CONFIG_FILE="${CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/protohdmicapture/c
 # Keys the config file may set. Anything else is reported, not silently used.
 CONFIG_KEYS=(CARD_SERIAL IGNORE_CARDS_RE DEV SRC SINK RES FPS FMT DELAY LAT_MS
              BACKEND AUDIO WINDOW WINDOW_SIZE SCALING LEVELS IPC REFRESH GST_IO_MODE
-             FULLSCREEN)   # FULLSCREEN: deprecated alias, still read
+             DEBUG FULLSCREEN)   # FULLSCREEN: deprecated alias, still read
 
 # Parsed, never sourced: the file holds settings, not code. Values may be
 # wrapped in single or double quotes.

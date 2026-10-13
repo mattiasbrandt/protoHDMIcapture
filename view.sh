@@ -26,6 +26,8 @@ HERE=$(dirname "$(readlink -f "$0")")
 . "$HERE/lib/card.sh"
 # shellcheck source=lib/desktop.sh
 . "$HERE/lib/desktop.sh"
+# shellcheck source=lib/debug.sh
+. "$HERE/lib/debug.sh"
 
 # --- mode --------------------------------------------------------------------
 # --setup hands over before the config is even read, so a config that would
@@ -66,7 +68,9 @@ fi
 # --- configuration ---------------------------------------------------------
 # Precedence: environment, then the config file (see config.example), then the
 # defaults below.
+debug_snapshot_env "${CONFIG_KEYS[@]}"
 load_config
+debug_snapshot_file "${CONFIG_KEYS[@]}"
 
 # Player knobs you set yourself (environment or config file), as opposed to
 # defaults. Only these earn a warning when the backend cannot honour them, so
@@ -124,6 +128,9 @@ IPC="${IPC-/tmp/mpv-protohdmicapture.sock}"  # mpv IPC socket; empty to disable
 #         monitor is focused when you launch is the one that changes.
 REFRESH="${REFRESH:-keep}"      # keep | match
 GST_IO_MODE="${GST_IO_MODE:-mmap}"   # mmap | dmabuf  (dmabuf is zero-copy but not all cards do it)
+# off | log = every decision, the negotiated format, verbose player output and
+# a perf line every 5 s, on screen and in $XDG_RUNTIME_DIR/protohdmicapture/debug.log
+DEBUG="${DEBUG:-off}"           # off | log
 
 # Exit status 3 means "failed, and the reason was already reported": printed
 # on a terminal, and also sent as a desktop notification when there is none
@@ -165,6 +172,7 @@ take_audio_lock() {
     exec {AUDIO_LOCK}>"$RUN_DIR/audio.lock"
     flock -n "$AUDIO_LOCK" \
         || die "another session is already playing the card's audio; stop it, or start this one with AUDIO=none"
+    dbg "audio lock: held"
 }
 
 # --- backend capabilities --------------------------------------------------
@@ -206,7 +214,16 @@ fi
 [ "$AUDIO" != "mpv" ] || [ "$BACKEND" = "mpv" ] \
     || die "AUDIO=mpv needs BACKEND=mpv; use AUDIO=loopback with $BACKEND"
 
+case "$DEBUG" in off|log) ;; *) die "unknown DEBUG=$DEBUG (off | log)" ;; esac
+if [ "$DEBUG" != off ] && [ "$MODE" = play ]; then
+    debug_tee "$RUN_DIR/debug.log"
+    dbg "protoHDMIcapture $(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo '?') · desktop $DESKTOP · log $RUN_DIR/debug.log"
+    debug_knob_sources CARD_SERIAL DEV SRC SINK RES FPS FMT DELAY LAT_MS BACKEND AUDIO \
+        WINDOW WINDOW_SIZE SCALING LEVELS IPC REFRESH GST_IO_MODE
+fi
+
 [ "$MODE" = tune ] || take_video_lock
+if [ -n "${VIDEO_LOCK:-}" ]; then dbg "video lock: held"; else dbg "video lock: not taken (tune mode)"; fi
 
 # --- resolve the card ------------------------------------------------------
 resolve_card || die "$CARD_ERROR"
@@ -229,6 +246,8 @@ start_audio() {
         --latency "$LAT_MS" \
         --delay "$DELAY" >/dev/null 2>&1 &
     LOOPBACK_PID=$!
+    echo "$LOOPBACK_PID" >"$RUN_DIR/audio.pid"
+    printf 'DELAY=%s\nLAT_MS=%s\nSRC=%s\n' "$DELAY" "$LAT_MS" "$SRC" >"$RUN_DIR/audio.env"
     info "audio loopback up (pid $LOOPBACK_PID, delay ${DELAY}s, buffer ${LAT_MS}ms)"
 
     # pw-loopback silently falls back to the DEFAULT source if -C names a node
@@ -244,6 +263,7 @@ start_audio() {
     linked=$(pw-link -li 2>/dev/null \
              | grep -A1 '^input\.protohdmicapture-audio:input_FL$' | sed -n '2p' \
              | sed 's/^[[:space:]]*|<-[[:space:]]*//; s/:[^:]*$//')
+    dbg "audio link: ${linked:-none yet} -> input.protohdmicapture-audio -> ${SINK:-default sink}"
     if [ -n "$linked" ] && [ "$linked" != "$SRC" ]; then
         warn "audio is linked to \"$linked\", not the requested \"$SRC\""
         warn "the requested source was probably unavailable; check it with: pactl list short sources"
@@ -255,6 +275,7 @@ stop_audio() {
         wait "$LOOPBACK_PID" 2>/dev/null
     fi
     LOOPBACK_PID=""
+    rm -f "$RUN_DIR/audio.pid"
 }
 
 # --- player process ----------------------------------------------------------
@@ -272,9 +293,22 @@ run_player() {
     (
         exec {VIDEO_LOCK}>&-
         [ -z "$AUDIO_LOCK" ] || exec {AUDIO_LOCK}>&-
-        if desktop_place_window "$PLAYER_PID" "$WINDOW" "$WINDOW_SIZE"; then info "$DESKTOP_MSG"; fi
+        if desktop_place_window "$PLAYER_PID" "$WINDOW" "$WINDOW_SIZE"; then info "$DESKTOP_MSG"
+        else dbg "$DESKTOP_MSG"; fi
     ) &
+    if [ "$DEBUG" != off ]; then
+        (
+            exec {VIDEO_LOCK}>&-
+            [ -z "$AUDIO_LOCK" ] || exec {AUDIO_LOCK}>&-
+            debug_after_start "$PLAYER_PID"
+        ) &
+        DEBUG_JOB=$!
+    fi
+    dbg "player: $BACKEND pid $PLAYER_PID, window $WINDOW${WINDOW_SIZE:+ ($WINDOW_SIZE)}"
     wait "$PLAYER_PID"
+    local rc=$?
+    dbg "player exited with status $rc"
+    return "$rc"
 }
 stop_player() {
     if [ -n "$PLAYER_PID" ] && kill -0 "$PLAYER_PID" 2>/dev/null; then
@@ -284,7 +318,8 @@ stop_player() {
     PLAYER_PID=""
 }
 
-trap 'stop_player; stop_audio; desktop_refresh_restore' EXIT
+DEBUG_JOB=""
+trap 'stop_player; stop_audio; desktop_refresh_restore; [ -z "$DEBUG_JOB" ] || kill "$DEBUG_JOB" 2>/dev/null' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
@@ -292,6 +327,7 @@ trap 'exit 143' TERM
 start_refresh() {
     [ "$REFRESH" = "match" ] || return 0
     if desktop_refresh_match "$FPS"; then info "$DESKTOP_MSG"; else warn "$DESKTOP_MSG"; fi
+    dbg "refresh: $DESKTOP_MSG"
 }
 
 # --- interactive A/V sync tuner -------------------------------------------
@@ -369,6 +405,8 @@ mpv)
         --keepaspect=yes
         --cursor-autohide=200
         --osc=no
+        # the per-frame "V: hh:mm:ss" status line means nothing for a live feed
+        --term-status-msg=
         --title="protoHDMIcapture"
 
         # undoes hwdec=auto-safe — YUYV is uncompressed, there is nothing to decode
@@ -423,6 +461,9 @@ mpv)
         args+=(--no-audio --untimed)
     fi
 
+    # Verbose everywhere, except libplacebo's shader chatter and the subtitle
+    # renderer, which say nothing about this pipeline.
+    [ "$DEBUG" != off ] && args+=("--msg-level=all=v,vo/gpu-next/libplacebo=info,osd/libass=warn,clipboard=warn")
     info "mpv ${args[*]}"
     # MANGOHUD=1 is set globally in ~/.config/environment.d/99-proton-amd.conf and
     # MangoHud is an *implicit* Vulkan layer, so it injects into gpu-next and adds
@@ -454,7 +495,13 @@ gst)
     [ "$WINDOW" = fullscreen ] && SINK_OPTS="$SINK_OPTS fullscreen=true"
     PIPE="v4l2src device=${DEV} io-mode=${GST_IO_MODE} do-timestamp=true ! ${CAPS} ! ${DECODE}queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! videoconvert ! waylandsink ${SINK_OPTS}"
     info "gst-launch-1.0 $PIPE"
-    gst-launch-1.0 -e $PIPE &
+    if [ "$DEBUG" != off ]; then
+        # Element warnings, source and sink at info, QoS (late/dropped
+        # buffers) at debug; -v prints the negotiated caps once.
+        GST_DEBUG="2,v4l2src:4,waylandsink:4,qos:5" GST_DEBUG_NO_COLOR=1 gst-launch-1.0 -v -e $PIPE &
+    else
+        gst-launch-1.0 -e $PIPE &
+    fi
     run_player $!
     ;;
 
@@ -476,7 +523,12 @@ ffplay)
         windowed)   args+=(-x "${WINDOW_SIZE%x*}" -y "${WINDOW_SIZE#*x}") ;;
     esac
     info "ffplay ${args[*]} $DEV"
-    ffplay "${args[@]}" "$DEV" &
+    if [ "$DEBUG" != off ]; then
+        args=("${args[@]/warning/verbose}" -stats)
+        ffplay "${args[@]}" "$DEV" 2> >(debug_ffplay_filter >&2) &
+    else
+        ffplay "${args[@]}" "$DEV" &
+    fi
     run_player $!
     ;;
 
