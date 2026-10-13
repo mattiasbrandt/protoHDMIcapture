@@ -147,7 +147,7 @@ whatever the previous mode set.
 `DEBUG=log` (or a saved preference from the wizard) records, on screen and in
 `$XDG_RUNTIME_DIR/protohdmicapture/debug.log`:
 
-- every decision: each knob with where it came from (env, file, default),
+- every decision: each setting with where it came from (env, file, default),
   locks, the audio link, refresh and window placement, the player's PID and
   exit status
 - the format the device actually negotiated, read back 2 s after start
@@ -374,10 +374,10 @@ mpv is the player: the overlay and every live key exist only there, and the
 wizard sets it. gst and ffplay stay wired up for measuring and fault
 isolation (which one wins on latency is card-dependent and worth measuring
 rather than arguing about); set them by hand, and `view.sh` says they have
-no overlay. They share one set of knobs but do not all honour every one; a knob you set that the backend ignores gets a
+no overlay. They share one set of settings but do not all honour every one; a setting you set that the backend ignores gets a
 warning, never silence:
 
-| knob | mpv | gst | ffplay |
+| setting | mpv | gst | ffplay |
 |---|---|---|---|
 | `FMT` | yes | yes (`yuyv422`→YUY2, `nv12`, `mjpeg`, `rawvideo`) | yes |
 | `WINDOW` fullscreen | yes | yes (waylandsink `fullscreen=true`) | yes |
@@ -476,7 +476,7 @@ shows the lot without starting anything.
 | `AUDIO` | `loopback` | `loopback` (PipeWire, beside the player), `mpv` (inside mpv: one process, more latency), `none` |
 | `GST_IO_MODE` | `mmap` | gst only: `mmap`, or `dmabuf` (zero-copy where the card supports it) |
 
-A few more that are simply on, with no knob, because there's no case for the
+A few more that are simply on, with no setting, because there's no case for the
 other setting here:
 
 - `--force-window=immediate` — window appears instantly rather than after the
@@ -487,9 +487,9 @@ other setting here:
   blanking would otherwise fire mid-game
 - `--term-status-msg=` — silences the per-frame `V: hh:mm:ss` status line,
   which means nothing for a live feed and used to fill the run log
-- `--script=lib/mpv/protohdmicapture.lua` — the overlay and the **Tab**,
-  **f** and **d** keys, bound for this window only, so your `input.conf` is
-  untouched
+- `--script=lib/mpv/protohdmicapture.lua` — the overlay, its keys (see "The
+  overlay") and the no-signal banner, bound for this window only, so your
+  `input.conf` is untouched
 
 Driving it over IPC, e.g.:
 
@@ -531,7 +531,7 @@ Both flags confirmed against `pw-loopback --help` on 1.6.8 and the
 `libpipewire-module-loopback(7)` man page (`target.delay.sec`, since 0.3.60):
 
 - `--latency` — loopback buffer in ms
-- `--delay` — deliberate offset in seconds, the sync knob
+- `--delay` — deliberate offset in seconds, the audio sync (`DELAY`)
 
 Omitting `-P` makes playback follow your **default sink**, so switching between
 the Arctis Nova Pro and HDMI output mid-game just works.
@@ -672,10 +672,6 @@ the whole `mpv` backend a dead end. Testing killed that theory: `v4l2-ctl` fails
 identically without ffmpeg, so the fault is this device, and it implies nothing
 about the capture card. The mpv backend stands.
 
-(Aside: `sudo -A` **hangs** rather than prompting in this agent context — the
-1Password askpass helper blocks without a TTY. Privileged checks here need a
-plain interactive `sudo`.)
-
 ### 3. `pw-loopback` silently binds the wrong source (guarded now)
 
 Asked for the OBSBOT microphone via `-C`, it connected to the `1e4e` device's
@@ -736,7 +732,6 @@ its fixed-length quoting syntax. Fix is to quote the value:
 screenshot-template="%F-%wH.%wM.%wS"
 ```
 
-I have not touched your mpv.conf — say the word.
 
 ---
 
@@ -814,8 +809,10 @@ v4l2-ctl -d /dev/video2 --get-fmt-video
 - `lib/ui.sh` — the wizard's and dashboard's centered terminal UI
 - `lib/debug.sh` — `DEBUG=log`: decision lines, perf pulse, player verbosity
 - `lib/dashboard.sh` — the live debug dashboard (`./view.sh --dashboard`)
+- `lib/preflight.sh` — the tools a run needs, checked before anything starts
+  (view.sh and the wizard)
 - `lib/mpv/protohdmicapture.lua` — the overlay and the keys in the mpv window
-- `view.sh` — the player; every knob is an env var or config line, plus
+- `view.sh` — the player; every setting is an env var or config line, plus
   `--tune` (the feed with the overlay open, for audio sync). Owns the
   one-window/one-loopback rule
 - `launch.sh` — GUI entry point used by the desktop launcher; see below
@@ -880,7 +877,7 @@ here:
   terminal at all it notifies and plays on defaults. `NO_SETUP=1` skips this.
 - **Menu defaults:** `REFRESH=match` unless the config sets `REFRESH`. From a
   menu there is no place to type it, and the 100 Hz judder described above is
-  the whole reason that knob exists.
+  the whole reason that setting exists.
 - **The run log survives** at `$XDG_RUNTIME_DIR/protohdmicapture.log`.
 - **Unreported failures still notify:** any other non-zero exit (a missing tool,
   a crash) gets a generic "failed, see log" notification.
