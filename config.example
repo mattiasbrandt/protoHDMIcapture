@@ -13,5 +13,9 @@
 # Audio delay in seconds that lines audio up with video (tune with --tune).
 #DELAY=0.05
 
+# Display mode: fullscreen | borderless (maximized, no decorations) | windowed
+#WINDOW=fullscreen
+#WINDOW_SIZE=1280x720
+
 # Any other view.sh knob works here too: DEV SRC SINK RES FPS FMT LAT_MS
-# BACKEND AUDIO FULLSCREEN SCALING LEVELS IPC REFRESH GST_IO_MODE
+# BACKEND AUDIO SCALING LEVELS IPC REFRESH GST_IO_MODE

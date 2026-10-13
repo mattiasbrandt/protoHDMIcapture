@@ -35,8 +35,24 @@ load_config
 # Player knobs you set yourself (environment or config file), as opposed to
 # defaults. Only these earn a warning when the backend cannot honour them, so
 # BACKEND=gst does not nag about the default SCALING.
+#
+# FULLSCREEN=yes|no predates WINDOW and still works; WINDOW wins if both are
+# set. Translated here, before the scan, so a migrated value counts as yours.
+DEPRECATED=""; DEPRECATED_BAD=""
+if [ -n "${FULLSCREEN:-}" ]; then
+    if [ -n "${WINDOW:-}" ]; then
+        DEPRECATED="FULLSCREEN=$FULLSCREEN is ignored because WINDOW=$WINDOW is set; remove FULLSCREEN"
+    else
+        case "$FULLSCREEN" in
+            yes) WINDOW=fullscreen ;;
+            no)  WINDOW=windowed ;;
+            *)   DEPRECATED_BAD="FULLSCREEN=$FULLSCREEN is not yes or no (FULLSCREEN is deprecated; use WINDOW=fullscreen | borderless | windowed)" ;;
+        esac
+        [ -n "$DEPRECATED_BAD" ] || DEPRECATED="FULLSCREEN is deprecated; use WINDOW=$WINDOW"
+    fi
+fi
 REQUESTED=" "
-for _knob in FMT FULLSCREEN SCALING LEVELS IPC GST_IO_MODE; do
+for _knob in FMT WINDOW WINDOW_SIZE SCALING LEVELS IPC GST_IO_MODE; do
     [ -n "${!_knob:-}" ] && REQUESTED+="$_knob "
 done
 DEV="${DEV:-}"                  # /dev/videoN  (empty = find the card)
@@ -55,7 +71,12 @@ DELAY="${DELAY:-0.05}"          # seconds of audio delay to match video latency
 LAT_MS="${LAT_MS:-10}"          # PipeWire loopback buffer, ms
 BACKEND="${BACKEND:-mpv}"       # mpv | gst | ffplay
 AUDIO="${AUDIO:-loopback}"      # loopback | mpv | none
-FULLSCREEN="${FULLSCREEN:-yes}" # yes | no  (fullscreens on whatever monitor it opens on)
+# Display mode, as games present it. fullscreen covers the monitor it opens on;
+# borderless is a maximized window without decorations (the desktop's bar
+# stays visible); windowed is a normal window of WINDOW_SIZE. Only fullscreen
+# gets direct scanout and tearing, so it is the lowest-latency mode.
+WINDOW="${WINDOW:-fullscreen}"  # fullscreen | borderless | windowed
+WINDOW_SIZE="${WINDOW_SIZE:-1280x720}"  # WxH, for WINDOW=windowed
 SCALING="${SCALING:-balanced}"  # balanced | fast | config  (see the mpv block below)
 LEVELS="${LEVELS:-auto}"        # auto | limited | full  (fix for crushed/washed blacks)
 IPC="${IPC-/tmp/mpv-protohdmicapture.sock}"  # mpv IPC socket; empty to disable
@@ -115,15 +136,31 @@ take_audio_lock() {
 # but gst and ffplay have no equivalent for some of mpv's settings; say so
 # instead of silently ignoring them.
 declare -A BACKEND_KNOBS=(
-    [mpv]="FMT FULLSCREEN SCALING LEVELS IPC"
-    [gst]="FMT FULLSCREEN GST_IO_MODE"
-    [ffplay]="FMT FULLSCREEN"
+    [mpv]="FMT WINDOW WINDOW_SIZE SCALING LEVELS IPC"
+    [gst]="FMT WINDOW GST_IO_MODE"
+    [ffplay]="FMT WINDOW WINDOW_SIZE"
 )
+# The WINDOW modes each backend can produce on its own. waylandsink has no
+# decorations to remove and no way to ask for a size.
+declare -A BACKEND_WINDOWS=(
+    [mpv]="fullscreen borderless windowed"
+    [gst]="fullscreen"
+    [ffplay]="fullscreen borderless windowed"
+)
+[ -z "$DEPRECATED_BAD" ] || die "$DEPRECATED_BAD"
+[ -z "$DEPRECATED" ] || warn "$DEPRECATED"
+case "$WINDOW" in
+    fullscreen|borderless|windowed) ;;
+    *) die "unknown WINDOW=$WINDOW (fullscreen | borderless | windowed)" ;;
+esac
+[[ "$WINDOW_SIZE" =~ ^[0-9]+x[0-9]+$ ]] || die "WINDOW_SIZE=$WINDOW_SIZE is not WIDTHxHEIGHT"
 [ -n "${BACKEND_KNOBS[$BACKEND]+x}" ] || die "unknown BACKEND=$BACKEND (mpv | gst | ffplay)"
 for _knob in $REQUESTED; do
     [[ " ${BACKEND_KNOBS[$BACKEND]} " == *" $_knob "* ]] \
         || warn "BACKEND=$BACKEND ignores $_knob=${!_knob} (it honours: ${BACKEND_KNOBS[$BACKEND]})"
 done
+[[ " ${BACKEND_WINDOWS[$BACKEND]} " == *" $WINDOW "* ]] \
+    || warn "BACKEND=$BACKEND cannot make a $WINDOW window by itself; you get an undecorated window the desktop sizes"
 # Not a knob but a mode: the other backends would play no audio at all.
 [ "$AUDIO" != "mpv" ] || [ "$BACKEND" = "mpv" ] \
     || die "AUDIO=mpv needs BACKEND=mpv; use AUDIO=loopback with $BACKEND"
@@ -303,7 +340,11 @@ mpv)
     )
     [ -n "$IPC" ] && args+=(--input-ipc-server="$IPC")
     [ "$LEVELS" != "auto" ] && args+=(--video-output-levels="$LEVELS")
-    [ "$FULLSCREEN" = "yes" ] && args+=(--fs)
+    case "$WINDOW" in
+        fullscreen) args+=(--fs) ;;
+        borderless) args+=(--border=no --title-bar=no --window-maximized=yes) ;;
+        windowed)   args+=(--geometry="$WINDOW_SIZE") ;;
+    esac
 
     # Scaling. mpv.conf sets profile=high-quality (ewa_lanczossharp + debanding
     # + antiringing); --profile=low-latency does NOT undo that, so it survives
@@ -355,7 +396,7 @@ gst)
     esac
     CAPS="${CAPS},width=${W},height=${H},framerate=${FPS}/1"
     SINK_OPTS="sync=false async=false qos=false enable-last-sample=false"
-    [ "$FULLSCREEN" = "yes" ] && SINK_OPTS="$SINK_OPTS fullscreen=true"
+    [ "$WINDOW" = fullscreen ] && SINK_OPTS="$SINK_OPTS fullscreen=true"
     PIPE="v4l2src device=${DEV} io-mode=${GST_IO_MODE} do-timestamp=true ! ${CAPS} ! ${DECODE}queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream ! videoconvert ! waylandsink ${SINK_OPTS}"
     info "gst-launch-1.0 $PIPE"
     gst-launch-1.0 -e $PIPE &
@@ -374,7 +415,11 @@ ffplay)
         -window_title "protoHDMIcapture"
     )
     [ -n "$FMT" ] && args=(-input_format "$FMT" "${args[@]}")
-    [ "$FULLSCREEN" = "yes" ] && args+=(-fs)
+    case "$WINDOW" in
+        fullscreen) args+=(-fs) ;;
+        borderless) args+=(-noborder) ;;
+        windowed)   args+=(-x "${WINDOW_SIZE%x*}" -y "${WINDOW_SIZE#*x}") ;;
+    esac
     info "ffplay ${args[*]} $DEV"
     ffplay "${args[@]}" "$DEV" &
     run_player $!
