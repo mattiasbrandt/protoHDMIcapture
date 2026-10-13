@@ -7,7 +7,7 @@
 #   config_read ARRAY    the file's own values into an associative array
 #   config_write K=V...  set keys in the config file (config_set K V for one)
 #   config_unset K...    remove keys from the config file
-#   card_list            "node<TAB>serial<TAB>card type" for every capture node
+#   card_list            "node|serial|card type" for every capture node
 #   resolve_card         set DEV (the card's video node) and CARD_NAME
 #   resolve_audio_source set SRC (the card's PipeWire source)
 #   card_serial DEV      print the USB serial of a video node
@@ -153,12 +153,14 @@ _is_capture_node() {
     _card_info "$1" | sed -n '/Device Caps/,/^[^[:space:]]/p' | grep -q 'Video Capture'
 }
 
+# "|", not a tab: read collapses runs of whitespace separators, so an empty
+# serial between two tabs would shift the card type into the serial field.
 card_list() {
     local n
     for n in /dev/video*; do
         [ -e "$n" ] || continue
         _is_capture_node "$n" || continue
-        printf '%s\t%s\t%s\n' "$n" "$(card_serial "$n")" "$(_card_type "$n")"
+        printf '%s|%s|%s\n' "$n" "$(card_serial "$n")" "$(_card_type "$n")"
     done
 }
 
@@ -166,7 +168,7 @@ resolve_card() {
     CARD_ERROR=""
     if [ -z "${DEV:-}" ]; then
         local n serial type
-        while IFS=$'\t' read -r n serial type; do
+        while IFS='|' read -r n serial type; do
             if [ -n "${CARD_SERIAL:-}" ]; then
                 [ "$serial" = "$CARD_SERIAL" ] || continue
             elif [ -n "${IGNORE_CARDS_RE:-}" ]; then
