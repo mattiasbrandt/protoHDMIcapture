@@ -159,8 +159,13 @@ for _knob in $REQUESTED; do
     [[ " ${BACKEND_KNOBS[$BACKEND]} " == *" $_knob "* ]] \
         || warn "BACKEND=$BACKEND ignores $_knob=${!_knob} (it honours: ${BACKEND_KNOBS[$BACKEND]})"
 done
-[[ " ${BACKEND_WINDOWS[$BACKEND]} " == *" $WINDOW "* ]] \
-    || warn "BACKEND=$BACKEND cannot make a $WINDOW window by itself; you get an undecorated window the desktop sizes"
+if ! [[ " ${BACKEND_WINDOWS[$BACKEND]} " == *" $WINDOW "* ]]; then
+    if desktop_can place_window; then
+        info "BACKEND=$BACKEND cannot make a $WINDOW window by itself; the $DESKTOP adapter shapes it"
+    else
+        warn "BACKEND=$BACKEND cannot make a $WINDOW window by itself; you get an undecorated window the desktop sizes"
+    fi
+fi
 # Not a knob but a mode: the other backends would play no audio at all.
 [ "$AUDIO" != "mpv" ] || [ "$BACKEND" = "mpv" ] \
     || die "AUDIO=mpv needs BACKEND=mpv; use AUDIO=loopback with $BACKEND"
@@ -225,6 +230,14 @@ PLAYER_PID=""
 run_player() {
     PLAYER_PID=$1
     echo "$PLAYER_PID" >"$RUN_DIR/video.pid"
+    # Shape the window once it maps, without holding up the wait below. The
+    # helper closes the lock fds it inherited: it can outlive a short-lived
+    # player by a moment, and must not keep a relaunch locked out.
+    (
+        exec {VIDEO_LOCK}>&-
+        [ -z "$AUDIO_LOCK" ] || exec {AUDIO_LOCK}>&-
+        if desktop_place_window "$PLAYER_PID" "$WINDOW" "$WINDOW_SIZE"; then info "$DESKTOP_MSG"; fi
+    ) &
     wait "$PLAYER_PID"
 }
 stop_player() {

@@ -7,8 +7,16 @@
 #   desktop_focus_pid PID                  raise that process's window; 1 if this desktop can't
 #   desktop_refresh_match FPS              switch the focused monitor to its mode nearest FPS
 #   desktop_refresh_restore                undo desktop_refresh_match; safe to call twice
+#   desktop_place_window PID WINDOW SIZE   shape the player's window where its own flags
+#                                          cannot (size, border); 1 if nothing was done
+#   desktop_can FEATURE                    0 if this adapter implements refresh_match or
+#                                          place_window
+#   desktop_outputs                        "name WxH@Hz [focused]" per monitor, if known
+#   desktop_active_window / desktop_focus_window ID
+#                                          remember and restore which window has focus
 #
-# desktop_refresh_match leaves a one-line report in DESKTOP_MSG: returns 0 when
+# desktop_place_window and desktop_refresh_match leave a one-line report in
+# DESKTOP_MSG. desktop_refresh_match returns 0 when
 # there is nothing to worry about, 1 when the display was left alone for a
 # reason worth telling the user. It never exits.
 #
@@ -42,6 +50,48 @@ hyprland)
         hyprctl dispatch "hl.dsp.focus({ window = \"pid:$1\" })" >/dev/null 2>&1
     }
 
+    desktop_can() { case "$1" in refresh_match|place_window) return 0 ;; esac; return 1; }
+
+    desktop_active_window() { hyprctl activewindow -j 2>/dev/null | jq -r '.address // empty'; }
+    desktop_focus_window() {
+        [ -n "$1" ] && hyprctl dispatch "hl.dsp.focus({ window = \"address:$1\" })" >/dev/null 2>&1
+    }
+
+    desktop_outputs() {
+        hyprctl monitors -j 2>/dev/null | jq -r '.[] |
+            "\(.name) \(.width)x\(.height)@\(.refreshRate * 100 | round / 100)Hz\(if .focused then " focused" else "" end)"'
+    }
+
+    # Hyprland floats or tiles windows itself and ignores a client's size and
+    # maximize requests, and it draws the border, not the client. So the
+    # player's own flags are applied first and this finishes the job: float
+    # + resize + centre for windowed, maximize + no border for borderless.
+    # fullscreen needs nothing.
+    desktop_place_window() {
+        local pid="$1" mode="$2" size="$3" sel i
+        sel="pid:$1"
+        [ "$mode" = fullscreen ] && { DESKTOP_MSG="window: fullscreen, nothing to place"; return 1; }
+        # The window maps some time after the process starts; wait for it.
+        for i in $(seq 30); do
+            hyprctl clients -j 2>/dev/null | jq -e --argjson p "$pid" 'any(.[]; .pid == $p)' >/dev/null && break
+            [ "$i" = 30 ] && { DESKTOP_MSG="window: pid $pid never mapped a window"; return 1; }
+            sleep 0.1
+        done
+        _hl() { hyprctl dispatch "$1" >/dev/null 2>&1; }
+        case "$mode" in
+        windowed)
+            _hl "hl.dsp.window.float({ action = \"enable\", window = \"$sel\" })"
+            _hl "hl.dsp.window.resize({ x = ${size%x*}, y = ${size#*x}, window = \"$sel\" })"
+            _hl "hl.dsp.window.center({ window = \"$sel\" })"
+            DESKTOP_MSG="window: floating ${size}, centred" ;;
+        borderless)
+            _hl "hl.dsp.window.set_prop({ prop = \"border_size\", value = \"0\", window = \"$sel\" })"
+            _hl "hl.dsp.window.set_prop({ prop = \"rounding\", value = \"0\", window = \"$sel\" })"
+            _hl "hl.dsp.window.fullscreen({ mode = \"maximized\", window = \"$sel\" })"
+            DESKTOP_MSG="window: maximized, no border" ;;
+        esac
+    }
+
     desktop_refresh_match() {
         # Mode selection lives in pick-refresh-mode.py: Python braces inside
         # $( ) are brittle and unlintable.
@@ -73,6 +123,14 @@ hyprland)
     ;;
 generic)
     desktop_focus_pid() { return 1; }
+    desktop_can() { return 1; }
+    desktop_active_window() { :; }
+    desktop_focus_window() { return 1; }
+    desktop_outputs() { return 1; }
+    desktop_place_window() {
+        DESKTOP_MSG="window: left to the player's own flags"
+        return 1
+    }
     desktop_refresh_match() {
         DESKTOP_MSG="REFRESH=match is only implemented for Hyprland; leaving the display alone"
         return 1
