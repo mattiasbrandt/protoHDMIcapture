@@ -30,7 +30,9 @@ if command -v hyprctl >/dev/null 2>&1; then
            | jq -r '.[] | select(.class == "mpv" and .title == "protoHDMIcapture") | .address' \
            | head -1)
     if [ -n "${addr:-}" ] && [ "$addr" != "null" ]; then
-        hyprctl dispatch focuswindow "address:$addr" >/dev/null 2>&1
+        # Lua-configured Hyprland (Omarchy) rejects `dispatch focuswindow` as a
+        # Lua syntax error; the dispatcher has to be written as Lua.
+        hyprctl dispatch "hl.dsp.focus({ window = \"address:$addr\" })" >/dev/null 2>&1
         exit 0
     fi
 fi
