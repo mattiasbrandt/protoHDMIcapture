@@ -133,10 +133,10 @@ hyprland)
         # Mode selection lives in pick-refresh-mode.py: Python braces inside
         # $( ) are brittle and unlintable.
         local plan name target restore cur chosen
-        plan=$("$_DESKTOP_LIB/pick-refresh-mode.py" "$1" \
-               < <(hyprctl monitors -j 2>/dev/null) 2>/dev/null) || true
-        if [ -z "$plan" ]; then
-            DESKTOP_MSG="could not work out a refresh plan; leaving the display alone"
+        # On failure the script prints only its reason, on stderr.
+        if ! plan=$("$_DESKTOP_LIB/pick-refresh-mode.py" "$1" \
+                    < <(hyprctl monitors -j 2>/dev/null) 2>&1) || [ -z "$plan" ]; then
+            DESKTOP_MSG="could not work out a refresh plan (${plan:-no reason given}); leaving the display alone"
             return 1
         fi
         IFS='|' read -r name target restore cur chosen <<<"$plan"

@@ -404,7 +404,7 @@ wait_player() {
             if [ -n "${which:-}" ] && [ "$which" = "${LOOPBACK_PID:-}" ]; then
                 # Reaped by that wait: its PID may be reused, so never signal it.
                 LOOPBACK_PID=""
-                rm -f "$RUN_DIR/audio.pid"
+                rm -f "$RUN_DIR/audio.pid" "$RUN_DIR/audio.env"
                 audio_failed "the audio loopback stopped mid-feed (exit status $rc)"
                 continue
             fi
@@ -506,7 +506,13 @@ trap 'SYNC_REQUESTED=1' USR1
 trap arm_reaper USR2
 
 DEBUG_JOB=""
-trap 'stop_player; stop_audio; desktop_refresh_restore || warn "$DESKTOP_MSG"; [ -z "$DEBUG_JOB" ] || kill "$DEBUG_JOB" 2>/dev/null' EXIT
+# The player's files go with the session that holds the video lock (in the
+# tuning pair the --tune half holds none); a session killed outright leaves
+# them, and the next one reads video.pid for its orphan.
+session_files_remove() {
+    [ -z "${VIDEO_LOCK:-}" ] || rm -f "$RUN_DIR"/{video.pid,backend,window.mode,window.size,ipc.path}
+}
+trap 'stop_player; stop_audio; desktop_refresh_restore || warn "$DESKTOP_MSG"; session_files_remove; [ -z "$DEBUG_JOB" ] || kill "$DEBUG_JOB" 2>/dev/null' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 

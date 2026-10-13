@@ -7,7 +7,7 @@ contract; change a writer or a reader, update the row.
 | File | Written by | Read by | Meaning |
 |---|---|---|---|
 | `video.lock` | `view.sh` (flock, held while a player runs) | `view.sh`, setup sync stage (probe only) | one video window at a time |
-| `video.pid` | `view.sh` `run_player` | `view.sh` (second launch focuses it), `--place-window`, dashboard, setup sync readiness | PID of the **player** (mpv/gst/ffplay), not of `view.sh` |
+| `video.pid` | `view.sh` `run_player`; removed in its EXIT trap (left by a killed session) | `view.sh` (second launch focuses it), `--place-window`, dashboard, setup sync readiness | PID of the **player** (mpv/gst/ffplay), not of `view.sh` |
 | `audio.lock` | `view.sh` (flock, held while pw-loopback runs) | `view.sh`, setup sync stage (probe only) | one audio loopback at a time |
 | `audio.pid` / `audio.env` | `view.sh` `start_audio`: `audio.pid` at start, `audio.env` only once the loopback is linked (both removed by `stop_audio`) | dashboard, `debug_after_start`, mpv script (`audio.env`: confirms a sync change) | loopback PID; `DELAY`, `LAT_MS`, `SRC` |
 | `audio.log` | `view.sh` `start_audio` (the loopback's stdout and stderr, new each start) | `audio_failed` (its last lines go in the warning), the user | why a loopback failed |
@@ -15,9 +15,9 @@ contract; change a writer or a reader, update the row.
 | `audio.request` | mpv script (overlay's ctrl/alt −/+), written as `.tmp` and renamed, then USR1 to `view.sh` (its parent, PID passed as a script option and checked against mpv's own parent first) | `view.sh` `apply_sync_request`, which claims it by renaming to `.claimed`, then removes it | the wanted `DELAY`; `view.sh` restarts its own loopback with it |
 | `audio.ctl.lock` | `lib/audio.sh` (flock, held while one control runs) | `view.sh --audio`, `audio_state_apply` | one mute/volume change or restore at a time |
 | `audio.state` | `view.sh --audio` (overlay's m, 9, 0); cleared by `take_audio_lock` at a session's start | `start_audio` (`audio_state_apply`) | the session's loopback `VOLUME` and `MUTE`, re-applied to a restarted loopback; written via `audio.state.tmp` and renamed |
-| `backend`, `ipc.path` | `view.sh` `run_player` | dashboard | which player; mpv IPC socket (absent for gst/ffplay) |
+| `backend`, `ipc.path` | `view.sh` `run_player`; removed in its EXIT trap (left by a killed session) | dashboard | which player; mpv IPC socket (absent for gst/ffplay) |
 | `refresh.restore` | `desktop_refresh_match` (hyprland), before it switches; removed by `desktop_refresh_restore` | `view.sh` at start, with the video lock held (`desktop_refresh_recover`) | `monitor\|rate set\|original rate\|restore command`: a switch a killed session never undid; restored only if the monitor is still at the rate set |
-| `window.mode`, `window.size` | `view.sh` `run_player`, `--place-window` | `--place-window` | current `WINDOW` and `WINDOW_SIZE` for the f key |
+| `window.mode`, `window.size` | `view.sh` `run_player`, `--place-window`; removed in its EXIT trap (left by a killed session) | `--place-window` | current `WINDOW` and `WINDOW_SIZE` for the f key |
 | `player.quit` | mpv script `on_unload` hook (via `quitfile`), then USR2 to `view.sh` (checked as for `audio.request`) | `view.sh` after the player exits | mpv began to quit; a later SIGKILL is `view.sh`'s 2 s quit bound (teardown hung without frames), another signal death is the upstream teardown crash |
 | `debug.log` | `view.sh` with `DEBUG≠off` (tee) | dashboard | the session's full output |
 | `mpv.sock` | mpv, when `DEBUG=window` and `IPC=""` | dashboard | private IPC socket for that session |
