@@ -15,21 +15,103 @@ Research + test kit. Written 2026-09-06, before the card was connected.
 ## Quick start
 
 ```bash
-./view.sh --setup             # pick the card, mode, audio and display; writes the config
-./view.sh                     # play; close the window or Ctrl-C to stop
-AUDIO=none ./view.sh          # terminal 1 } line audio up with video,
+./view.sh                     # play; the first run offers the setup wizard
+./view.sh --setup             # (re)run the wizard: card, mode, audio, display, sync
+./view.sh --debug             # play with verbose logging and a live dashboard
+AUDIO=none ./view.sh          # terminal 1 } re-tune audio sync later,
 ./view.sh --tune              # terminal 2 } then keep the DELAY it prints
 ```
 
+In the video window: **f** cycles fullscreen → borderless → windowed, **d**
+opens the live dashboard, **i** / **I** show mpv's own frame-timing overlay,
+**q** quits.
+
 Settings are environment variables, or `KEY=value` lines in
-`~/.config/protohdmicapture/config` (see `config.example`); the environment
-wins. Machine-specific values (which card, which cameras to skip, your tuned
-`DELAY`) belong in that file, not in the scripts.
+`~/.config/protohdmicapture/config` (the wizard writes it; see
+`config.example`); the environment wins. Machine-specific values (which card,
+which cameras to skip, your tuned `DELAY`) belong in that file, not in the
+scripts.
 
 One video window and one audio loopback run at a time, however they were
 started: a second launch focuses the running window (Hyprland) or says it is
 already running, and a second loopback is refused rather than doubling the
 audio. The tuning pair above is one of each, so it is allowed.
+
+### The setup wizard
+
+`./view.sh --setup` walks through, in a centered terminal UI:
+
+1. **Capture card**: every capture device with its serial; the one with a
+   known capture-chip USB id is recommended. Pinned by USB serial
+   (`CARD_SERIAL`), or by node when the card reports none.
+2. **USB link**: the chip the id implies and the negotiated speed; 480 Mbit/s
+   (USB 2) is flagged, since uncompressed 1080p60 needs USB 3.
+3. **Picture format**: the card's own mode list, best first (frame rate, then
+   size, then uncompressed).
+4. **Signal check**: 2 seconds of capture at that mode, measuring the real
+   frame rate. UVC cards cannot report signal lock, so frames are the test.
+5. **Audio**: the card's own input (found by serial at every start), another
+   source, or none.
+6. **Display mode** and window size, **refresh matching** (where the desktop
+   adapter can), **player** and scaling.
+7. **Audio sync**: optional; a windowed feed without audio opens and the
+   j/k/h/l tuner runs in the wizard's terminal.
+8. **Review**: a diff of exactly what will change; nothing is written before
+   this. Then an optional test feed that behaves exactly as the saved config.
+
+Re-running it edits: every question starts on the current value. Each run
+also writes a Markdown report (summary with verdicts, config changes, and the
+raw `lsusb` / `v4l2-ctl` / `pactl` / kernel-log output) to
+`~/.local/state/protohdmicapture/setup-<time>.md`, saved or not; the newest 10
+are kept. Paste one to an AI agent or a forum post when something is off.
+
+On first run `./view.sh` offers the wizard (declining asks never again), and
+the menu launcher opens it in a terminal, starting the feed only once
+settings are saved. `NO_SETUP=1` skips both.
+
+### Display modes
+
+`WINDOW` works the way a game's display setting does:
+
+| `WINDOW` | what you get | latency |
+|---|---|---|
+| `fullscreen` (default) | covers the monitor it opens on | lowest: direct scanout, tearing possible |
+| `borderless` | maximized, no border; the desktop's bar stays visible | composited |
+| `windowed` | a normal window of `WINDOW_SIZE` (default `1280x720`), centred | composited |
+
+Each player is asked for the mode with its own flags (mpv `--fs` /
+`--border=no --window-maximized` / `--geometry`, ffplay `-fs` / `-noborder` /
+`-x -y`, gst `fullscreen=true`). Where the compositor ignores a client's
+request, the desktop adapter finishes the job: on Hyprland it floats, sizes
+and centres a windowed feed, and maximizes a borderless one with its border
+removed; this also gives gst, which cannot ask for either, both modes.
+`FULLSCREEN=yes|no` still works as a deprecated alias.
+
+**f** in the mpv window cycles the three live. mpv's own properties are set
+first, then `view.sh --place-window` runs the same adapter, which undoes
+whatever the previous mode set.
+
+### Debug mode
+
+`DEBUG=log` (or a saved preference from the wizard) records, on screen and in
+`$XDG_RUNTIME_DIR/protohdmicapture/debug.log`:
+
+- every decision: each knob with where it came from (env, file, default),
+  locks, the audio link, refresh and window placement, the player's PID and
+  exit status
+- the format the device actually negotiated, read back 2 s after start
+- verbose player output, filtered for signal: mpv at `v` (libplacebo shader
+  chatter at `info`), gst warnings, QoS and the negotiated caps, ffplay's
+  stats line once a second
+- a perf line every 5 s: player and loopback CPU, player memory, and for mpv
+  the captured and display fps and the drop and delay counters
+
+`DEBUG=window`, or `./view.sh --debug` for one run, adds a live dashboard in
+its own terminal, refreshed every second: those numbers, PipeWire xruns for
+the loopback, every monitor's mode and the latest warnings. It holds no lock
+and only reads the session's run directory, so closing it never touches the
+feed; it closes itself when the feed ends. **d** in the mpv window opens it
+on demand.
 
 ---
 
@@ -181,7 +263,7 @@ That alone is probably a bigger perceived-smoothness win than any player flag.
 
 Hyprland 0.56.2 has `general:allow_tearing` (currently `false`) plus a
 per-window `immediate` rule; tearing only engages when the window is fullscreen
-and alone on the output. Worth about one frame. Note the option is
+(`WINDOW=fullscreen`, not borderless) and alone on the output. Worth about one frame. Note the option is
 `render:direct_scanout` in this version, not the older `misc:no_direct_scanout`.
 
 ```ini
@@ -246,7 +328,8 @@ warning, never silence:
 | knob | mpv | gst | ffplay |
 |---|---|---|---|
 | `FMT` | yes | yes (`yuyv422`→YUY2, `nv12`, `mjpeg`, `rawvideo`) | yes |
-| `FULLSCREEN` | yes | yes (waylandsink `fullscreen=true`) | yes |
+| `WINDOW` fullscreen | yes | yes (waylandsink `fullscreen=true`) | yes |
+| `WINDOW` borderless / windowed, `WINDOW_SIZE` | yes | only through the desktop adapter (Hyprland) | yes |
 | `SCALING`, `LEVELS`, `IPC` | yes | no | no |
 | `GST_IO_MODE` | no | yes | no |
 | `AUDIO=mpv` | yes | refused | refused |
@@ -312,13 +395,16 @@ tidy-up sometime, no functional effect.
 |---|---|---|
 | `CARD_SERIAL` | — | USB serial of the card; pins it among other cameras and across `/dev/video` renumbering. The setup wizard writes it |
 | `IGNORE_CARDS_RE` | — | without `CARD_SERIAL`: v4l2 card types to skip while scanning, e.g. `OBSBOT\|Integrated Camera` |
-| `FULLSCREEN` | `yes` | fullscreens on whatever monitor it opens on — no output is hardcoded, Hyprland decides, same as everything else on this desktop |
+| `WINDOW` | `fullscreen` | `fullscreen` \| `borderless` \| `windowed`; see "Display modes". Opens on whatever monitor the desktop picks, none is hardcoded. **f** cycles it live |
+| `WINDOW_SIZE` | `1280x720` | window size for `WINDOW=windowed` |
+| `DEBUG` | `off` | `log` \| `window`; see "Debug mode". `--debug` = `window` for one run |
+| `FULLSCREEN` | — | deprecated: `yes` = `WINDOW=fullscreen`, `no` = `WINDOW=windowed` |
 | `SCALING` | `balanced` | `balanced` = spline36/mitchell, no deband, no dither. `fast` = `--profile=fast`, bilinear throughout, lowest GPU time and visibly softer. `config` = leave mpv.conf's high-quality settings alone |
 | `LEVELS` | `auto` | `limited` or `full` if blacks look crushed or washed. The card reports `Quantization: Default (maps to Limited Range)` and PS5 outputs limited over HDMI, so `auto` should be right — this is the knob if it isn't |
 | `IPC` | `/tmp/mpv-protohdmicapture.sock` | mpv IPC socket, so you can drive it from a keybind or script |
 | `REFRESH` | `keep` | `match` switches the focused monitor to its mode nearest `FPS` for the session and restores it on exit (Hyprland only). No output hardcoded; resolution, position, scale and transform all preserved |
 
-Three more that are simply on, with no knob, because there's no case for the
+A few more that are simply on, with no knob, because there's no case for the
 other setting here:
 
 - `--force-window=immediate` — window appears instantly rather than after the
@@ -327,6 +413,10 @@ other setting here:
   it from, which matters because `--tune` runs in a second terminal
 - `--stop-screensaver=always` — a capture feed produces no input events, so idle
   blanking would otherwise fire mid-game
+- `--term-status-msg=` — silences the per-frame `V: hh:mm:ss` status line,
+  which means nothing for a live feed and used to fill the run log
+- `--script=lib/mpv/protohdmicapture.lua` — the **f** and **d** keys, bound
+  for this window only, so your `input.conf` is untouched
 
 Driving it over IPC, e.g.:
 
@@ -642,14 +732,18 @@ v4l2-ctl -d /dev/video2 --get-fmt-video
   and its USB link, lists its modes, checks the signal, picks audio, display
   mode and player, writes the config and a Markdown diagnostics report to
   `~/.local/state/protohdmicapture/`
-- `lib/ui.sh` — the wizard's centered terminal UI
+- `lib/ui.sh` — the wizard's and dashboard's centered terminal UI
+- `lib/debug.sh` — `DEBUG=log`: decision lines, perf pulse, player verbosity
+- `lib/dashboard.sh` — the live debug dashboard (`./view.sh --dashboard`)
+- `lib/mpv/protohdmicapture.lua` — the **f** / **d** keys in the mpv window
 - `view.sh` — the player; every knob is an env var or config line, plus
   `--tune` for interactive A/V sync. Owns the one-window/one-loopback rule
 - `launch.sh` — GUI entry point used by the desktop launcher; see below
 - `lib/card.sh` — config file, and which `/dev/video` node and PipeWire source
   are the card
-- `lib/desktop.sh` — notifications, focusing a window, refresh switching;
-  Hyprland adapter plus a generic one for every other desktop
+- `lib/desktop.sh` — notifications, opening a terminal, focusing and shaping
+  a window, refresh switching; Hyprland adapter plus a generic one for every
+  other desktop
 - `lib/pick-refresh-mode.py` — picks the focused monitor's mode closest to
   `FPS` and emits the `hyprctl eval` Lua for switching and restoring
 - `config.example` — the settings file, documented
@@ -690,8 +784,13 @@ here:
 
 `launch.sh` adds what only a menu launch needs, and works on any desktop:
 
-- **Menu defaults:** `REFRESH=match`. From a menu there is no place to type it,
-  and the 100 Hz judder described above is the whole reason that knob exists.
+- **First run:** with no config file it opens a terminal running the setup
+  wizard (`xdg-terminal-exec`, else `$TERMINAL`, else `x-terminal-emulator`)
+  and waits for it; the feed starts only if settings were saved. With no
+  terminal at all it notifies and plays on defaults. `NO_SETUP=1` skips this.
+- **Menu defaults:** `REFRESH=match` unless the config sets `REFRESH`. From a
+  menu there is no place to type it, and the 100 Hz judder described above is
+  the whole reason that knob exists.
 - **The run log survives** at `$XDG_RUNTIME_DIR/protohdmicapture.log`.
 - **Unreported failures still notify:** any other non-zero exit (a missing tool,
   a crash) gets a generic "failed, see log" notification.

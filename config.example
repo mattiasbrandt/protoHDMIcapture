@@ -17,5 +17,8 @@
 #WINDOW=fullscreen
 #WINDOW_SIZE=1280x720
 
+# Troubleshooting: off | log | window (log plus a live dashboard)
+#DEBUG=off
+
 # Any other view.sh knob works here too: DEV SRC SINK RES FPS FMT LAT_MS
 # BACKEND AUDIO SCALING LEVELS IPC REFRESH GST_IO_MODE
