@@ -30,6 +30,8 @@ HERE=$(dirname "$(dirname "$(readlink -f "$0")")")
 . "$HERE/lib/capture-cards.sh"
 # shellcheck source=lib/sources.sh
 . "$HERE/lib/sources.sh"
+# shellcheck source=lib/preflight.sh
+. "$HERE/lib/preflight.sh"
 
 FROM_LAUNCHER=""; THEN_PLAY=""
 for arg in "$@"; do
@@ -146,6 +148,20 @@ stage_welcome() {
     if [ "${#ENV_OVERRIDES[@]}" -gt 0 ]; then
         center ""
         ui_warn "Set in your environment, and winning over the file: ${ENV_OVERRIDES[*]}"
+    fi
+    # What the feed it sets up will need (mpv, the loopback), plus ffmpeg
+    # for the signal check.
+    if ! preflight_check mpv loopback match off ffmpeg; then
+        center ""
+        ui_bad "Missing, needed before setup can go on:"
+        ui_list "${PREFLIGHT_MISSING[@]}"
+        center ""
+        say "Install them, then run ./view.sh --setup again."
+        exit 1
+    fi
+    if [ "${#PREFLIGHT_OFF[@]}" -gt 0 ]; then
+        center ""
+        ui_list "${PREFLIGHT_OFF[@]}"
     fi
     center ""
     pause

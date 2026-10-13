@@ -31,6 +31,8 @@ HERE=$(dirname "$(readlink -f "$0")")
 . "$HERE/lib/debug.sh"
 # shellcheck source=lib/audio.sh
 . "$HERE/lib/audio.sh"
+# shellcheck source=lib/preflight.sh
+. "$HERE/lib/preflight.sh"
 
 # --- mode --------------------------------------------------------------------
 # --setup hands over before the config is even read, so a config that would
@@ -146,6 +148,9 @@ if ! settings_validate; then
     for _n in "${SETTINGS_ERRORS[@]:1}"; do warn "$_n"; done
     die "${SETTINGS_ERRORS[0]}"
 fi
+_pf_ok=1; preflight_check "$BACKEND" "$AUDIO" "$REFRESH" "$DEBUG" || _pf_ok=""
+for _n in "${PREFLIGHT_OFF[@]}"; do warn "$_n"; done
+[ -n "$_pf_ok" ] || die "missing: $(printf '%s, ' "${PREFLIGHT_MISSING[@]}" | sed 's/, $//')"
 
 
 # --- one window, one loopback ----------------------------------------------

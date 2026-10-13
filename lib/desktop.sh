@@ -31,12 +31,19 @@
 #
 # DESKTOP selects the adapter: "hyprland" when a Hyprland session is running,
 # "generic" otherwise. DESKTOP=generic forces the plain behaviour anywhere.
+# Hyprland without jq gets the generic adapter too, every hyprland extra
+# reads hyprctl's JSON through jq; DESKTOP_NOTE says so (lib/preflight.sh).
 
 _DESKTOP_LIB=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 
 if [ -z "${DESKTOP:-}" ]; then
     if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] && command -v hyprctl >/dev/null 2>&1; then
-        DESKTOP=hyprland
+        if command -v jq >/dev/null 2>&1; then
+            DESKTOP=hyprland
+        else
+            DESKTOP=generic
+            DESKTOP_NOTE="Hyprland extras are off (window placement, focusing the running window, REFRESH=match): they need jq (Arch package: jq)"
+        fi
     else
         DESKTOP=generic
     fi
