@@ -7,10 +7,12 @@
 #   config_read ARRAY    the file's own values into an associative array
 #   config_write K=V...  set keys in the config file (config_set K V for one)
 #   config_unset K...    remove keys from the config file
-#   card_list            "node|serial|card type" for every capture node
+#   card_list            "node|serial|port|card type" for every capture node
 #   resolve_card         set DEV (the card's video node) and CARD_NAME
 #   resolve_audio_source set SRC (the card's PipeWire source)
 #   card_serial DEV      print the USB serial of a video node
+#   card_port DEV        print the USB port path (udev ID_PATH) of a video node
+#   card_usb_dir DEV     print the sysfs directory of the USB device behind it
 #
 # resolve_* return 1 with the reason in CARD_ERROR instead of exiting, so each
 # caller decides how to fail.
@@ -18,7 +20,7 @@
 CONFIG_FILE="${CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/protohdmicapture/config}"
 
 # Keys the config file may set. Anything else is reported, not silently used.
-CONFIG_KEYS=(CARD_SERIAL IGNORE_CARDS_RE DEV SRC SINK RES FPS FMT DELAY LAT_MS
+CONFIG_KEYS=(CARD_SERIAL CARD_PORT IGNORE_CARDS_RE DEV SRC SINK RES FPS FMT DELAY LAT_MS
              BACKEND AUDIO WINDOW WINDOW_SIZE SCALING LEVELS IPC REFRESH GST_IO_MODE
              DEBUG FULLSCREEN)   # FULLSCREEN: deprecated alias, still read
 
@@ -44,14 +46,21 @@ _config_line() {
 
 # A variable already set in the environment is left alone, so
 # `DELAY=0.1 ./view.sh` beats the file.
+#
+# The keys that pick the card are one setting: `CARD_PORT=... ./view.sh`
+# plays that card even when the file pins another by CARD_SERIAL, so when
+# the environment sets any of them the file's are all skipped.
+PIN_KEYS=(CARD_SERIAL CARD_PORT DEV)
 load_config() {
     [ -r "$CONFIG_FILE" ] || return 0
-    local line rc
+    local line rc k env_pin=""
+    for k in "${PIN_KEYS[@]}"; do [ -n "${!k:-}" ] && env_pin=1; done
     while IFS= read -r line || [ -n "$line" ]; do
         _config_line "$line"; rc=$?
         if [ "$rc" = 2 ]; then
             printf '\033[33m** %s: ignoring unknown line: %s\033[0m\n' "$CONFIG_FILE" "$line" >&2
         elif [ "$rc" = 0 ]; then
+            [ -n "$env_pin" ] && [[ " ${PIN_KEYS[*]} " == *" $_CK "* ]] && continue
             [ -n "${!_CK+x}" ] || printf -v "$_CK" '%s' "$_CV"
         fi
     done <"$CONFIG_FILE"
@@ -142,6 +151,22 @@ card_serial() {
     _card_info "$1" | sed -n 's/^[[:space:]]*Serial[[:space:]]*:[[:space:]]*//p' | head -1
 }
 
+# The physical USB port, stable across replugs into the same port. It pins a
+# card that reports no serial, and tells two identical such cards apart.
+card_port() {
+    udevadm info -q property -n "$1" 2>/dev/null | sed -n 's/^ID_PATH=//p'
+}
+
+# /sys/class/video4linux/videoN/device is the USB interface; its parent is
+# the USB device, which carries the ids, the link speed and the card's sound
+# interface. Nothing for a node that is not on USB.
+card_usb_dir() {
+    local intf
+    intf=$(readlink -f "/sys/class/video4linux/$(basename "$1")/device" 2>/dev/null) || return 0
+    [ -n "$intf" ] && [ -r "$(dirname "$intf")/idVendor" ] && dirname "$intf"
+    return 0
+}
+
 _card_type() {
     _card_info "$1" | sed -n 's/^[[:space:]]*Card type[[:space:]]*:[[:space:]]*//p'
 }
@@ -160,17 +185,19 @@ card_list() {
     for n in /dev/video*; do
         [ -e "$n" ] || continue
         _is_capture_node "$n" || continue
-        printf '%s|%s|%s\n' "$n" "$(card_serial "$n")" "$(_card_type "$n")"
+        printf '%s|%s|%s|%s\n' "$n" "$(card_serial "$n")" "$(card_port "$n")" "$(_card_type "$n")"
     done
 }
 
 resolve_card() {
     CARD_ERROR=""
     if [ -z "${DEV:-}" ]; then
-        local n serial type
-        while IFS='|' read -r n serial type; do
+        local n serial port type
+        while IFS='|' read -r n serial port type; do
             if [ -n "${CARD_SERIAL:-}" ]; then
                 [ "$serial" = "$CARD_SERIAL" ] || continue
+            elif [ -n "${CARD_PORT:-}" ]; then
+                [ "$port" = "$CARD_PORT" ] || continue
             elif [ -n "${IGNORE_CARDS_RE:-}" ]; then
                 # Guarded: an empty pattern would match, and skip, every card.
                 grep -Eq "$IGNORE_CARDS_RE" <<<"$type" && continue
@@ -181,6 +208,8 @@ resolve_card() {
     if [ -z "${DEV:-}" ]; then
         if [ -n "${CARD_SERIAL:-}" ]; then
             CARD_ERROR="no capture card with serial $CARD_SERIAL found; is it plugged in? (CARD_SERIAL in $CONFIG_FILE)"
+        elif [ -n "${CARD_PORT:-}" ]; then
+            CARD_ERROR="no capture card on USB port $CARD_PORT; is it plugged in, and into the same port? Re-run ./view.sh --setup if it moved"
         else
             CARD_ERROR="no capture device found; set DEV=/dev/videoN (or run ./view.sh --setup)"
         fi
@@ -190,19 +219,26 @@ resolve_card() {
     CARD_NAME="$(_card_type "$DEV")"
 }
 
-# Match the card's own USB serial, which PipeWire embeds in the node name.
-# "First USB source" grabs a headset mic instead; observed on the original box.
+# The card's own audio input is the PipeWire source whose sysfs.path lies
+# under the same USB device as the video node. Works with or without a USB
+# serial; "first USB source" would grab a headset mic instead, as observed on
+# the original box.
 resolve_audio_source() {
     CARD_ERROR=""
     [ -n "${SRC:-}" ] && return 0
-    local serial
-    serial="$(card_serial "$DEV")"
-    if [ -n "$serial" ]; then
-        SRC=$(pactl list short sources 2>/dev/null \
-              | awk '$2 !~ /\.monitor$/ {print $2}' \
-              | grep -F "$serial" | head -1)
+    local usb
+    usb="$(card_usb_dir "$DEV")"
+    if [ -z "$usb" ]; then
+        CARD_ERROR="$DEV is not a USB device, so its audio input cannot be found; set SRC=<name from 'pactl list short sources'>"
+        return 1
     fi
+    SRC=$(pactl list sources 2>/dev/null | awk -v want="${usb#/sys}/" '
+        /^[[:space:]]*Name: /        { name = $2 }
+        /^[[:space:]]*sysfs\.path = / {
+            p = $0; sub(/^[^"]*"/, "", p); sub(/".*$/, "", p)
+            if (index(p, want) == 1 && name !~ /\.monitor$/) { print name; exit }
+        }')
     [ -n "$SRC" ] && return 0
-    CARD_ERROR="no audio source matches the card's serial '${serial:-<none>}'; set SRC=<name from 'pactl list short sources'>"
+    CARD_ERROR="no audio source on the card's USB device ($(basename "$usb")); set SRC=<name from 'pactl list short sources'>"
     return 1
 }

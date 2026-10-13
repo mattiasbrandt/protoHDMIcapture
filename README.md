@@ -43,15 +43,18 @@ audio. The tuning pair above is one of each, so it is allowed.
 
 1. **Capture card**: every capture device with its serial; the one with a
    known capture-chip USB id is recommended. Pinned by USB serial
-   (`CARD_SERIAL`), or by node when the card reports none.
+   (`CARD_SERIAL`), or by USB port (`CARD_PORT`) when the card reports none.
 2. **USB link**: the chip the id implies and the negotiated speed; 480 Mbit/s
-   (USB 2) is flagged, since uncompressed 1080p60 needs USB 3.
+   (USB 2) is flagged, since uncompressed 1080p60 needs USB 3, unless the
+   chip is a USB 2 one (MS2109) anyway.
 3. **Picture format**: the card's own mode list, best first (frame rate, then
    size, then uncompressed).
 4. **Signal check**: 2 seconds of capture at that mode, measuring the real
-   frame rate. UVC cards cannot report signal lock, so frames are the test.
-5. **Audio**: the card's own input (found by serial at every start), another
-   source, or none.
+   frame rate. UVC cards cannot report signal lock, so frames are the test,
+   and a few frames are checked for a uniformly black picture: some cards
+   (the MS2109) stream black at full rate with nothing plugged in.
+5. **Audio**: the card's own input (found on the card's USB device at every
+   start), another source, or none.
 6. **Display mode** and window size, **refresh matching** (where the desktop
    adapter can), **player** and scaling.
 7. **Audio sync**: optional; a windowed feed without audio opens and the
@@ -184,8 +187,9 @@ Two gotchas found in the current state:
 1. **Node numbers move.** The OBSBOT takes `video0`/`video1` and the card
    currently lands on `video2`/`video3` — but that depends purely on
    enumeration order, so it flips whenever either device is replugged. The
-   scripts pin the card by its USB serial (`CARD_SERIAL`), never by a fixed
-   node. Without a pinned serial they scan, skipping `IGNORE_CARDS_RE`.
+   scripts pin the card by its USB serial (`CARD_SERIAL`), or its USB port
+   (`CARD_PORT`) when it has no serial, never by a fixed node. Without a pin
+   they scan, skipping `IGNORE_CARDS_RE`.
 2. **You are not in the `video` group** (`mattias gamemode i2c uucp wheel`).
    Access works anyway because logind puts an ACL on `/dev/video*` for the
    active seat (`crw-rw----+`). Fine for an interactive session; it will *not*
@@ -394,7 +398,8 @@ tidy-up sometime, no functional effect.
 | var | default | what it does |
 |---|---|---|
 | `CARD_SERIAL` | — | USB serial of the card; pins it among other cameras and across `/dev/video` renumbering. The setup wizard writes it |
-| `IGNORE_CARDS_RE` | — | without `CARD_SERIAL`: v4l2 card types to skip while scanning, e.g. `OBSBOT\|Integrated Camera` |
+| `CARD_PORT` | — | USB port path (udev `ID_PATH`) of a card that reports no serial; found again after a replug into the same port. The setup wizard writes it. Any of `CARD_SERIAL`, `CARD_PORT`, `DEV` set in the environment overrides all three in the config file, so `CARD_PORT=... ./view.sh` plays a second card for one run |
+| `IGNORE_CARDS_RE` | — | without a pin: v4l2 card types to skip while scanning, e.g. `OBSBOT\|Integrated Camera` |
 | `WINDOW` | `fullscreen` | `fullscreen` \| `borderless` \| `windowed`; see "Display modes". Opens on whatever monitor the desktop picks, none is hardcoded. **f** cycles it live |
 | `WINDOW_SIZE` | `1280x720` | window size for `WINDOW=windowed` |
 | `DEBUG` | `off` | `log` \| `window`; see "Debug mode". `--debug` = `window` for one run |

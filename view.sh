@@ -117,7 +117,8 @@ done
 DEV="${DEV:-}"                  # /dev/videoN  (empty = find the card)
 SRC="${SRC:-}"                  # PipeWire source of the card's audio (auto)
 CARD_SERIAL="${CARD_SERIAL:-}"  # USB serial of the card; pins it among other cameras
-IGNORE_CARDS_RE="${IGNORE_CARDS_RE:-}"  # without CARD_SERIAL: card types to skip, e.g. 'OBSBOT|Integrated Camera'
+CARD_PORT="${CARD_PORT:-}"      # USB port path (udev ID_PATH); pins a card that reports no serial
+IGNORE_CARDS_RE="${IGNORE_CARDS_RE:-}"  # without a pin: card types to skip, e.g. 'OBSBOT|Integrated Camera'
 SINK="${SINK:-}"                # PipeWire sink to hear it on (empty = default)
 RES="${RES:-1920x1080}"         # capture resolution
 FPS="${FPS:-60}"                # capture framerate
@@ -245,7 +246,7 @@ fi
 if [ "$DEBUG" != off ] && [ "$MODE" = play ]; then
     debug_tee "$RUN_DIR/debug.log"
     dbg "protoHDMIcapture $(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo '?') · desktop $DESKTOP · log $RUN_DIR/debug.log"
-    debug_knob_sources CARD_SERIAL DEV SRC SINK RES FPS FMT DELAY LAT_MS BACKEND AUDIO \
+    debug_knob_sources CARD_SERIAL CARD_PORT DEV SRC SINK RES FPS FMT DELAY LAT_MS BACKEND AUDIO \
         WINDOW WINDOW_SIZE SCALING LEVELS IPC REFRESH GST_IO_MODE
 fi
 

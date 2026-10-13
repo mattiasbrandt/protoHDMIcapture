@@ -60,7 +60,7 @@ trap 'exit 143' TERM HUP
 
 # The keys this wizard decides. Anything else in the file (DELAY, LAT_MS, ...)
 # is carried over untouched.
-MANAGED=(CARD_SERIAL DEV IGNORE_CARDS_RE FMT RES FPS AUDIO SRC WINDOW WINDOW_SIZE
+MANAGED=(CARD_SERIAL CARD_PORT DEV IGNORE_CARDS_RE FMT RES FPS AUDIO SRC WINDOW WINDOW_SIZE
          REFRESH BACKEND SCALING DELAY DEBUG FULLSCREEN)
 
 # CUR: what the file says now. NEW: what it will say; "" = not in the file.
@@ -157,52 +157,53 @@ stage_welcome() {
     pause
 }
 
-# Which chip a USB id means, and what that implies. Cheap boxes borrow ids,
-# so the format list, not the model number, has the last word.
+# Which chip a USB id means, what that implies, and the fastest link the
+# chip uses ("chip|hint|link"; link empty when unknown). Cheap boxes borrow
+# ids, so the format list, not the model number, has the last word.
 chip_info() {
     case "$1" in
-        534d:2109) echo "MacroSilicon MS2109 (USB 2.0)|MJPEG is effectively required: YUYV manages about 5 fps at 1080p" ;;
-        345f:2130|534d:2130|534d:0021) echo "MacroSilicon MS2130 (USB 3.0)|uncompressed YUYV at 1080p60 needs the 5000 Mbit/s link" ;;
-        1e4e:7016) echo "MacroSilicon chip under a borrowed id|the 1e4e 'Cubeternet' vendor id is borrowed; on a USB 2 port it can reset-loop" ;;
-        534d:*|345f:*) echo "MacroSilicon family, exact chip unknown|go by the format list" ;;
-        *) echo "unknown chip|go by the format list" ;;
+        534d:2109) echo "MacroSilicon MS2109 (USB 2.0)|MJPEG is effectively required: YUYV manages about 5 fps at 1080p|480" ;;
+        345f:2130|534d:2130|534d:0021) echo "MacroSilicon MS2130 (USB 3.0)|uncompressed YUYV at 1080p60 needs the 5000 Mbit/s link|5000" ;;
+        1e4e:7016) echo "MacroSilicon chip under a borrowed id|the 1e4e 'Cubeternet' vendor id is borrowed; on a USB 2 port it can reset-loop|5000" ;;
+        534d:*|345f:*) echo "MacroSilicon family, exact chip unknown|go by the format list|" ;;
+        *) echo "unknown chip|go by the format list|" ;;
     esac
 }
 
 # vid:pid of the USB device behind a video node, or nothing.
 _usb_id() {
     local d
-    d=$(dirname "$(readlink -f "/sys/class/video4linux/$(basename "$1")/device" 2>/dev/null)")
-    [ -r "$d/idVendor" ] && echo "$(cat "$d/idVendor"):$(cat "$d/idProduct")"
+    d=$(card_usb_dir "$1")
+    [ -n "$d" ] && echo "$(cat "$d/idVendor"):$(cat "$d/idProduct")"
 }
 
 stage_usb() {
     stage "🔌 USB link"
-    # /sys/class/video4linux/videoN/device is the USB interface; its parent
-    # is the USB device, which carries the ids and the negotiated speed. The
-    # card may report no product string, so nothing here depends on one.
-    local intf
-    intf=$(readlink -f "/sys/class/video4linux/$(basename "$CARD_DEV")/device" 2>/dev/null)
-    USB_DIR=$(dirname "$intf")
-    if [ ! -r "$USB_DIR/idVendor" ]; then
+    # The card may report no product string, so nothing here depends on one.
+    USB_DIR=$(card_usb_dir "$CARD_DEV")
+    if [ -z "$USB_DIR" ]; then
         USB_RESULT="not a USB device"
         ui_warn "$CARD_DEV is not on USB; nothing to check here."
         center ""; pause; return
     fi
     VIDPID="$(cat "$USB_DIR/idVendor"):$(cat "$USB_DIR/idProduct")"
     LINK_SPEED=$(cat "$USB_DIR/speed" 2>/dev/null)
-    local chip hint
-    IFS='|' read -r chip hint <<<"$(chip_info "$VIDPID")"
+    local chip hint link
+    IFS='|' read -r chip hint link <<<"$(chip_info "$VIDPID")"
     CHIP="$chip"
     say "USB id  : ${BOLD}$VIDPID${RESET} · $chip"
     say "Port    : $(basename "$USB_DIR") · USB $(tr -d ' ' <"$USB_DIR/version" 2>/dev/null)"
     note "$hint"
     center ""
-    case "$LINK_SPEED" in
-        5000|10000|20000)
+    # A USB 2 chip on a USB 2 link is as good as it gets, not a fault.
+    case "$LINK_SPEED:$link" in
+        5000:*|10000:*|20000:*)
             USB_RESULT="ok"
             ui_ok "Link: $LINK_SPEED Mbit/s, enough for uncompressed 1080p60" ;;
-        480)
+        480:480)
+            USB_RESULT="ok"
+            ui_ok "Link: 480 Mbit/s (USB 2), all this chip uses" ;;
+        480:*)
             USB_RESULT="USB 2 link"
             ui_bad "Link: 480 Mbit/s, a USB 2 port or hub"
             note "Uncompressed 1080p60 needs USB 3: move the card to a rear USB 3 port." ;;
@@ -216,10 +217,10 @@ stage_usb() {
 
 stage_card() {
     stage "🎥 Capture card"
-    local -a nodes=() serials=() types=() items=()
-    local n serial type
-    while IFS='|' read -r n serial type; do
-        nodes+=("$n"); serials+=("$serial"); types+=("$type")
+    local -a nodes=() serials=() ports=() types=() items=()
+    local n serial port type
+    while IFS='|' read -r n serial port type; do
+        nodes+=("$n"); serials+=("$serial"); ports+=("$port"); types+=("$type")
     done < <(card_list)
     if [ "${#nodes[@]}" -eq 0 ]; then
         ui_bad "No video capture device found."
@@ -230,9 +231,12 @@ stage_card() {
 
     local def="" i
     for i in "${!nodes[@]}"; do
-        local label="${types[$i]}  ${DIM}${nodes[$i]}${serials[$i]:+ · serial ${serials[$i]}}${RESET}"
+        local id="${serials[$i]:+serial ${serials[$i]}}"
+        [ -n "$id" ] || id="${ports[$i]:+port ${ports[$i]}}"
+        local label="${types[$i]}  ${DIM}${nodes[$i]}${id:+ · $id}${RESET}"
         items+=("$i|$label")
         if [ -n "${serials[$i]}" ] && [ "${serials[$i]}" = "${CUR[CARD_SERIAL]:-}" ]; then def=$i; fi
+        if [ -z "$def" ] && [ -n "${ports[$i]}" ] && [ "${ports[$i]}" = "${CUR[CARD_PORT]:-}" ]; then def=$i; fi
         [ -z "$def" ] && [ "${nodes[$i]}" = "${CUR[DEV]:-}" ] && def=$i
     done
     # Nothing chosen before: recommend the first device whose USB id is a
@@ -262,11 +266,20 @@ stage_card() {
     CARD_TYPE="${types[$pick]}"
     if [ -n "${serials[$pick]}" ]; then
         NEW[CARD_SERIAL]="${serials[$pick]}"
+        NEW[CARD_PORT]=""
         NEW[DEV]=""
         center ""
         ui_ok "Pinned by USB serial ${serials[$pick]}: found wherever it enumerates."
+    elif [ -n "${ports[$pick]}" ]; then
+        NEW[CARD_SERIAL]=""
+        NEW[CARD_PORT]="${ports[$pick]}"
+        NEW[DEV]=""
+        center ""
+        ui_ok "This card reports no serial, so it is pinned by its USB port."
+        note "Found again after a replug into the same port; re-run setup if you move it."
     else
         NEW[CARD_SERIAL]=""
+        NEW[CARD_PORT]=""
         NEW[DEV]="$CARD_DEV"
         center ""
         ui_warn "This card reports no serial, so it is pinned by node ($CARD_DEV)."
@@ -341,6 +354,7 @@ stage_signal() {
     say "whether frames really arrive at that rate."
     center ""
     local out frames secs t0 t1 rc failed=""
+    PICTURE=""
     # Busy, unplugged or refused mode: report it, never measure past it.
     out=$(v4l2-ctl -d "$CARD_DEV" ${fourcc:+--set-fmt-video=width=$w,height=$h,pixelformat=$fourcc} \
                    --set-parm="${NEW[FPS]}" 2>&1)
@@ -383,8 +397,50 @@ stage_signal() {
         ui_warn "$MEASURED_FPS fps measured for ${NEW[FPS]} requested (${got:-?})."
         note "Start-up costs a little; a number far off means the mode is not what the card delivers."
     fi
+    # Some cards (the MS2109) stream black frames at full rate with nothing
+    # plugged in, so frames alone do not prove a source.
+    picture_check
+    case "$PICTURE" in
+        black)
+            SIGNAL_RESULT="$MEASURED_FPS fps measured, but the picture is uniformly black"
+            ui_warn "The picture is uniformly black."
+            note "No source, the source is asleep, or HDCP is on. Some cards stream black when nothing is plugged in."
+            center ""
+            if confirm_yes "Try again?"; then _STAGE_INDEX=$((_STAGE_INDEX - 1)); stage_signal; return; fi
+            ;;
+        ok) ;;
+        *)
+            SIGNAL_RESULT="$SIGNAL_RESULT; picture not checked ($PICTURE)"
+            ui_warn "Could not check the picture: $PICTURE" ;;
+    esac
     center ""
     pause
+}
+
+# PICTURE: "ok", "black" (flat and dark across a few frames), or why it could
+# not be checked. Uses ffmpeg's signalstats on frames at the chosen mode.
+picture_check() {
+    if ! command -v ffmpeg >/dev/null; then PICTURE="ffmpeg is not installed"; return; fi
+    local out rc
+    # -k: ffmpeg blocked in a V4L2 read can ignore SIGTERM (seen on the MS2130
+    # with no source); the KILL makes the 6 seconds a real bound.
+    out=$(timeout -k 2 6 ffmpeg -hide_banner -nostdin -f v4l2 -input_format "${NEW[FMT]}" \
+            -video_size "${NEW[RES]}" -framerate "${NEW[FPS]}" -i "$CARD_DEV" \
+            -frames:v 5 -vf signalstats,metadata=print -f null - 2>&1)
+    rc=$?
+    if [ "$rc" != 0 ]; then
+        PICTURE="ffmpeg exit $rc: $(grep -v '^\[' <<<"$out" | tail -1)"
+        return
+    fi
+    # Flat (luma spread within 8 levels) and dark (mean at most 40 of 255).
+    PICTURE=$(awk -F= '
+        /signalstats\.YMIN=/ { if (lo == "" || $2 < lo) lo = $2 }
+        /signalstats\.YMAX=/ { if ($2 > hi) hi = $2 }
+        /signalstats\.YAVG=/ { if ($2 > avg) avg = $2; n++ }
+        END {
+            if (!n) { print "no picture statistics from ffmpeg"; exit }
+            print (hi - lo <= 8 && avg <= 40) ? "black" : "ok"
+        }' <<<"$out")
 }
 
 stage_audio() {
@@ -394,11 +450,11 @@ stage_audio() {
     resolve_audio_source && matched="$SRC"
     local -a items=()
     if [ -n "$matched" ]; then
-        say "The card's own audio input was found by its serial:"
+        say "The card's own audio input, found on its USB device:"
         note "$matched"
         items+=("auto|Use the card's audio (found automatically each start)|recommended")
     else
-        ui_warn "No audio source matched the card's serial."
+        ui_warn "No audio input found on the card's USB device."
     fi
     local s
     while read -r s; do
@@ -644,14 +700,14 @@ write_report() {
         echo
         echo "| Check | Result | |"
         echo "|---|---|---|"
-        echo "| Card | ${CARD_TYPE:-?} (\`${CARD_DEV:-?}\`, serial \`${NEW[CARD_SERIAL]:-none}\`) | |"
+        echo "| Card | ${CARD_TYPE:-?} (\`${CARD_DEV:-?}\`, serial \`${NEW[CARD_SERIAL]:-none}\`, port \`${NEW[CARD_PORT]:-${CARD_DEV:+$(card_port "$CARD_DEV")}}\`) | |"
         echo "| Chip | ${CHIP:-?} (\`${VIDPID:-?}\`) | |"
         verdict="✅"; [ "${USB_RESULT:-}" = ok ] || verdict="⚠️"
         echo "| USB link | ${LINK_SPEED:-?} Mbit/s | $verdict |"
-        verdict="✅"; [ -n "$MEASURED_FPS" ] || verdict="⚠️"
+        verdict="✅"; [ -n "$MEASURED_FPS" ] && [ "${PICTURE:-}" = ok ] || verdict="⚠️"
         echo "| Mode | ${NEW[RES]} @ ${NEW[FPS]} fps, ${NEW[FMT]} | |"
         echo "| Signal | ${SIGNAL_RESULT:-not checked} | $verdict |"
-        echo "| Audio | $(if [ "${NEW[AUDIO]}" = none ]; then echo none; else echo "${NEW[SRC]:-card audio by serial}"; fi) | |"
+        echo "| Audio | $(if [ "${NEW[AUDIO]}" = none ]; then echo none; else echo "${NEW[SRC]:-card audio, found on its USB device}"; fi) | |"
         echo "| Display | $(cur WINDOW)$([ "$(cur WINDOW)" = windowed ] && echo " $(cur WINDOW_SIZE)"), refresh $(cur REFRESH) | |"
         echo "| Player | $(cur BACKEND)$([ "$(cur BACKEND)" = mpv ] && echo ", scaling $(cur SCALING)") | |"
         echo
@@ -716,7 +772,7 @@ _report_block() {
 USB_DIR=""; VIDPID=""; LINK_SPEED=""; CHIP=""; USB_RESULT=""
 REPORT=""
 MEASURED_FPS=""
-SIGNAL_RESULT=""
+SIGNAL_RESULT=""; PICTURE=""
 CARD_DEV=""
 CARD_TYPE=""
 for s in "${STAGES[@]}"; do "stage_$s"; done

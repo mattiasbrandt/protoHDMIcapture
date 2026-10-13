@@ -6,7 +6,13 @@
 # matter. ./view.sh --setup finds it and writes this line.
 #CARD_SERIAL=
 
-# Without CARD_SERIAL: card types (v4l2 "Card type", extended regex) to skip
+# A card that reports no serial (the MS2109) is pinned by its USB port
+# instead (udev ID_PATH); it is found again after a replug into the same port.
+# Setting CARD_SERIAL, CARD_PORT or DEV in the environment overrides all three
+# here, e.g. `CARD_PORT=pci-0000:16:00.4-usb-0:2:1.0 ./view.sh` for one run.
+#CARD_PORT=
+
+# Without a pin: card types (v4l2 "Card type", extended regex) to skip
 # while scanning for the card.
 #IGNORE_CARDS_RE='OBSBOT|Integrated Camera'
 
