@@ -36,6 +36,7 @@ EOF
         best=$(cc_field "$f" Best)
         while IFS='|' read -r id level date note; do
             [ "$date" = - ] && date=""
+            note="${note//|/\\|}"   # a "|" in a note would split the table cell
             printf '| [%s](../%s) | `%s` | %s Mbit/s | %s | %s | %s | %s |\n' \
                 "$chip" "$f" "$id" "$link" "$best" "${level^}" "$date" "$note"
         done < <(cc_statuses "$f")

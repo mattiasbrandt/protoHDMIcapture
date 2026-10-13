@@ -378,6 +378,10 @@ stage_format() {
     while read -r kv; do
         case "$kv" in RES=*) sres="${kv#RES=}" ;; FPS=*) sfps="${kv#FPS=}" ;; esac
     done < <(source_suggest "${NEW[SOURCE]}")
+    # A malformed suggestion (a typo in a profile) is ignored, not an
+    # arithmetic error in the wizard.
+    [[ "$sres" =~ ^[0-9]+x[0-9]+$ ]] || sres=""
+    [[ "$sfps" =~ ^[0-9]+$ ]] || sfps=""
     if [ -n "$sres" ] && [ -n "$sfps" ]; then
         sname=$(source_name "${NEW[SOURCE]}")
         near=$(_closest_mode "$sres" "$sfps" "${rows[@]}")

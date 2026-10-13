@@ -16,7 +16,8 @@
 
 CC_DIR="${CC_DIR:-$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")/capture-cards}"
 
-cc_field() { sed -n "s/^$2: //p" "$1" | head -1; }
+# tr: a profile saved with CRLF line ends must still match its last id.
+cc_field() { sed -n "s/^$2: //p" "$1" | head -1 | tr -d '\r'; }
 
 cc_statuses() {
     awk '/^Status: / {
