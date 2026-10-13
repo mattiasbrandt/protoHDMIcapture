@@ -31,7 +31,7 @@ FPS="${FPS:-60}"                # capture framerate
 # step, and its MJPEG path is broken ("No JPEG data found in image").
 # Empty means "leave the device on whatever it was last set to" — which is luck,
 # not a setting, so do not default to empty.
-FMT="${FMT:-yuyv422}"           # yuyv422 | mjpeg | rawvideo | nv12 | "" to leave as-is
+FMT="${FMT-yuyv422}"            # yuyv422 | mjpeg | rawvideo | nv12 | "" to leave as-is
 DELAY="${DELAY:-0.05}"          # seconds of audio delay to match video latency
 LAT_MS="${LAT_MS:-10}"          # PipeWire loopback buffer, ms
 BACKEND="${BACKEND:-mpv}"       # mpv | gst | ffplay
@@ -39,7 +39,7 @@ AUDIO="${AUDIO:-loopback}"      # loopback | mpv | none
 FULLSCREEN="${FULLSCREEN:-yes}" # yes | no  (fullscreens on whatever monitor it opens on)
 SCALING="${SCALING:-balanced}"  # balanced | fast | config  (see the mpv block below)
 LEVELS="${LEVELS:-auto}"        # auto | limited | full  (fix for crushed/washed blacks)
-IPC="${IPC:-/tmp/mpv-protohdmicapture.sock}" # mpv IPC socket; empty to disable
+IPC="${IPC-/tmp/mpv-protohdmicapture.sock}"  # mpv IPC socket; empty to disable
 # keep  = leave the display alone (default)
 # match = for the session only, switch the monitor the window opens on to its
 #         mode closest to FPS, then restore on exit. 60 fps into a 100 Hz panel
