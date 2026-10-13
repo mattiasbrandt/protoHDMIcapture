@@ -922,6 +922,12 @@ data side into a rear motherboard port — **not** the `3-5` hub.
 
 ### The HDMI loop-out is genuinely useful
 
+First, which port is which: the source goes into the port labelled `HDMI IN`
+(on this box, on the edge with `MIC`, the LED and `DC5V`); the HDMI on the
+opposite edge is the loop-out. A PC plugged into `HDMI IN` sees a 1080p60
+monitor (the card's EDID, "QCW MStar Demo"), and Hyprland extends the desktop
+onto it. The details are in [`capture-cards/ms2130.md`](capture-cards/ms2130.md).
+
 Two things it buys you:
 
 1. **A real latency measurement.** Run the loop-out to a second display, film

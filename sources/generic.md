@@ -9,6 +9,7 @@ Status: reported -
 - Resolution: what the card captures (its best mode in the wizard), usually 1080p. "4K" on the box is the loop-out.
 - Refresh: 60 Hz. Turn 120 Hz output and VRR off.
 - Black picture? The source is asleep, or HDCP is on.
+- Cable in the card's HDMI IN, not its loop-out: many boxes have two HDMI ports that look alike, and the loop-out captures nothing.
 
 ## References
 
