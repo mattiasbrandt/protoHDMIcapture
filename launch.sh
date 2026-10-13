@@ -11,7 +11,7 @@
 #      and start the feed only if it saved settings
 #   2. menu defaults: REFRESH=match unless the config says otherwise, since a
 #      menu has nowhere to type it
-#   3. the run log, kept somewhere readable afterwards
+#   3. the run log, kept somewhere readable afterwards (and the one before)
 #   4. a notification for a failure view.sh could not report itself
 #
 # Env vars are passed straight through, so the defaults can still be
@@ -67,7 +67,14 @@ config_read launch_cfg
 [ -n "${REFRESH:-}" ] || [ -n "${launch_cfg[REFRESH]:-}" ] || export REFRESH=match
 
 # No "starting…" toast: mpv opens its window immediately, and failures get
-# their own notification.
+# their own notification. A feed already running means this launch only
+# focuses it: its log stays as it is. Otherwise the previous run's log is
+# kept as .1.
+if ! ( flock -n 9 ) 9>"$RUN_DIR/video.lock"; then
+    "$HERE/view.sh" >/dev/null 2>&1
+    exit $?
+fi
+[ ! -e "$LOG" ] || mv -f "$LOG" "$LOG.1"
 "$HERE/view.sh" >"$LOG" 2>&1
 status=$?
 

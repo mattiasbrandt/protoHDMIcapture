@@ -200,10 +200,7 @@ kill_orphan() {
 
 take_video_lock() {
     exec {VIDEO_LOCK}>"$RUN_DIR/video.lock"
-    if flock -n "$VIDEO_LOCK"; then
-        kill_orphan video.pid '^(mpv .*--title=protoHDMIcapture|ffplay .*-window_title protoHDMIcapture|gst-launch-1\.0 .*v4l2src device=)' player
-        return 0
-    fi
+    flock -n "$VIDEO_LOCK" && return 0
     local pid
     pid=$(cat "$RUN_DIR/video.pid" 2>/dev/null)
     if [ -n "$pid" ] && desktop_focus_pid "$pid"; then
@@ -260,14 +257,20 @@ if [ "$DEBUG" = window ] && [ "$BACKEND" = mpv ] && [ -z "$IPC" ]; then
     IPC="$RUN_DIR/mpv.sock"
     warn "IPC is disabled; the debug window uses a private socket for this session ($IPC)"
 fi
+# The lock before the log: a refused second launch must not truncate the
+# running session's debug.log.
+[ "$MODE" = tune ] || take_video_lock
 if [ "$DEBUG" != off ] && [ "$MODE" = play ]; then
     debug_tee "$RUN_DIR/debug.log"
     dbg "protoHDMIcapture $(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo '?') · desktop $DESKTOP · log $RUN_DIR/debug.log"
     debug_settings
 fi
-
-[ "$MODE" = tune ] || take_video_lock
-if [ -n "${VIDEO_LOCK:-}" ]; then dbg "video lock: held"; else dbg "video lock: not taken (tune mode)"; fi
+if [ -n "${VIDEO_LOCK:-}" ]; then
+    dbg "video lock: held"
+    kill_orphan video.pid '^(mpv .*--title=protoHDMIcapture|ffplay .*-window_title protoHDMIcapture|gst-launch-1\.0 .*v4l2src device=)' player
+else
+    dbg "video lock: not taken (tune mode)"
+fi
 
 # --- resolve the card ------------------------------------------------------
 resolve_card || die "$CARD_ERROR"
