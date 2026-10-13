@@ -293,16 +293,17 @@ start_audio() {
     stop_audio
     # -C capture source, -P playback sink (omitted = follow default sink),
     # --latency = loopback buffer, --delay = deliberate offset to match video.
+    # audio.env says the loopback is up, so it is written only once it is.
+    rm -f "$RUN_DIR/audio.env" "$RUN_DIR/audio.failed"
     ( _close_locks; exec pw-loopback -n protohdmicapture-audio \
         -C "$SRC" ${SINK:+-P "$SINK"} \
         --latency "$LAT_MS" \
-        --delay "$DELAY" ) >/dev/null 2>&1 &
+        --delay "$DELAY" ) >"$RUN_DIR/audio.log" 2>&1 &
     LOOPBACK_PID=$!
     echo "$LOOPBACK_PID" >"$RUN_DIR/audio.pid"
-    printf 'DELAY=%s\nLAT_MS=%s\nSRC=%s\n' "$DELAY" "$LAT_MS" "$SRC" >"$RUN_DIR/audio.env"
-    info "audio loopback up (pid $LOOPBACK_PID, delay ${DELAY}s, buffer ${LAT_MS}ms)"
-    audio_state_apply
 
+    # Up means linked: a loopback that exits, or links to nothing, plays no
+    # sound and says nothing. Measured: the link lands in 60-175 ms.
     # pw-loopback silently falls back to the DEFAULT source if -C names a node
     # that is not currently available, and then you are listening to your
     # microphone instead of the HDMI source with no error anywhere. Verify the link
@@ -311,24 +312,53 @@ start_audio() {
     #     input.protohdmicapture-audio:input_FL
     #       |<- <source-node>:capture_FL
     # so take the line after ours and strip the arrow and the port suffix.
-    sleep 0.5
-    local linked
-    linked=$(pw-link -li 2>/dev/null \
-             | grep -A1 '^input\.protohdmicapture-audio:input_FL$' | sed -n '2p' \
-             | sed 's/^[[:space:]]*|<-[[:space:]]*//; s/:[^:]*$//')
-    dbg "audio link: ${linked:-none yet} -> input.protohdmicapture-audio -> ${SINK:-default sink}"
-    if [ -n "$linked" ] && [ "$linked" != "$SRC" ]; then
+    local linked="" i
+    for i in {1..20}; do
+        kill -0 "$LOOPBACK_PID" 2>/dev/null || break
+        linked=$(pw-link -li 2>/dev/null \
+                 | grep -A1 '^input\.protohdmicapture-audio:input_FL$' | sed -n '2p' \
+                 | sed 's/^[[:space:]]*|<-[[:space:]]*//; s/:[^:]*$//')
+        [ -n "$linked" ] && break
+        sleep 0.1
+    done
+    if ! kill -0 "$LOOPBACK_PID" 2>/dev/null; then
+        audio_failed "the audio loopback exited as it started"; return
+    fi
+    if [ -z "$linked" ]; then
+        audio_failed "the audio loopback found no source to link to within 2 s"; return
+    fi
+    printf 'DELAY=%s\nLAT_MS=%s\nSRC=%s\n' "$DELAY" "$LAT_MS" "$SRC" >"$RUN_DIR/audio.env"
+    info "audio loopback up (pid $LOOPBACK_PID, delay ${DELAY}s, buffer ${LAT_MS}ms)"
+    audio_state_apply
+    dbg "audio link: $linked -> input.protohdmicapture-audio -> ${SINK:-default sink}"
+    if [ "$linked" != "$SRC" ]; then
         warn "audio is linked to \"$linked\", not the requested \"$SRC\""
         warn "the requested source was probably unavailable; check it with: pactl list short sources"
     fi
 }
 stop_audio() {
-    if [ -n "$LOOPBACK_PID" ] && kill -0 "$LOOPBACK_PID" 2>/dev/null; then
+    [ -n "$LOOPBACK_PID" ] || return 0
+    if kill -0 "$LOOPBACK_PID" 2>/dev/null; then
         kill "$LOOPBACK_PID" 2>/dev/null
         wait "$LOOPBACK_PID" 2>/dev/null
     fi
     LOOPBACK_PID=""
-    rm -f "$RUN_DIR/audio.pid"
+    # Only a session that ran a loopback removes the files: in the tuning
+    # pair the AUDIO=none feed must leave the tuner's alone.
+    rm -f "$RUN_DIR/audio.pid" "$RUN_DIR/audio.env"
+}
+# The loopback failed (at start, or exited mid-feed): the feed plays on
+# without sound, and says so in the terminal, as a notification when there
+# is none, and in the overlay (audio.failed). The overlay's sync keys start
+# it again.
+audio_failed() {
+    local detail
+    stop_audio
+    detail=$(tail -n 3 "$RUN_DIR/audio.log" 2>/dev/null | paste -sd' ')
+    printf '%s\n' "$1" >"$RUN_DIR/audio.failed"
+    warn "$1${detail:+: $detail}"
+    warn "the feed plays on without sound; the loopback's output is in $RUN_DIR/audio.log"
+    [ -t 2 ] || desktop_notify normal "protoHDMIcapture: no sound" "$1"
 }
 
 # --- player process ----------------------------------------------------------
@@ -358,13 +388,27 @@ arm_reaper() {
 # Waits for the player to exit, again after each trapped signal (USR1, USR2)
 # interrupts the wait: kill -0 still succeeds on an unreaped child, never on
 # a reaped one. Never decided by $?: a player killed by a signal also
-# returns >128. Serves audio sync requests between waits when asked to.
+# returns >128. Serves audio sync requests between waits, and reports a
+# loopback that exits meanwhile, when asked to (the session's own wait).
 # 2>/dev/null: bash's job notices ("Killed"); run_player reports deaths.
 wait_player() {
-    local serve_sync=${1:-} rc
+    local serve_session=${1:-} rc which
     while :; do
-        [ -z "$serve_sync" ] || while [ -n "$SYNC_REQUESTED" ]; do SYNC_REQUESTED=""; apply_sync_request; done
-        wait "$PLAYER_PID" 2>/dev/null; rc=$?
+        if [ -z "$serve_session" ]; then
+            wait "$PLAYER_PID" 2>/dev/null; rc=$?
+        else
+            while [ -n "$SYNC_REQUESTED" ]; do SYNC_REQUESTED=""; apply_sync_request; done
+            # A trapped signal returns with `which` unset.
+            which=""
+            wait -n -p which "$PLAYER_PID" ${LOOPBACK_PID:+"$LOOPBACK_PID"} 2>/dev/null; rc=$?
+            if [ -n "${which:-}" ] && [ "$which" = "${LOOPBACK_PID:-}" ]; then
+                # Reaped by that wait: its PID may be reused, so never signal it.
+                LOOPBACK_PID=""
+                rm -f "$RUN_DIR/audio.pid"
+                audio_failed "the audio loopback stopped mid-feed (exit status $rc)"
+                continue
+            fi
+        fi
         kill -0 "$PLAYER_PID" 2>/dev/null || break
     done
     [ -z "$REAPER_PID" ] || kill "$REAPER_PID" 2>/dev/null
@@ -406,7 +450,7 @@ run_player() {
     # Sync requests are drained before each wait: one that lands during a
     # restart (half a second of link checking) is served right after it.
     local rc
-    wait_player serve-sync; rc=$?
+    wait_player serve-session; rc=$?
     # mpv sometimes segfaults in libavdevice's v4l2 teardown after a normal
     # quit (upstream; "Some buffers are still owned by the caller on close").
     # The mpv script marked the quit before it, so this was a clean quit:
@@ -449,7 +493,8 @@ apply_sync_request() {
     if ! [[ "$want" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
         warn "audio sync request ignored: '$want' is not a delay in seconds"; return
     fi
-    if [ "$AUDIO" != loopback ] || [ -z "$LOOPBACK_PID" ]; then
+    # Not "is a loopback running": one that failed is restarted by this.
+    if [ "$AUDIO" != loopback ]; then
         warn "audio sync request ignored: this session has no audio loopback"; return
     fi
     DELAY="$want"

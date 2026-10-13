@@ -324,7 +324,12 @@ local function panel_lines()
         "1-8   Colour       " .. table.concat(colour, " · "),
     }
     if opts.audio == "loopback" then
-        lines[#lines + 1] = "m 9 0 Audio        " .. (audio.error and ("unavailable: " .. audio.error)
+        -- audio.failed: view.sh's loopback is not running (see its log).
+        local ff = io.open(opts.rundir .. "/audio.failed", "r")
+        local failed = ff and (ff:read("*l") or "")
+        if ff then ff:close() end
+        lines[#lines + 1] = "m 9 0 Audio        " .. (failed and ("not running, see the log: " .. failed)
+            or audio.error and ("unavailable: " .. audio.error)
             or audio.volume and ((audio.mute and "muted · " or "") .. "volume " .. audio.volume .. "%")
             or "…")
         lines[#lines + 1] = string.format("^-/^+ Audio sync   %d ms%s   (alt -/+: 50 ms steps)",
