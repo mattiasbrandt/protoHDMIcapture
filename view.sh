@@ -28,6 +28,8 @@ HERE=$(dirname "$(readlink -f "$0")")
 . "$HERE/lib/desktop.sh"
 # shellcheck source=lib/debug.sh
 . "$HERE/lib/debug.sh"
+# shellcheck source=lib/audio.sh
+. "$HERE/lib/audio.sh"
 
 # --- mode --------------------------------------------------------------------
 # --setup hands over before the config is even read, so a config that would
@@ -51,6 +53,12 @@ case "${1:-}" in
     exit 0 ;;
 --open-dashboard)
     desktop_open_terminal protohdmicapture.debug "protoHDMIcapture debug" "$HERE/view.sh" --dashboard
+    exit ;;
+--audio)
+    # The overlay's m, 9 and 0: mute and volume of this session's loopback.
+    RUN_DIR="$_RUN"
+    shift
+    audio_control "$@"
     exit ;;
 --save)
     # The overlay's "save as defaults": the same writer the wizard uses, and
@@ -210,6 +218,9 @@ take_audio_lock() {
     flock -n "$AUDIO_LOCK" \
         || die "another session is already playing the card's audio; stop it, or start this one with AUDIO=none"
     dbg "audio lock: held"
+    # A new session starts at full volume, unmuted; only the lock holder may
+    # clear the previous session's state.
+    rm -f "$RUN_DIR/audio.state"
 }
 
 # --- backend capabilities --------------------------------------------------
@@ -292,6 +303,7 @@ start_audio() {
     echo "$LOOPBACK_PID" >"$RUN_DIR/audio.pid"
     printf 'DELAY=%s\nLAT_MS=%s\nSRC=%s\n' "$DELAY" "$LAT_MS" "$SRC" >"$RUN_DIR/audio.env"
     info "audio loopback up (pid $LOOPBACK_PID, delay ${DELAY}s, buffer ${LAT_MS}ms)"
+    audio_state_apply
 
     # pw-loopback silently falls back to the DEFAULT source if -C names a node
     # that is not currently available, and then you are listening to your
@@ -505,7 +517,7 @@ mpv)
         --input-terminal=no
         # f cycles the display mode, d opens the debug dashboard
         --script="$HERE/lib/mpv/protohdmicapture.lua"
-        --script-opts="protohdmicapture-helper=$HERE/view.sh,protohdmicapture-mode=$WINDOW,protohdmicapture-quitfile=$RUN_DIR/player.quit,protohdmicapture-scaling=$SCALING,protohdmicapture-levels=$LEVELS,protohdmicapture-sources=$HERE/sources,protohdmicapture-source=$SOURCE"
+        --script-opts="protohdmicapture-helper=$HERE/view.sh,protohdmicapture-mode=$WINDOW,protohdmicapture-quitfile=$RUN_DIR/player.quit,protohdmicapture-scaling=$SCALING,protohdmicapture-levels=$LEVELS,protohdmicapture-sources=$HERE/sources,protohdmicapture-source=$SOURCE,protohdmicapture-audio=$AUDIO"
         # a live feed generates no input events, so idle-blanking would otherwise
         # kick in mid-game
         --stop-screensaver=always

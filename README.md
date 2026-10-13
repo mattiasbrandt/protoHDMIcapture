@@ -37,6 +37,7 @@ each with its current value:
 | **l** | levels: auto → limited → full (the range of the card's frames) |
 | **c** | scaling: balanced → fast → config |
 | **1**–**8** | colour: contrast, brightness, gamma, saturation (mpv's keys, also with the overlay closed) |
+| **m**, **9** / **0** | mute, volume down / up of the audio loopback (also with the overlay closed; not saved, the desktop mixer owns lasting volume) |
 | **r** | reset colour |
 | **t** | the setup tips for the source (`SOURCE`); **←** / **→** browse the other sources |
 | **w** | save what changed since the feed started to the config file |
@@ -760,6 +761,7 @@ v4l2-ctl -d /dev/video2 --get-fmt-video
   them; [`docs/capture-cards.md`](docs/capture-cards.md) is the support
   table, generated from them by `tools/capture-cards-table`
 - `lib/capture-cards.sh` — reads those profiles
+- `lib/audio.sh` — mute and volume of the audio loopback (`view.sh --audio`)
 - `sources/` — one profile per kind of source: suggested `RES`/`FPS` and the
   setup tips with menu paths; `lib/sources.sh` reads them
 - `lib/setup.sh` — the setup wizard (`./view.sh --setup`): identifies the card

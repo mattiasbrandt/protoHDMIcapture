@@ -10,6 +10,7 @@ contract; change a writer or a reader, update the row.
 | `video.pid` | `view.sh` `run_player` | `view.sh` (second launch focuses it), `--place-window`, dashboard, setup sync readiness | PID of the **player** (mpv/gst/ffplay), not of `view.sh` |
 | `audio.lock` | `view.sh` (flock, held while pw-loopback runs) | `view.sh`, setup sync stage (probe only) | one audio loopback at a time |
 | `audio.pid` / `audio.env` | `view.sh` `start_audio` (removed by `stop_audio`) | dashboard, `debug_after_start` | loopback PID; `DELAY`, `LAT_MS`, `SRC` |
+| `audio.state` | `view.sh --audio` (overlay's m, 9, 0); cleared by `take_audio_lock` at a session's start | `start_audio` (`audio_state_apply`) | the session's loopback `VOLUME` and `MUTE`, re-applied to a restarted loopback |
 | `backend`, `ipc.path` | `view.sh` `run_player` | dashboard | which player; mpv IPC socket (absent for gst/ffplay) |
 | `window.mode`, `window.size` | `view.sh` `run_player`, `--place-window` | `--place-window` | current `WINDOW` and `WINDOW_SIZE` for the f key |
 | `player.quit` | mpv script `shutdown` event (via `quitfile`) | `view.sh` after the player exits | mpv began a normal quit; a later signal death is its teardown bug |
