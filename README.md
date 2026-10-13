@@ -689,8 +689,10 @@ input.protohdmicapture-audio:input_FL
 If the node named in `-C` is not available at that moment, it falls back to the
 **default source**. With a capture card that enumerates a second or two late,
 that means you would be listening to your microphone and wondering why the
-source is silent. `view.sh` now checks the actual link after starting and prints a
-yellow warning naming the source it really got.
+source is silent. `view.sh` now checks the actual link after starting; a
+link to any other source counts as a failed loopback: it is stopped (the
+microphone would play on the speakers) and the warning names the source it
+really got, with the feed playing on without sound.
 
 ---
 

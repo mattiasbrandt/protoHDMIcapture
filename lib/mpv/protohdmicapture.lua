@@ -180,11 +180,21 @@ local delay = tonumber(opts.delay) or 0.05
 local sync_timer = nil
 local sync_note = nil       -- shown in the panel: nil, or why it did not apply
 
-local function sync_confirm()
+-- view.sh writes audio.env once the new loopback is linked (up to 2 s) and
+-- audio.failed if it is not: poll until either, or until a deadline.
+local function sync_confirm(deadline)
+    deadline = deadline or mp.get_time() + 3
     local f = io.open(opts.rundir .. "/audio.env", "r")
     local got = f and f:read("*a"):match("DELAY=([%d.]+)")
     if f then f:close() end
-    if got and math.abs(tonumber(got) - delay) < 0.0005 then
+    local ff = io.open(opts.rundir .. "/audio.failed", "r")
+    if ff then ff:close() end
+    local applied = got and math.abs(tonumber(got) - delay) < 0.0005
+    if not applied and not ff and mp.get_time() < deadline then
+        mp.add_timeout(0.2, function() sync_confirm(deadline) end)
+        return
+    end
+    if applied then
         sync_note = nil
         mp.osd_message(string.format("Audio sync %d ms", math.floor(delay * 1000 + 0.5)), 1.5)
     else
@@ -225,8 +235,8 @@ local function sync_send()
     local r = mp.command_native({ name = "subprocess", args = { "kill", "-USR1", opts.owner },
                                   playback_only = false, capture_stderr = true })
     if not r or r.status ~= 0 then sync_fail("cannot signal view.sh: " .. why_failed(r)); return end
-    -- start_audio waits half a second to verify the new link.
-    mp.add_timeout(1.2, sync_confirm)
+    -- start_audio checks the new link for up to 2 s; sync_confirm polls.
+    mp.add_timeout(0.3, function() sync_confirm() end)
 end
 
 local function sync_step(ms)

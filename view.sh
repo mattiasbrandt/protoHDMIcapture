@@ -192,7 +192,8 @@ _close_locks() {
 # running: double audio, or a card that will not open. Called with the lock
 # held, so the session that wrote the PID file is gone; a process still at
 # that PID is its orphan only if it is ours and its command line matches
-# (the PID may be anyone's by now). FILE REGEX WHAT
+# (the PID may be anyone's by now).
+# kill_orphan PIDFILE CMDLINE-REGEX WHAT-FOR-THE-MESSAGE
 kill_orphan() {
     local pid cmd i
     pid=$(cat "$RUN_DIR/$1" 2>/dev/null) || return 0
@@ -348,9 +349,11 @@ start_audio() {
     info "audio loopback up (pid $LOOPBACK_PID, delay ${DELAY}s, buffer ${LAT_MS}ms)"
     audio_state_apply
     dbg "audio link: $linked -> input.protohdmicapture-audio -> ${SINK:-default sink}"
+    # The fallback is usually the microphone, which would play on the
+    # speakers (feedback): stop it like any failed loopback.
     if [ "$linked" != "$SRC" ]; then
-        warn "audio is linked to \"$linked\", not the requested \"$SRC\""
-        warn "the requested source was probably unavailable; check it with: pactl list short sources"
+        audio_failed "the audio loopback linked to \"$linked\", not the card's \"$SRC\" (unavailable? check: pactl list short sources)"
+        return
     fi
 }
 stop_audio() {
@@ -430,6 +433,8 @@ wait_player() {
     done
     [ -z "$REAPER_PID" ] || kill "$REAPER_PID" 2>/dev/null
     REAPER_PID=""
+    # Reaped: the PID may be anyone's by now, so nothing may signal it.
+    PLAYER_PID=""
     return "$rc"
 }
 run_player() {
@@ -456,6 +461,7 @@ run_player() {
         if desktop_place_window "$PLAYER_PID" "$WINDOW" "$WINDOW_SIZE"; then info "$DESKTOP_MSG"
         else dbg "$DESKTOP_MSG"; fi
     ) &
+    PLACE_JOB=$!
     if [ "$DEBUG" != off ]; then
         (
             _close_locks
@@ -465,7 +471,7 @@ run_player() {
     fi
     dbg "player: $BACKEND pid $PLAYER_PID, window $WINDOW$([ "$WINDOW" = windowed ] && echo " ($WINDOW_SIZE)")"
     # Sync requests are drained before each wait: one that lands during a
-    # restart (half a second of link checking) is served right after it.
+    # restart (up to 2 s of link checking) is served right after it.
     local rc
     wait_player serve-session; rc=$?
     # mpv sometimes segfaults in libavdevice's v4l2 teardown after a normal
@@ -522,14 +528,17 @@ trap 'SYNC_REQUESTED=1' USR1
 # the quit gets a bound (see arm_reaper).
 trap arm_reaper USR2
 
-DEBUG_JOB=""
+DEBUG_JOB="" PLACE_JOB=""
 # The player's files go with the session that holds the video lock (in the
 # tuning pair the --tune half holds none); a session killed outright leaves
 # them, and the next one reads video.pid for its orphan.
 session_files_remove() {
     [ -z "${VIDEO_LOCK:-}" ] || rm -f "$RUN_DIR"/{video.pid,backend,window.mode,window.size,ipc.path}
+    # A failure report is the loopback owner's: only the audio lock holder
+    # clears it, so the tuning pair's AUDIO=none half leaves the tuner's.
+    [ -z "${AUDIO_LOCK:-}" ] || rm -f "$RUN_DIR/audio.failed"
 }
-trap 'stop_player; stop_audio; desktop_refresh_restore || warn "$DESKTOP_MSG"; session_files_remove; [ -z "$DEBUG_JOB" ] || kill "$DEBUG_JOB" 2>/dev/null' EXIT
+trap 'stop_player; stop_audio; desktop_refresh_restore || warn "$DESKTOP_MSG"; session_files_remove; [ -z "$DEBUG_JOB" ] || kill "$DEBUG_JOB" 2>/dev/null; [ -z "$PLACE_JOB" ] || kill "$PLACE_JOB" 2>/dev/null' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
