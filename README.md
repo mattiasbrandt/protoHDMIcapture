@@ -1,13 +1,35 @@
 # protoHDMIcapture
 
 Low-latency viewer for any HDMI source (console, camera, another PC) through a
-USB capture card on Omarchy/Hyprland.
+USB capture card on Linux. It runs on any desktop; on Hyprland (Omarchy) it also
+matches the display refresh to the feed and focuses the running window.
 
 It started life as `ps5-capture`, built to play a PS5 in a window, so the
 measurements and source-side settings below were taken with a PS5 on the HDMI
 side. Nothing in the scripts is PS5-specific.
 
 Research + test kit. Written 2026-09-06, before the card was connected.
+
+---
+
+## Quick start
+
+```bash
+./probe.sh                    # identify the card; offers to pin its serial
+./view.sh                     # play; close the window or Ctrl-C to stop
+AUDIO=none ./view.sh          # terminal 1 } line audio up with video,
+./view.sh --tune              # terminal 2 } then keep the DELAY it prints
+```
+
+Settings are environment variables, or `KEY=value` lines in
+`~/.config/protohdmicapture/config` (see `config.example`); the environment
+wins. Machine-specific values (which card, which cameras to skip, your tuned
+`DELAY`) belong in that file, not in the scripts.
+
+One video window and one audio loopback run at a time, however they were
+started: a second launch focuses the running window (Hyprland) or says it is
+already running, and a second loopback is refused rather than doubling the
+audio. The tuning pair above is one of each, so it is allowed.
 
 ---
 
@@ -80,7 +102,8 @@ Two gotchas found in the current state:
 1. **Node numbers move.** The OBSBOT takes `video0`/`video1` and the card
    currently lands on `video2`/`video3` — but that depends purely on
    enumeration order, so it flips whenever either device is replugged. The
-   scripts here detect by *card name*, never by a fixed node.
+   scripts pin the card by its USB serial (`CARD_SERIAL`), never by a fixed
+   node. Without a pinned serial they scan, skipping `IGNORE_CARDS_RE`.
 2. **You are not in the `video` group** (`mattias gamemode i2c uucp wheel`).
    Access works anyway because logind puts an ACL on `/dev/video*` for the
    active seat (`crw-rw----+`). Fine for an interactive session; it will *not*
@@ -124,7 +147,8 @@ G-Sync-module panel, and the kernel exposes no `vrr_capable` attribute for
 `"vrr": false` for every output.
 
 It does have a **3440x1440@59.97Hz** mode, and `view.sh` will switch to it
-for the session:
+for the session (Hyprland only; on other desktops it leaves the display alone
+and says so):
 
 ```bash
 REFRESH=match ./view.sh      # 100Hz -> 59.97Hz, restored on exit
@@ -132,7 +156,7 @@ REFRESH=match ./view.sh      # 100Hz -> 59.97Hz, restored on exit
 
 `REFRESH` defaults to `keep`, which leaves the display completely alone.
 
-**No output is hardcoded.** `pick-refresh-mode.py` reads `hyprctl monitors -j`,
+**No output is hardcoded.** `lib/pick-refresh-mode.py` reads `hyprctl monitors -j`,
 takes whichever monitor is *focused*, and picks the mode at that monitor's
 current resolution whose refresh is closest to `FPS`. Resolution is never
 changed — only refresh — because changing resolution would rearrange a
@@ -173,14 +197,25 @@ Blur, shadows and animations on a 60 fps live feed cost GPU frame time for
 nothing. These are now in `~/.config/hypr/hyprland.lua`:
 
 ```lua
-o.window({ title = "^protoHDMIcapture$" }, {
-  tag = "-default-opacity",
-  opacity = "1 1",
-  no_blur = true,
-  no_shadow = true,
-  no_anim = true,
-})
+local function protohdmi_feed()
+  return {
+    tag = "-default-opacity",
+    opacity = "1 1",
+    no_blur = true,
+    no_shadow = true,
+    no_anim = true,
+  }
+end
+o.window({ title = "^protoHDMIcapture$" }, protohdmi_feed())
+o.window({ class = "^gst-launch-1\\.0$" }, protohdmi_feed())
 ```
+
+mpv and ffplay set the window title; `BACKEND=gst` cannot (waylandsink has no
+title property), so its window is matched by class. Each rule gets a **fresh
+table**: Omarchy's `o.window()` writes the match into the table it is given, so
+sharing one table makes the second rule require title *and* class, matching
+nothing. Check with `hyprctl clients -j`: a covered window has no
+`default-opacity` tag.
 
 Omarchy configures Hyprland in **Lua**, not `hyprland.conf`, so the old
 `windowrule = noanim, ...` syntax does not apply here. Opacity is dropped the way
@@ -204,7 +239,18 @@ system. Only if the loopback crackles at `LAT_MS=10` should you consider raising
 ## The three video backends, and why
 
 All three are wired up in `view.sh` because which one wins is card-dependent
-and worth measuring rather than arguing about.
+and worth measuring rather than arguing about. They share one set of knobs but
+do not all honour every one; a knob you set that the backend ignores gets a
+warning, never silence:
+
+| knob | mpv | gst | ffplay |
+|---|---|---|---|
+| `FMT` | yes | yes (`yuyv422`→YUY2, `nv12`, `mjpeg`, `rawvideo`) | yes |
+| `FULLSCREEN` | yes | yes (waylandsink `fullscreen=true`) | yes |
+| `SCALING`, `LEVELS`, `IPC` | yes | no | no |
+| `GST_IO_MODE` | no | yes | no |
+| `AUDIO=mpv` | yes | refused | refused |
+| desktop | any | Wayland only | any |
 
 ### `BACKEND=mpv` (default)
 
@@ -264,11 +310,13 @@ tidy-up sometime, no functional effect.
 
 | var | default | what it does |
 |---|---|---|
+| `CARD_SERIAL` | — | USB serial of the card; pins it among other cameras and across `/dev/video` renumbering. `probe.sh` offers to write it |
+| `IGNORE_CARDS_RE` | — | without `CARD_SERIAL`: v4l2 card types to skip while scanning, e.g. `OBSBOT\|Integrated Camera` |
 | `FULLSCREEN` | `yes` | fullscreens on whatever monitor it opens on — no output is hardcoded, Hyprland decides, same as everything else on this desktop |
 | `SCALING` | `balanced` | `balanced` = spline36/mitchell, no deband, no dither. `fast` = `--profile=fast`, bilinear throughout, lowest GPU time and visibly softer. `config` = leave mpv.conf's high-quality settings alone |
 | `LEVELS` | `auto` | `limited` or `full` if blacks look crushed or washed. The card reports `Quantization: Default (maps to Limited Range)` and PS5 outputs limited over HDMI, so `auto` should be right — this is the knob if it isn't |
 | `IPC` | `/tmp/mpv-protohdmicapture.sock` | mpv IPC socket, so you can drive it from a keybind or script |
-| `REFRESH` | `keep` | `match` switches the focused monitor to its mode nearest `FPS` for the session and restores it on exit. No output hardcoded; resolution, position, scale and transform all preserved |
+| `REFRESH` | `keep` | `match` switches the focused monitor to its mode nearest `FPS` for the session and restores it on exit (Hyprland only). No output hardcoded; resolution, position, scale and transform all preserved |
 
 Three more that are simply on, with no knob, because there's no case for the
 other setting here:
@@ -291,9 +339,9 @@ echo '{"command":["cycle","fullscreen"]}'   | socat - /tmp/mpv-protohdmicapture.
 
 ```
 v4l2src device=/dev/videoN io-mode=mmap do-timestamp=true
-  ! image/jpeg,width=1920,height=1080,framerate=60/1 ! jpegdec
+  ! video/x-raw,format=YUY2,width=1920,height=1080,framerate=60/1
   ! queue max-size-buffers=1 leaky=downstream
-  ! videoconvert ! waylandsink sync=false async=false qos=false
+  ! videoconvert ! waylandsink sync=false async=false qos=false fullscreen=true
 ```
 
 Theoretically the lowest-latency path: `sync=false` means the sink renders on
@@ -335,6 +383,11 @@ Tune it with:
 AUDIO=none ./view.sh          # terminal 1: video
 ./view.sh --tune              # terminal 2: j/k = ±10 ms, h/l = ±50 ms
 ```
+
+`--tune` needs the audio to itself: if a session with its own loopback is
+already running (e.g. one started from the menu), it is refused rather than
+doubling the audio. Close that session first. Put the value it prints in the
+config file as `DELAY=`.
 
 PS5 menu navigation clicks are the best test signal — sharp transient, tied to a
 visible highlight moving.
@@ -586,12 +639,18 @@ v4l2-ctl -d /dev/video2 --get-fmt-video
 ## Files
 
 - `probe.sh` — run with the card connected; identifies it, dumps every capture
-  mode, USB link speed, signal lock, audio source, and prints the next command
-- `view.sh` — the launcher; `BACKEND`/`AUDIO`/`FMT`/`RES`/`FPS`/`DELAY`/
-  `SCALING`/`LEVELS`/`REFRESH` env vars, plus `--tune` for interactive A/V sync
-- `pick-refresh-mode.py` — picks the focused monitor's mode closest to `FPS` and
-  emits the `hyprctl eval` Lua for switching and restoring
+  mode, USB link speed, signal lock, audio source, offers to pin the card's
+  serial, and prints the next command
+- `view.sh` — the player; every knob is an env var or config line, plus
+  `--tune` for interactive A/V sync. Owns the one-window/one-loopback rule
 - `launch.sh` — GUI entry point used by the desktop launcher; see below
+- `lib/card.sh` — config file, and which `/dev/video` node and PipeWire source
+  are the card
+- `lib/desktop.sh` — notifications, focusing a window, refresh switching;
+  Hyprland adapter plus a generic one for every other desktop
+- `lib/pick-refresh-mode.py` — picks the focused monitor's mode closest to
+  `FPS` and emits the `hyprctl eval` Lua for switching and restoring
+- `config.example` — the settings file, documented
 - `desktop/` — the `.desktop` entry and icon, symlinked into `~/.local/share`
 
 ---
@@ -616,30 +675,30 @@ ln -s "$PWD/desktop/protohdmicapture.svg" ~/.local/share/icons/hicolor/scalable/
 `Exec=` is an absolute path to this checkout; edit it if the repo lives
 somewhere other than `~/Documents/GitHub/protoHDMIcapture`.
 
-`launch.sh` exists because `view.sh` assumes a terminal — it narrates
-what it picked, and `die` writes the reason to stderr. Launched from a menu
-there is no terminal, so the wrapper does the three jobs the terminal was doing:
+The rules that must hold however the player is started live in `view.sh`, not
+here:
 
-- **Won't start twice.** If an mpv window with class `mpv` *and* title `protoHDMIcapture` is
-  already up, it focuses that and exits. It matches both fields exactly rather
-  than using `omarchy launch or focus`, whose word-boundary regex tests class
-  *or* title and would happily focus a browser tab called "protoHDMIcapture ...".
-- **Failures become notifications.** A non-zero exit sends the `!! ` line from
-  `die` (ANSI stripped) to `notify-send`, so a missing card says so instead of
-  nothing happening.
+- **Won't start twice.** `view.sh` holds a lock while a player runs and records
+  its PID; a second launch focuses that window by PID (Hyprland, any backend)
+  or reports that it is already running. A lock rather than a window lookup,
+  so nothing depends on window titles, and `omarchy launch or focus`, whose
+  regex would match a browser tab called "protoHDMIcapture ...", is not needed.
+- **Failures become notifications.** With no terminal attached, `die()` sends
+  its reason to `notify-send` itself and exits 3 ("already reported").
+
+`launch.sh` adds what only a menu launch needs, and works on any desktop:
+
+- **Menu defaults:** `REFRESH=match`. From a menu there is no place to type it,
+  and the 100 Hz judder described above is the whole reason that knob exists.
 - **The run log survives** at `$XDG_RUNTIME_DIR/protohdmicapture.log`.
+- **Unreported failures still notify:** any other non-zero exit (a missing tool,
+  a crash) gets a generic "failed, see log" notification.
 
-It sets `REFRESH=match` by default — from a menu there is no place to type it,
-and the 100 Hz judder described above is the whole reason that knob exists.
 Every env var still passes through, so the terminal path is unchanged:
 
 ```bash
 REFRESH=keep ./launch.sh     # or just use ./view.sh directly
 ```
-
-`--tune` is deliberately *not* wired to the launcher: it starts its own
-loopback, so running it while the launcher's loopback is up gives you two
-`protohdmicapture-audio` nodes and double audio. Tune from a terminal, as documented above.
 
 ---
 
