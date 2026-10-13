@@ -38,7 +38,8 @@ fi
 
 desktop_notify() {
     command -v notify-send >/dev/null 2>&1 || return 0
-    notify-send -a protoHDMIcapture -u "$1" "$2" "${3:-}"
+    # --: a message starting with "-" (e.g. "--tune needs ...") is text, not an option.
+    notify-send -a protoHDMIcapture -u "$1" -- "$2" "${3:-}"
 }
 
 _DESKTOP_RESTORE=""
