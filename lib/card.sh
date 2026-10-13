@@ -178,8 +178,8 @@ card_ignored() {
 resolve_card() {
     CARD_ERROR="" CARD_WARNING=""
     # A node number can move on a replug (another device may take it), so a
-    # DEV that is not a capture card now, or is an ignored device, is set
-    # aside for the pin or the scan below rather than opened.
+    # DEV that is gone, not a capture card now, or an ignored device is set
+    # aside for the pin below rather than opened; with no pin, the run stops.
     if [ -n "${DEV:-}" ]; then
         local t=""
         if [ ! -e "$DEV" ]; then
@@ -192,7 +192,16 @@ resolve_card() {
                 CARD_WARNING="DEV=$DEV is ${t:-a device} now, an ignored device; looking for the capture card instead"
             fi
         fi
-        [ -z "$CARD_WARNING" ] || DEV=""
+        if [ -n "$CARD_WARNING" ]; then
+            DEV=""
+            # With no pin, a scan would open the first capture node left:
+            # a webcam not on the ignore list, and its mic on the speakers.
+            if [ -z "${CARD_SERIAL:-}" ] && [ -z "${CARD_PORT:-}" ]; then
+                CARD_ERROR="${CARD_WARNING%; looking*}; the card has no other pin, so it cannot be found again safely: plug it back in, or re-run ./view.sh --setup"
+                CARD_WARNING=""
+                return 1
+            fi
+        fi
     fi
     if [ -z "${DEV:-}" ]; then
         local n serial port type at_pin=""
