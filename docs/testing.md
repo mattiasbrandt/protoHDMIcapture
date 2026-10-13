@@ -12,6 +12,11 @@ against the card. These are the harness traps that produce false results.
   timeout 6 v4l2-ctl -d /dev/video0 --stream-mmap --stream-count=60 --stream-to=/dev/null; echo $?   # 124 = no frames
   ```
 
+- **Frames are not a picture.** The MS2109 streams uniformly black frames at
+  full rate with nothing plugged in; grab one before trusting a frame count.
+- **Bound ffmpeg probes with `timeout -k`.** ffmpeg blocked in a V4L2 read on
+  a card with no source ignored SIGTERM and outlived a plain `timeout`.
+
 - **Protect the real config** when testing first run or the wizard. Point
   `CONFIG_FILE` at a scratch copy, or move it aside with a restoring trap:
 
