@@ -5,6 +5,7 @@ mod app;
 mod audio;
 mod capture;
 mod card;
+mod desktop;
 mod gputime;
 mod osd;
 mod overlay;
@@ -13,6 +14,7 @@ mod present;
 mod pw;
 mod scale;
 mod screenshot;
+mod session;
 mod settings;
 mod sources;
 mod stats;
@@ -85,6 +87,8 @@ fn view(args: &[String]) -> Result<(), String> {
         picture: picture::Picture::DEFAULT,
         scaling: scale::Scaling::Balanced,
         audio: app::AudioSetup::Off(String::new()),
+        window_size: (1280, 720),
+        desktop: desktop::Desktop::Generic,
         source: String::new(),
         settings: None,
     };
@@ -107,6 +111,10 @@ fn view(args: &[String]) -> Result<(), String> {
         return Err(format!("settings:\n  {}", errors.join("\n  ")));
     }
     opts.window = app::WindowMode::from_settings(s.get("WINDOW"), s.get("WINDOW_SIZE"))?;
+    opts.window_size = app::WindowMode::from_settings("windowed", s.get("WINDOW_SIZE")).map(|m| match m {
+        app::WindowMode::Windowed { width, height } => (width, height),
+        _ => unreachable!("windowed is Windowed"),
+    })?;
     opts.picture = picture::Picture::from_settings(
         s.get("LEVELS"),
         s.get("CONTRAST"),
@@ -116,6 +124,22 @@ fn view(args: &[String]) -> Result<(), String> {
     )?;
     opts.scaling = scale::Scaling::from_settings(s.get("SCALING"))?;
     let format = capture::Format::from_settings(s.get("RES"), s.get("FPS"), s.get("FMT"))?;
+
+    // One video window at a time, with view.sh too (docs/run-dir.md).
+    let desktop = desktop::detect()?;
+    let mut session = match session::Session::start(&session::run_dir(), desktop.clone())? {
+        Ok(s) => s,
+        Err(running) => {
+            let pid = running.pid.map_or("unknown".to_string(), |p| p.to_string());
+            if running.focused {
+                eprintln!("already running (pid {pid}); focused it");
+            } else {
+                eprintln!("already running (pid {pid})");
+            }
+            return Ok(());
+        }
+    };
+    opts.desktop = desktop;
 
     let pins = card::Pins { dev: s.get("DEV"), serial: s.get("CARD_SERIAL"), port: s.get("CARD_PORT"), ignore: s.get("IGNORE_CARDS_RE") };
     let picked = card::pick(&card::list(), &pins, card::describe_dev(pins.dev), &s.config_file.display().to_string())?;
@@ -139,6 +163,10 @@ fn view(args: &[String]) -> Result<(), String> {
         None => {}
     }
     opts.source = s.get("SOURCE").to_string();
+    // As view.sh: after the audio, before the window.
+    if s.get("REFRESH") == "match" {
+        session.match_refresh(format.fps);
+    }
     opts.settings = Some(s);
     let stats = opts.stats;
     let result = app::run(Box::new(source), opts);

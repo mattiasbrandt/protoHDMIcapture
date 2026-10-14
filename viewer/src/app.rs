@@ -20,6 +20,7 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::audio::Controls;
 use crate::capture::{Event, Format, FrameSource, now_monotonic};
+use crate::desktop::Desktop;
 use crate::gputime::GpuTimer;
 use crate::osd::{Osd, Scene};
 use crate::overlay::{self, Notify, Overlay, Page};
@@ -73,6 +74,10 @@ pub struct Options {
     /// SCALING at start.
     pub scaling: Scaling,
     pub audio: AudioSetup,
+    /// WINDOW_SIZE, for f's windowed mode.
+    pub window_size: (u32, u32),
+    /// Finishes the window's shape where the toolkit's requests are ignored.
+    pub desktop: Desktop,
     /// SOURCE: whose setup tips the overlay opens on.
     pub source: String,
     /// The settings, for w (None: w cannot save).
@@ -89,6 +94,15 @@ pub enum AudioSetup {
 }
 
 impl WindowMode {
+    /// f: fullscreen -> borderless -> windowed (WINDOW's order).
+    fn next(self, size: (u32, u32)) -> Self {
+        match self {
+            Self::Fullscreen => Self::Borderless,
+            Self::Borderless => Self::Windowed { width: size.0, height: size.1 },
+            Self::Windowed { .. } => Self::Fullscreen,
+        }
+    }
+
     /// As the settings spell it, and as the panel names it.
     fn names(self) -> (&'static str, &'static str) {
         match self {
@@ -799,6 +813,51 @@ impl App {
         true
     }
 
+    /// f: the next display mode, through the toolkit and then the desktop
+    /// adapter, as the mpv script sets mpv's properties and then runs
+    /// `view.sh --place-window`.
+    fn cycle_display(&mut self) {
+        let mode = self.opts.window.next(self.opts.window_size);
+        self.opts.window = mode;
+        if let Some(gfx) = &self.gfx {
+            let w = &gfx.window;
+            match mode {
+                WindowMode::Fullscreen => w.set_fullscreen(Some(Fullscreen::Borderless(None))),
+                WindowMode::Borderless => {
+                    w.set_fullscreen(None);
+                    w.set_decorations(false);
+                    w.set_maximized(true);
+                }
+                WindowMode::Windowed { width, height } => {
+                    w.set_fullscreen(None);
+                    w.set_maximized(false);
+                    w.set_decorations(true);
+                    let _ = w.request_inner_size(PhysicalSize::new(width, height));
+                }
+            }
+        }
+        self.place_window();
+        // The panel shows it; with the panel closed, a message does.
+        if self.overlay.page.is_none() {
+            self.overlay.message(format!("Display: {}", mode.names().1), Duration::from_millis(1500), Instant::now());
+        }
+        self.repaint = true;
+    }
+
+    /// The desktop adapter's part of the current mode, off this thread (it
+    /// waits for the window to map, then runs a few hyprctl calls).
+    fn place_window(&self) {
+        if matches!(self.opts.desktop, Desktop::Generic) {
+            return;
+        }
+        let desktop = self.opts.desktop.clone();
+        let (mode, size) = (self.opts.window.names().0, self.opts.window_size);
+        thread::spawn(move || match desktop.place_window(std::process::id(), mode, size) {
+            Ok(m) => eprintln!("{m}"),
+            Err(m) => eprintln!("warning: {m}"),
+        });
+    }
+
     /// The saveable settings' live values, spelled as the settings file
     /// spells them (DELAY in seconds, as the mpv script writes it).
     fn values(&self) -> overlay::Values {
@@ -1088,6 +1147,8 @@ impl ApplicationHandler<UserEvent> for App {
             Ok(gfx) => {
                 self.gfx = Some(gfx);
                 self.relayout();
+                // As view.sh's place job: the start mode, finished.
+                self.place_window();
             }
             Err(e) => {
                 self.error = Some(e);
@@ -1137,6 +1198,8 @@ impl ApplicationHandler<UserEvent> for App {
                     event_loop.exit();
                 } else if (event.repeat && once) || (plain && self.overlay_key(key)) {
                     // Ignored, or taken by the overlay.
+                } else if plain && is("f") {
+                    self.cycle_display();
                 } else if plain && is("s") {
                     if let Some(gfx) = self.gfx.as_mut()
                         && !gfx.screenshot.request()
@@ -1240,6 +1303,8 @@ mod tests {
                 picture,
                 scaling,
                 audio: AudioSetup::Off("none".into()),
+                window_size: (1280, 720),
+                desktop: Desktop::Generic,
                 source: "ps5".into(),
                 settings: Some(s),
             },
@@ -1288,6 +1353,19 @@ mod tests {
         assert!(press(&mut app, "Esc"));
         assert_eq!(app.overlay.page, None);
         assert!(app.repaint, "every change draws again");
+
+        // f: the panel's Display line and w's WINDOW follow it.
+        press(&mut app, "Tab");
+        app.cycle_display();
+        assert_eq!(panel(&app)[2], "f     Display      Borderless");
+        assert!(panel(&app)[9].contains("WINDOW=borderless"));
+        app.cycle_display();
+        assert_eq!(app.opts.window, WindowMode::Windowed { width: 1280, height: 720 });
+        app.cycle_display();
+        assert_eq!(app.opts.window, WindowMode::Fullscreen);
+        press(&mut app, "Esc");
+        app.cycle_display();
+        assert_eq!(app.overlay.current_message(Instant::now()), Some("Display: Borderless"));
 
         // w with nothing changed says so and writes nothing.
         let (mut quiet, quiet_file) = app_with("LEVELS=full\n");
