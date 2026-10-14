@@ -37,6 +37,10 @@ REQ = re.compile(
     r"^\[(\d\d):(\d\d):(\d\d)\.(\d{6})\] (?:\{[^}]*\})?\s+-> "
     r"wp_presentation#(\d+)\.feedback\(wl_surface#\d+, new id wp_presentation_feedback#(\d+)\)"
 )
+CLOCK = re.compile(r"wp_presentation#\d+\.clock_id\((\d+)\)")
+SHIM_CLOCK = re.compile(r"^# clock_id (\d+)")
+CLOCK_MONOTONIC = 1  # Linux; the meta file's capture times are on it
+
 EVT = re.compile(
     r"^\[[\d:.]+\] (?:\{[^}]*\} )?"
     r"wp_presentation_feedback#(\d+)\.(presented|discarded)\((.*)\)"
@@ -78,13 +82,26 @@ def is_shim(path):
         return any(line.startswith(("# surface_id", "# clock_id", "# the compositor")) for line in f)
 
 
+def require_monotonic(clocks, where):
+    """Presented times are only comparable with capture times on CLOCK_MONOTONIC."""
+    if not clocks:
+        sys.exit(f"{where}: no wp_presentation clock_id, so presented times cannot be trusted")
+    other = sorted(c for c in clocks if c != CLOCK_MONOTONIC)
+    if other:
+        sys.exit(f"{where}: presentation clock {other} is not CLOCK_MONOTONIC ({CLOCK_MONOTONIC}); "
+                 "the latencies would compare different clocks")
+
+
 def read_shim(path):
     """[(request_mono_ns, presented_mono_ns or None)] for the busiest surface."""
-    rows, commits = [], {}
+    rows, commits, clocks = [], {}, set()
     with open(path) as f:
         for line in f:
             if line.startswith("#"):
                 print(line.strip())
+                m = SHIM_CLOCK.match(line)
+                if m:
+                    clocks.add(int(m.group(1)))
                 continue
             p = line.split()
             if len(p) == 3 and p[2] == "discarded":
@@ -94,6 +111,7 @@ def read_shim(path):
             else:
                 continue
             commits[p[0]] = commits.get(p[0], 0) + 1
+    require_monotonic(clocks, path)
     if not rows:
         sys.exit("no commits in the shim log")
     surface = max(commits, key=commits.get)
@@ -103,12 +121,17 @@ def read_shim(path):
 
 def read_wayland_debug(path, day, offset):
     """[(request_mono_ns, presented_mono_ns or None)] for the busiest requester."""
-    asks = {}
+    asks, clocks = {}, set()
     with open(path, errors="replace") as f:
         for line in f:
             m = REQ.match(line)
             if m:
                 asks[m.group(5)] = asks.get(m.group(5), 0) + 1
+            m = CLOCK.search(line)
+            if m:
+                clocks.add(int(m.group(1)))
+    # Every wp_presentation object announces the compositor's one clock.
+    require_monotonic(clocks, path)
     if not asks:
         sys.exit("no wp_presentation feedback requests in the Wayland log; use present-shim.so")
     chosen = max(asks, key=asks.get)
