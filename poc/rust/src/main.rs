@@ -170,7 +170,7 @@ fn run_audio(args: &[String]) -> Result<(), String> {
                 let ms = steps[step % steps.len()];
                 step += 1;
                 eprintln!("{:6.1} s  delay {} -> {ms} ms", t.as_secs_f64(), a.delay_ms());
-                a.set_delay_ms(ms);
+                let ms = a.set_delay_ms(ms);
                 changed = Some((t, ms));
             }
             next_report += Duration::from_secs(10);

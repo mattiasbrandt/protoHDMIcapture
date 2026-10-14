@@ -26,6 +26,23 @@ const GAIN: f64 = 0.5;
 /// Closer than this to the target, play at exactly 1x.
 const DEAD_BAND: f64 = 0.001;
 pub const DEFAULT_DELAY_MS: u32 = 50;
+/// The largest delay: view.sh's DELAY setting is 0..1 s.
+pub const MAX_DELAY_MS: u32 = 1000;
+/// The ring holds the largest delay plus room for the input running a
+/// little ahead; a delay it cannot hold would never prime (silence).
+const RING_FRAMES: usize = frames_for(MAX_DELAY_MS) + RATE as usize / 4;
+
+const fn frames_for(ms: u32) -> usize {
+    (ms as u64 * RATE as u64 / 1000) as usize
+}
+
+/// A delay the ring can hold, or why not.
+pub fn check_delay(ms: u32) -> Result<u32, String> {
+    if ms > MAX_DELAY_MS {
+        return Err(format!("delay {ms} ms is over the {MAX_DELAY_MS} ms maximum"));
+    }
+    Ok(ms)
+}
 
 type Frame = [f32; 2];
 
@@ -96,6 +113,7 @@ impl Audio {
     /// `usb_id` is the card's `vvvv:pppp`: its PipeWire source is the
     /// `alsa_input.usb-vvvv_pppp…` node.
     pub fn start(usb_id: &str, delay_ms: u32) -> Result<Self, String> {
+        let delay_ms = check_delay(delay_ms)?;
         let host = cpal::host_from_id(HostId::PipeWire).map_err(|e| format!("PipeWire host: {e}"))?;
         let want = format!("alsa_input.usb-{}", usb_id.replace(':', "_"));
         let mut input = None;
@@ -123,7 +141,7 @@ impl Audio {
             target_ms: AtomicU32::new(delay_ms),
             ..Default::default()
         });
-        let ring = Arc::new(Mutex::new(Ring { frames: VecDeque::with_capacity(RATE as usize), pos: 0.0, primed: false }));
+        let ring = Arc::new(Mutex::new(Ring { frames: VecDeque::with_capacity(RING_FRAMES), pos: 0.0, primed: false }));
 
         let input = {
             let ring = ring.clone();
@@ -136,9 +154,9 @@ impl Audio {
                         seen(&c.in_min, &c.in_max, n as u32);
                         let mut r = ring.lock().unwrap();
                         r.frames.extend(data.chunks_exact(2).map(|s| [s[0], s[1]]));
-                        // Never hold more than a second: a stalled output
-                        // must not grow the delay without bound.
-                        let excess = r.frames.len().saturating_sub(RATE as usize);
+                        // A stalled output must not grow the delay
+                        // without bound.
+                        let excess = r.frames.len().saturating_sub(RING_FRAMES);
                         r.frames.drain(..excess);
                     },
                     on_error(&counters, "input"),
@@ -155,7 +173,7 @@ impl Audio {
                     move |out, _| {
                         let n = out.len() / CHANNELS as usize;
                         seen(&c.out_min, &c.out_max, n as u32);
-                        let target = (c.target_ms.load(Ordering::Relaxed) as f64 * RATE as f64 / 1000.0) as usize;
+                        let target = frames_for(c.target_ms.load(Ordering::Relaxed));
                         let mut r = ring.lock().unwrap();
                         c.fill.store(r.frames.len() as u32, Ordering::Relaxed);
                         if !r.primed {
@@ -229,8 +247,11 @@ impl Audio {
         )
     }
 
-    pub fn set_delay_ms(&self, ms: u32) {
+    /// Sets the delay, capped at `MAX_DELAY_MS`; returns the delay set.
+    pub fn set_delay_ms(&self, ms: u32) -> u32 {
+        let ms = ms.min(MAX_DELAY_MS);
         self.counters.target_ms.store(ms, Ordering::Relaxed);
+        ms
     }
 
     pub fn delay_ms(&self) -> u32 {
@@ -252,5 +273,25 @@ impl Audio {
             c.xruns.load(Ordering::Relaxed),
             c.other_errors.load(Ordering::Relaxed)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ring_holds_the_largest_delay_with_room_to_spare() {
+        // Priming needs the fill to reach the target while the input
+        // callback trims to RING_FRAMES: a ring the size of the delay
+        // never primes (the bug: 1 s ring, delay over 1 s, silence).
+        assert!(RING_FRAMES >= frames_for(MAX_DELAY_MS) + 2 * BUFFER_FRAMES as usize);
+    }
+
+    #[test]
+    fn a_delay_over_the_maximum_is_refused_at_start() {
+        assert_eq!(check_delay(MAX_DELAY_MS), Ok(MAX_DELAY_MS));
+        assert!(check_delay(MAX_DELAY_MS + 1).is_err());
+        assert_eq!(check_delay(0), Ok(0));
     }
 }

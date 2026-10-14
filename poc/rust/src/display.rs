@@ -628,8 +628,9 @@ impl ApplicationHandler<UserEvent> for App {
                         } else {
                             a.delay_ms().saturating_sub(DELAY_STEP_MS)
                         };
-                        eprintln!("audio delay {} -> {ms} ms", a.delay_ms());
-                        a.set_delay_ms(ms);
+                        let was = a.delay_ms();
+                        let ms = a.set_delay_ms(ms);
+                        eprintln!("audio delay {was} -> {ms} ms");
                     }
                     _ => {}
                 }
