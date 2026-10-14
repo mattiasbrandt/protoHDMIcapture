@@ -115,6 +115,36 @@ impl WindowMode {
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum AudioAction {
+    /// Move the sync by this many ms.
+    Sync(i32),
+    Level(LevelChange),
+}
+
+/// The audio keys as the mpv script binds them: ctrl -/+ (or =) 10 ms,
+/// alt -/+ 50 ms, and m, 9, 0 plain (no ctrl, alt or super).
+fn audio_action(key: &Key, m: ModifiersState) -> Option<AudioAction> {
+    let Key::Character(c) = key else { return None };
+    if m.super_key() {
+        return None;
+    }
+    let step = match (m.control_key(), m.alt_key()) {
+        (true, false) => 10,
+        (false, true) => 50,
+        (false, false) => 0,
+        (true, true) => return None,
+    };
+    Some(match (c.as_str(), step) {
+        ("-", s) if s > 0 => AudioAction::Sync(-s),
+        ("+" | "=", s) if s > 0 => AudioAction::Sync(s),
+        ("m", 0) => AudioAction::Level(LevelChange::Mute),
+        ("9", 0) => AudioAction::Level(LevelChange::Volume(-5)),
+        ("0", 0) => AudioAction::Level(LevelChange::Volume(5)),
+        _ => return None,
+    })
+}
+
 /// The overlay's text for one frame (osd.rs draws it).
 struct SceneText {
     page: Option<Vec<String>>,
@@ -712,35 +742,14 @@ impl App {
     /// True when the key was one of them.
     fn audio_key(&mut self, key: &Key) -> bool {
         let AudioSetup::Running(audio) = &self.opts.audio else { return false };
-        let Key::Character(c) = key else { return false };
-        let m = self.modifiers;
-        let step = if m.control_key() && !m.alt_key() {
-            10
-        } else if m.alt_key() && !m.control_key() {
-            50
-        } else {
-            0
-        };
-        if m.super_key() {
-            return false;
-        }
-        let synced = match (c.as_str(), step) {
-            ("-", s) if s > 0 => Some(audio.nudge_delay(-s)),
-            ("+" | "=", s) if s > 0 => Some(audio.nudge_delay(s)),
+        let Some(action) = audio_action(key, self.modifiers) else { return false };
+        let synced = match action {
+            AudioAction::Sync(ms) => Some(audio.nudge_delay(ms)),
             // Their messages come from the controls' thread (Notify).
-            ("m", 0) => {
-                audio.change_level(LevelChange::Mute);
+            AudioAction::Level(change) => {
+                audio.change_level(change);
                 None
             }
-            ("9", 0) => {
-                audio.change_level(LevelChange::Volume(-5));
-                None
-            }
-            ("0", 0) => {
-                audio.change_level(LevelChange::Volume(5));
-                None
-            }
-            _ => return false,
         };
         if let Some(ms) = synced {
             self.overlay.message(format!("Audio sync {ms} ms"), Duration::from_millis(1500), Instant::now());
@@ -1210,9 +1219,10 @@ impl ApplicationHandler<UserEvent> for App {
                 let key = &event.logical_key;
                 let plain = !self.modifiers.intersects(ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SUPER);
                 let is = |k: &str| matches!(key, Key::Character(c) if c == k);
-                // Held down, these act once (the mpv script binds them
-                // without repeat); the rest repeat.
-                let once = matches!(key, Key::Named(NamedKey::Tab)) || ["f", "m", "s", "w", "t"].into_iter().any(is);
+                // Held down, these act once (the mpv script binds Tab, f
+                // and m without repeat; s is a shot per press); the rest
+                // repeat, the overlay's keys included, as there.
+                let once = matches!(key, Key::Named(NamedKey::Tab)) || ["f", "m", "s"].into_iter().any(is);
                 // q quits, as in view.sh.
                 if is("q") {
                     event_loop.exit();
@@ -1426,6 +1436,22 @@ mod tests {
         for f in [file, quiet_file] {
             std::fs::remove_dir_all(f.parent().unwrap()).unwrap();
         }
+    }
+
+    #[test]
+    fn audio_keys_as_the_mpv_script_binds_them() {
+        let k = |c: &str| Key::Character(c.into());
+        let (ctrl, alt, none) = (ModifiersState::CONTROL, ModifiersState::ALT, ModifiersState::empty());
+        assert_eq!(audio_action(&k("-"), ctrl), Some(AudioAction::Sync(-10)));
+        assert_eq!(audio_action(&k("="), ctrl), Some(AudioAction::Sync(10)));
+        assert_eq!(audio_action(&k("+"), alt | ModifiersState::SHIFT), Some(AudioAction::Sync(50)));
+        assert_eq!(audio_action(&k("m"), none), Some(AudioAction::Level(LevelChange::Mute)));
+        assert_eq!(audio_action(&k("0"), none), Some(AudioAction::Level(LevelChange::Volume(5))));
+        // Plain keys only, as the review found ctrl+alt+m muting.
+        assert_eq!(audio_action(&k("m"), ctrl | alt), None);
+        assert_eq!(audio_action(&k("9"), ctrl), None);
+        assert_eq!(audio_action(&k("-"), none), None);
+        assert_eq!(audio_action(&k("-"), ctrl | ModifiersState::SUPER), None);
     }
 
     #[test]
