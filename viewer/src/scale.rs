@@ -11,6 +11,10 @@
 //! LUTs are. Downscaling widens the kernel by the ratio (mpv's
 //! correct-downscaling, on by default), and a ratio of 1 runs no filter
 //! (libplacebo's no-op, within 1e-6), so a 1:1 feed is the frame itself.
+//! Widening is bounded: a filter needing more than `MAX_TAPS` texels a side
+//! (a downscale past about 1/8, a sliver of a window) falls back to the
+//! bilinear sampler instead of millions of fetches per pixel. libplacebo
+//! caps its row size too (`max_tex_2d_dim / 4`), far higher.
 //!
 //! Not ported: mpv's sigmoid-light upscaling and linear-light downscaling
 //! (both on by default in view.sh's balanced); the filters run on the
@@ -198,6 +202,9 @@ impl Config {
     }
 }
 
+/// The most texels a filter reaches on each side of the centre (1 - n ..= n).
+pub const MAX_TAPS: i32 = 16;
+
 /// Entries in a filter's table (libplacebo's `SCALER_LUT_SIZE`).
 pub const LUT_SIZE: usize = 256;
 
@@ -230,6 +237,12 @@ pub fn filter(scaling: Scaling, src: (u32, u32), dst: (u32, u32)) -> Option<Filt
     };
     // Widening: blur times the inverse ratio when downscaling.
     let widen = |ratio: f64| Config { blur: config.blur * (1.0 / ratio).max(1.0), ..config };
+    // Too wide to run per pixel: the sampler instead. Checked on the bound,
+    // before the cutoff search walks it.
+    let too_wide = |c: Config| c.bound().ceil() > f64::from(MAX_TAPS);
+    if too_wide(widen(rx)) || too_wide(widen(ry)) {
+        return None;
+    }
     if config.polar {
         // pl_shader_sample_polar: one ratio, the smaller; the table over
         // the cutoff radius (SCALER_LUT_CUTOFF).
@@ -412,6 +425,19 @@ mod tests {
     }
 
     #[test]
+    fn widening_is_bounded() {
+        // mitchell's radius 2 widened 8x is 16 taps: still the filter.
+        let f = filter(Scaling::Balanced, (1920, 1080), (240, 135)).unwrap();
+        assert_eq!(f.taps, [16, 16]);
+        assert!(f.taps.iter().all(|&t| t <= MAX_TAPS));
+        // Past that, down to a 1x1 window: the sampler.
+        for dst in [(239, 134), (100, 56), (1, 1)] {
+            assert_eq!(filter(Scaling::Balanced, (1920, 1080), dst), None, "{dst:?}");
+            assert_eq!(filter(Scaling::HighQuality, (1920, 1080), dst), None, "{dst:?}");
+        }
+    }
+
+    #[test]
     fn the_table_interpolates_closely() {
         // The worst gap between the table read linearly and the filter.
         for f in [
@@ -525,6 +551,7 @@ mod tests {
             (Scaling::HighQuality, (2560, 1440)),
             (Scaling::Balanced, (1280, 720)),
             (Scaling::Balanced, (950, 534)),
+            (Scaling::Balanced, (240, 135)),
         ] {
             let f = filter(scaling, (w, h), dst).unwrap();
             let uniform = device.create_buffer(&wgpu::BufferDescriptor {

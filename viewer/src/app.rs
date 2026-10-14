@@ -101,6 +101,9 @@ struct Gfx {
     viewport: [u32; 4],
     /// --stats, where the GPU can time its passes.
     timer: Option<GpuTimer>,
+    /// The window has no area (minimised, or resized to nothing): nothing
+    /// is drawn until it has.
+    hidden: bool,
     texture: wgpu::Texture,
     upload: Vec<u8>,
     /// None: the desktop gives no presentation feedback; frames go out
@@ -568,6 +571,7 @@ impl App {
             filter: None,
             viewport: [0, 0, 1, 1],
             timer,
+            hidden: false,
             texture,
             upload: vec![0; self.format.frame_size()],
             feedback,
@@ -662,6 +666,9 @@ impl App {
             self.in_flight = 0;
         }
         let Some(gfx) = self.gfx.as_mut() else { return Ok(()) };
+        if gfx.hidden {
+            return Ok(());
+        }
         let tag = {
             let mut s = self.slot.lock().expect("the slot's lock is never poisoned");
             let Some(tag) = s.tag.take() else { return Ok(()) };
@@ -813,10 +820,14 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Resized(size) => {
                 if let Some(gfx) = self.gfx.as_mut() {
-                    gfx.config.width = size.width.max(1);
-                    gfx.config.height = size.height.max(1);
-                    gfx.surface.configure(&gfx.device, &gfx.config);
-                    self.relayout();
+                    // A surface cannot be configured at zero size.
+                    gfx.hidden = size.width == 0 || size.height == 0;
+                    if !gfx.hidden {
+                        gfx.config.width = size.width;
+                        gfx.config.height = size.height;
+                        gfx.surface.configure(&gfx.device, &gfx.config);
+                        self.relayout();
+                    }
                 }
             }
             _ => {}
