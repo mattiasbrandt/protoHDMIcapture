@@ -87,7 +87,10 @@ frame the card had finished. Kernel timestamp -> presented, so it
 includes the ~16 ms USB transfer in every row. For mpv this is a lower
 bound: if mpv shows an older frame than the newest, it is slower still.
 Checked on the PoC: the external method gave median 42.19 / p99 49.75 /
-max 54.21 ms, exactly its own timing.
+max 54.21 ms, exactly its own timing. GStreamer's waylandsink and ffplay
+(SDL over EGL) ask for no presentation feedback; `tools/present-shim.c`
+(LD_PRELOAD) asks for it on every commit of any Wayland app, and on the
+PoC it too matched the PoC's own timing exactly (41.50 / 49.77 / 51.01).
 
 | Viewer | Median | p99 | Run (`poc/rust/runs/2026-10-14-…`) |
 |---|---|---|---|
@@ -95,6 +98,8 @@ max 54.21 ms, exactly its own timing.
 | PoC, paced, direct scanout | 39.9 | 49.1 | `fullscreen-mailbox-paced-scanout-dp2`, 10 min |
 | view.sh (mpv `--untimed --profile=low-latency --swapchain-depth=1`) | 69.0 | 81.9 | `viewsh-fullscreen-dp2`, ~90 s |
 | bare mpv (the user's `mpv.conf`) | 74.2 | 82.2 | `mpv-bare-fullscreen-dp2`, 3 min |
+| GStreamer (view.sh `BACKEND=gst` pipeline) | 57.4 | 65.8 | `gst-fullscreen-dp2`, 3 min (#6) |
+| ffplay | 58.0 | 66.0 | `ffplay-fullscreen-dp2`, 3 min (#6) |
 
 - **view.sh's mpv builds the same queue** the unpaced PoC did: 41.7 ms in
   the first 10 s, then +8.6 ms every 10 s (the 60.000 vs 59.95 Hz
@@ -105,6 +110,10 @@ max 54.21 ms, exactly its own timing.
 - **Bare mpv** sits at ~70–78 ms from the start, and lost frames: 490
   sequence gaps in 3 minutes (10,241 frames, ~57 fps), with no gaps in
   the view.sh or PoC runs.
+- **GStreamer and ffplay** don't build mpv's queue but sit one refresh
+  behind the PoC (~57–58 ms). GStreamer lost 1 frame in 3 minutes,
+  ffplay none. ffplay opens fullscreen on a display of its own choosing
+  (DP-1 twice); it was started windowed on DP-2, then put in fullscreen.
 - The PoC's lead comes from one thing: it hands the compositor a frame
   only after the compositor's frame callback for the previous one
   (`App::render`). That is core Wayland (`wl_surface.frame`), not a
