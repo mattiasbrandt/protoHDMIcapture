@@ -7,7 +7,7 @@ contract; change a writer or a reader, update the row.
 | File | Written by | Read by | Meaning |
 |---|---|---|---|
 | `video.lock` | `view.sh` (flock, held while a player runs); the Rust viewer (held for its whole run, `viewer/src/session.rs`) | `view.sh`, the Rust viewer, setup sync stage (probe only) | one video window at a time, across both viewers |
-| `video.pid` | `view.sh` `run_player`; removed in its EXIT trap (left by a killed session); the Rust viewer (its own PID, removed at its end) | `view.sh` and the Rust viewer (a second launch focuses it), `--place-window`, dashboard, setup sync readiness | PID of the **player** (mpv/gst/ffplay, or the Rust viewer, which is its own player), not of `view.sh` |
+| `video.pid` | `view.sh` `run_player`; removed in its EXIT trap (left by a killed session); the Rust viewer (its own PID, removed at its end) | `view.sh` and the Rust viewer (a second launch focuses it; with the video lock held, both stop the orphan player it names), `--place-window`, dashboard, setup sync readiness | PID of the **player** (mpv/gst/ffplay, or the Rust viewer, which is its own player), not of `view.sh` |
 | `audio.lock` | `view.sh` (flock, held while pw-loopback runs) | `view.sh`, setup sync stage (probe only) | one audio loopback at a time |
 | `audio.pid` / `audio.env` | `view.sh` `start_audio`: `audio.pid` at start, `audio.env` only once the loopback is linked (both removed by `stop_audio`) | dashboard, `debug_after_start`, mpv script (`audio.env`: confirms a sync change) | loopback PID; `DELAY`, `LAT_MS`, `SRC` |
 | `audio.log` | `view.sh` `start_audio` (the loopback's stdout and stderr, new each start) | `audio_failed` (its last lines go in the warning), the user | why a loopback failed |
