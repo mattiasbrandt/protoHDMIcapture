@@ -102,21 +102,30 @@ impl Hyprland {
         Self { hyprctl: vec![hyprctl.into()] }
     }
 
-    fn run(&self, args: &[&str]) -> Option<String> {
-        let out = Command::new(&self.hyprctl[0]).args(&self.hyprctl[1..]).args(args).output().ok()?;
-        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    /// hyprctl's output, or why it failed (its own words when it gave any).
+    fn run(&self, args: &[&str]) -> Result<String, String> {
+        let out = Command::new(&self.hyprctl[0])
+            .args(&self.hyprctl[1..])
+            .args(args)
+            .output()
+            .map_err(|e| format!("cannot run {}: {e}", self.hyprctl[0].display()))?;
+        if out.status.success() {
+            return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+        }
+        let said = String::from_utf8_lossy(if out.stderr.is_empty() { &out.stdout } else { &out.stderr }).trim().to_string();
+        Err(if said.is_empty() { format!("hyprctl {} exited with {}", args[0], out.status) } else { said })
     }
 
     fn dispatch(&self, lua: &str) -> bool {
-        self.run(&["dispatch", lua]).is_some()
+        self.run(&["dispatch", lua]).is_ok()
     }
 
-    fn eval(&self, lua: &str) -> bool {
-        self.run(&["eval", lua]).is_some()
+    fn eval(&self, lua: &str) -> Result<(), String> {
+        self.run(&["eval", lua]).map(|_| ())
     }
 
     fn json(&self, what: &str) -> Option<Value> {
-        serde_json::from_str(&self.run(&[what, "-j"])?).ok()
+        serde_json::from_str(&self.run(&[what, "-j"]).ok()?).ok()
     }
 
     /// desktop_place_window: each mode first undoes what the others set,
@@ -181,31 +190,36 @@ impl Hyprland {
         if let Err(e) = fs::write(record, line) {
             return (None, Err(format!("cannot write {}: {e}; leaving the display alone", record.display())));
         }
-        if !self.eval(&plan.target) {
-            let _ = fs::remove_file(record);
-            return (None, Err("refresh switch failed; leaving the display alone".into()));
+        if let Err(why) = self.eval(&plan.target) {
+            return (None, Err(format!("refresh switch failed ({why}); leaving the display alone{}", removed(record))));
         }
         (Some(plan.restore), Ok(format!("display: {} {}Hz -> {}Hz (restored on exit)", plan.name, plan.current, plan.chosen)))
     }
 
     fn refresh_restore(&self, restore: &str, record: &Path) -> Report {
-        if self.eval(restore) {
-            let _ = fs::remove_file(record);
-            return Ok("display: refresh rate restored".into());
+        match self.eval(restore) {
+            Ok(()) => match removed(record) {
+                gone if gone.is_empty() => Ok("display: refresh rate restored".into()),
+                kept => Err(format!("display: refresh rate restored{kept}")),
+            },
+            Err(why) => Err(format!(
+                "could not restore the display's refresh rate ({why}; the next run retries); now: hyprctl eval '{restore}'"
+            )),
         }
-        Err(format!("could not restore the display's refresh rate (the next run retries); now: hyprctl eval '{restore}'"))
     }
 
     fn refresh_recover(&self, record: &Path) -> Report {
-        let text = fs::read_to_string(record).unwrap_or_default();
+        let text = match fs::read_to_string(record) {
+            Ok(t) => t,
+            // Kept: an unreadable file is not proof the record is bad.
+            Err(e) => return Err(format!("cannot read the refresh record {}: {e}; kept", record.display())),
+        };
         let fields: Vec<&str> = text.lines().next().unwrap_or("").splitn(4, '|').collect();
         let [name, set, was, restore] = fields[..] else {
-            let _ = fs::remove_file(record);
-            return Err(format!("unreadable refresh record {}; dropped", record.display()));
+            return Err(format!("unreadable refresh record {}; dropped{}", record.display(), removed(record)));
         };
         if restore.is_empty() {
-            let _ = fs::remove_file(record);
-            return Err(format!("unreadable refresh record {}; dropped", record.display()));
+            return Err(format!("unreadable refresh record {}; dropped{}", record.display(), removed(record)));
         }
         let keep = format!("(or: hyprctl eval '{restore}'; rm {})", record.display());
         let now = self
@@ -219,15 +233,40 @@ impl Hyprland {
         let set_rate: f64 = set.parse().unwrap_or(f64::NAN);
         // As the awk test: within 0.01 Hz.
         if (now - set_rate).powi(2) >= 0.0001 || set_rate.is_nan() {
-            let _ = fs::remove_file(record);
-            return Ok(format!("display: {name} is at {}Hz, not the {set}Hz a killed session set; left as it is", fmt_g(now)));
+            let said = format!("display: {name} is at {}Hz, not the {set}Hz a killed session set; left as it is", fmt_g(now));
+            return settled(said, record);
         }
-        if !self.eval(restore) {
-            return Err(format!("could not restore {name} to {was}Hz after a killed session; kept for the next run {keep}"));
+        if let Err(why) = self.eval(restore) {
+            return Err(format!(
+                "could not restore {name} to {was}Hz after a killed session ({why}); kept for the next run {keep}"
+            ));
         }
-        let _ = fs::remove_file(record);
-        Ok(format!("display: {name} {set}Hz -> {was}Hz, restored after a killed session"))
+        settled(format!("display: {name} {set}Hz -> {was}Hz, restored after a killed session"), record)
     }
+}
+
+/// Removes a settled record: "" when gone, else why it stays (appended to
+/// a message, as it then blocks the next REFRESH=match).
+fn removed(record: &Path) -> String {
+    match fs::remove_file(record) {
+        Ok(()) => String::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => format!("; but {} cannot be removed ({e}) and blocks REFRESH=match until it is", record.display()),
+    }
+}
+
+/// `said`, and the record removed now that it is settled.
+fn settled(said: String, record: &Path) -> Report {
+    match removed(record) {
+        gone if gone.is_empty() => Ok(said),
+        kept => Err(format!("{said}{kept}")),
+    }
+}
+
+/// `notify-send`, where there is one: a launcher has no terminal to show
+/// a message in (lib/desktop.sh desktop_notify).
+pub fn notify(urgency: &str, summary: &str) {
+    let _ = Command::new("notify-send").args(["-a", "protoHDMIcapture", "-u", urgency, "--", summary]).status();
 }
 
 /// pick-refresh-mode.py's answer.
@@ -389,7 +428,7 @@ mod tests {
             None => "[]".into(),
         };
         let script = format!(
-            "#!/bin/sh\necho \"$*\" >>'{log}'\ncase \"$1\" in\nmonitors) cat <<'EOF'\n{monitors}\nEOF\n;;\neval) exit {rc} ;;\nesac\n",
+            "#!/bin/sh\necho \"$*\" >>'{log}'\ncase \"$1\" in\nmonitors) cat <<'EOF'\n{monitors}\nEOF\n;;\neval) [ {rc} = 0 ] || echo 'config error: bad monitor' >&2; exit {rc} ;;\nesac\n",
             log = dir.join("log").display(),
             rc = if eval_ok { 0 } else { 1 }
         );
@@ -459,7 +498,8 @@ mod tests {
         let dir = tmp("match-fail");
         let h = Desktop::Hyprland(fake(&dir, Some(59.950001), false));
         let (none, report) = h.refresh_match(60.0, &rec_in(&dir));
-        assert!(none.is_none() && report.is_err() && !rec_in(&dir).exists());
+        assert!(none.is_none() && !rec_in(&dir).exists());
+        assert!(report.unwrap_err().contains("(config error: bad monitor)"), "hyprctl's reason is shown");
         fs::write(rec_in(&dir), "x").unwrap();
         assert!(h.refresh_restore("hl.monitor({})", &rec_in(&dir)).is_err());
         assert!(rec_in(&dir).exists());

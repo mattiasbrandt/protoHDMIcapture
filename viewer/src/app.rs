@@ -13,7 +13,7 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, Raw
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Fullscreen, Window, WindowId};
@@ -226,6 +226,8 @@ struct App {
     reconvert: bool,
     /// When the overlay next changes on its own.
     deadline: Option<Instant>,
+    /// The window placement worker, once started.
+    placer: Option<std::sync::mpsc::Sender<(&'static str, (u32, u32))>>,
     modifiers: ModifiersState,
     stats: Stats,
     in_flight: u32,
@@ -361,25 +363,68 @@ pub(crate) fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+/// Ctrl-C, SIGTERM and SIGHUP (ctrlc's termination feature), installed by
+/// main before anything is switched, so a signal at any point ends in the
+/// normal teardown (the display switched back, the run dir cleaned) rather
+/// than leaving it to the next run's recovery.
+type Wake = Box<dyn Fn() + Send>;
+
+#[derive(Clone)]
+pub struct Quit {
+    flag: Arc<AtomicBool>,
+    /// Wakes the window's loop, once it runs.
+    wake: Arc<Mutex<Option<Wake>>>,
+}
+
+impl Quit {
+    pub fn install() -> Result<Self, String> {
+        let q = Self { flag: Arc::default(), wake: Arc::default() };
+        let handler = q.clone();
+        ctrlc::set_handler(move || handler.request()).map_err(|e| format!("signal handler: {e}"))?;
+        Ok(q)
+    }
+
+    pub fn request(&self) {
+        self.flag.store(true, Ordering::Relaxed);
+        if let Some(wake) = self.wake.lock().expect("the quit lock is never poisoned").as_ref() {
+            wake();
+        }
+    }
+
+    pub fn requested(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+
+    fn on_request(&self, wake: Wake) {
+        *self.wake.lock().expect("the quit lock is never poisoned") = Some(wake);
+    }
+}
+
 /// Runs the window until quit; the capture thread feeds it. Returns the
 /// capture's error, if it failed.
-pub fn run(mut source: Box<dyn FrameSource>, opts: Options) -> Result<(), String> {
+pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Result<(), String> {
     let format = source.format();
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .map_err(|e| format!("event loop: {e}"))?;
     let proxy = event_loop.create_proxy();
-    let quit = Arc::new(AtomicBool::new(false));
-
-    let wake = |proxy: EventLoopProxy<UserEvent>, quit: Arc<AtomicBool>| {
-        move || {
-            quit.store(true, Ordering::Relaxed);
-            let _ = proxy.send_event(UserEvent::Quit);
-        }
+    let quit = quitter.flag.clone();
+    {
+        let p = proxy.clone();
+        quitter.on_request(Box::new(move || {
+            let _ = p.send_event(UserEvent::Quit);
+        }));
+    }
+    // A signal before the loop's wake was set.
+    if quitter.requested() {
+        let _ = proxy.send_event(UserEvent::Quit);
+    }
+    let stopper = || {
+        let q = quitter.clone();
+        move || q.request()
     };
-    ctrlc::set_handler(wake(proxy.clone(), quit.clone())).map_err(|e| e.to_string())?;
     if let Some(s) = opts.seconds {
-        let stop = wake(proxy.clone(), quit.clone());
+        let stop = stopper();
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(s));
             stop();
@@ -391,7 +436,7 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options) -> Result<(), String
     let capture_thread = {
         let slot = slot.clone();
         let quit = quit.clone();
-        let stop = wake(proxy.clone(), quit.clone());
+        let stop = stopper();
         thread::spawn(move || -> Result<(u64, u64), String> {
             let mut frames = 0u64;
             let mut gaps = 0u64;
@@ -447,6 +492,7 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options) -> Result<(), String
         repaint: false,
         reconvert: false,
         deadline: None,
+        placer: None,
         modifiers: ModifiersState::empty(),
         opts,
         slot: slot.clone(),
@@ -865,17 +911,30 @@ impl App {
     }
 
     /// The desktop adapter's part of the current mode, off this thread (it
-    /// waits for the window to map, then runs a few hyprctl calls).
-    fn place_window(&self) {
+    /// waits for the window to map, then runs a few hyprctl calls). One
+    /// worker does them in turn and skips to the latest, so quick f
+    /// presses cannot interleave their dispatches.
+    fn place_window(&mut self) {
         if matches!(self.opts.desktop, Desktop::Generic) {
             return;
         }
-        let desktop = self.opts.desktop.clone();
-        let (mode, size) = (self.opts.window.names().0, self.opts.window_size);
-        thread::spawn(move || match desktop.place_window(std::process::id(), mode, size) {
-            Ok(m) => eprintln!("{m}"),
-            Err(m) => eprintln!("warning: {m}"),
+        let placer = self.placer.get_or_insert_with(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<(&'static str, (u32, u32))>();
+            let desktop = self.opts.desktop.clone();
+            thread::spawn(move || {
+                while let Ok(mut job) = rx.recv() {
+                    while let Ok(newer) = rx.try_recv() {
+                        job = newer;
+                    }
+                    match desktop.place_window(std::process::id(), job.0, job.1) {
+                        Ok(m) => eprintln!("{m}"),
+                        Err(m) => eprintln!("warning: {m}"),
+                    }
+                }
+            });
+            tx
         });
+        let _ = placer.send((self.opts.window.names().0, self.opts.window_size));
     }
 
     /// The saveable settings' live values, spelled as the settings file
@@ -1335,6 +1394,7 @@ mod tests {
             repaint: false,
             reconvert: false,
             deadline: None,
+            placer: None,
             modifiers: ModifiersState::empty(),
             stats: Stats::new(Duration::ZERO, false),
             in_flight: 0,

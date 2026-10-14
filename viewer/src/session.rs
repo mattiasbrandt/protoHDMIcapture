@@ -71,15 +71,19 @@ impl Session {
             let focused = pid.is_some_and(|p| desktop.focus_pid(p));
             return Ok(Err(AlreadyRunning { pid, focused }));
         }
-        fs::write(dir.join("video.pid"), format!("{}\n", std::process::id()))
-            .map_err(|e| format!("cannot write {}: {e}", dir.join("video.pid").display()))?;
-
         let record = dir.join("refresh.restore");
         // With the lock held, a record is not a live session's.
         if record.exists() {
             say(desktop.refresh_recover(&record));
         }
         Ok(Ok(Self { dir: dir.to_path_buf(), _lock: lock, desktop, restore: None }))
+    }
+
+    /// video.pid, once the viewer is about to show its window (a record
+    /// after what it records: a second launch focuses it).
+    pub fn announce(&self) -> Result<(), String> {
+        let path = self.dir.join("video.pid");
+        fs::write(&path, format!("{}\n", std::process::id())).map_err(|e| format!("cannot write {}: {e}", path.display()))
     }
 
     /// REFRESH=match, just before the window opens: the focused monitor to
@@ -104,7 +108,13 @@ impl Drop for Session {
         if let Some(restore) = self.restore.take() {
             say(self.desktop.refresh_restore(&restore, &self.dir.join("refresh.restore")));
         }
-        let _ = fs::remove_file(self.dir.join("video.pid"));
+        let pid = self.dir.join("video.pid");
+        match fs::remove_file(&pid) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                eprintln!("warning: cannot remove {}: {e}", pid.display());
+            }
+            _ => {}
+        }
     }
 }
 
@@ -122,6 +132,8 @@ mod tests {
     fn one_video_window_across_both_viewers() {
         let dir = tmp("lock");
         let first = Session::start(&dir, Desktop::Generic).unwrap().unwrap();
+        assert!(!dir.join("video.pid").exists(), "not before the window is about to show");
+        first.announce().unwrap();
         assert_eq!(fs::read_to_string(dir.join("video.pid")).unwrap(), format!("{}\n", std::process::id()));
         // A second session (flock locks are per open file, so this process
         // stands in for another) finds it held and the first's pid.

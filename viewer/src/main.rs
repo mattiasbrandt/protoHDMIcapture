@@ -79,6 +79,8 @@ fn audio(s: &Settings, card: &card::Node) -> Result<Option<audio::Audio>, String
 }
 
 fn view(args: &[String]) -> Result<(), String> {
+    // First: a signal from here on ends in the normal teardown.
+    let quit = app::Quit::install()?;
     let mut opts = app::Options {
         window: app::WindowMode::Fullscreen,
         monitor: None,
@@ -135,6 +137,11 @@ fn view(args: &[String]) -> Result<(), String> {
                 eprintln!("already running (pid {pid}); focused it");
             } else {
                 eprintln!("already running (pid {pid})");
+                // Started from a launcher: say so on the desktop, as view.sh.
+                // Safety: isatty only reads the fd's state.
+                if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 0 {
+                    desktop::notify("normal", "protoHDMIcapture is already running");
+                }
             }
             return Ok(());
         }
@@ -163,13 +170,25 @@ fn view(args: &[String]) -> Result<(), String> {
         None => {}
     }
     opts.source = s.get("SOURCE").to_string();
+    if !opts.source.is_empty() && sources::get(&opts.source).is_none() {
+        eprintln!(
+            "warning: SOURCE={} has no profile in sources/; the overlay shows the tips for any HDMI source",
+            opts.source
+        );
+        opts.source.clear();
+    }
     // As view.sh: after the audio, before the window.
     if s.get("REFRESH") == "match" {
         session.match_refresh(format.fps);
     }
     opts.settings = Some(s);
     let stats = opts.stats;
-    let result = app::run(Box::new(source), opts);
+    if quit.requested() {
+        return Ok(());
+    }
+    // As view.sh writes it once its player is started.
+    session.announce()?;
+    let result = app::run(Box::new(source), opts, quit);
     if let (true, Some(a)) = (stats, &sound) {
         eprintln!("summary: audio {}", a.granted());
         eprintln!("summary: audio {}", a.status());
