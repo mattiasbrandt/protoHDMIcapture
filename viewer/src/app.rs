@@ -14,11 +14,12 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
-use winit::keyboard::Key;
+use winit::keyboard::{Key, ModifiersState};
 use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::capture::{Event, Format, FrameSource, now_monotonic};
+use crate::picture::{self, Colour, Picture};
 use crate::present::{Feedback, Outcome, Presentation, Tag};
 use crate::stats::Stats;
 
@@ -58,6 +59,8 @@ pub struct Options {
     pub seconds: Option<u64>,
     /// Print timing every 10 s and a summary (measurements).
     pub stats: bool,
+    /// LEVELS and the colour values at start.
+    pub picture: Picture,
 }
 
 enum UserEvent {
@@ -81,6 +84,7 @@ struct Gfx {
     config: wgpu::SurfaceConfiguration,
     convert_pipeline: wgpu::RenderPipeline,
     convert_bind_group: wgpu::BindGroup,
+    picture_buffer: wgpu::Buffer,
     rgb_view: wgpu::TextureView,
     scale_pipeline: wgpu::RenderPipeline,
     scale_bind_group: wgpu::BindGroup,
@@ -96,6 +100,8 @@ struct App {
     format: Format,
     slot: Arc<Mutex<Slot>>,
     gfx: Option<Gfx>,
+    picture: Picture,
+    modifiers: ModifiersState,
     stats: Stats,
     in_flight: u32,
     last_submit: Duration,
@@ -120,13 +126,14 @@ struct VOut {
 
 /// Pass 1, at the capture's own size: YUYV -> RGB. A texel is one
 /// macropixel, Y0 U Y1 V for two pixels; chroma is sited with the even pixel
-/// and interpolated for the odd one. BT.709 limited range (the PS5 over the
-/// MS2130 measured luma 16..235; LEVELS comes with #12).
+/// and interpolated for the odd one. Then LEVELS and the colour values
+/// (picture.rs).
 fn convert_shader(width: u32) -> String {
     let last = width / 2 - 1;
     format!(
-        r#"
+        r#"{wgsl}
 @group(0) @binding(0) var yuyv: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> pic: Picture;
 
 @fragment fn fs(in: VOut) -> @location(0) vec4f {{
     let x = u32(in.pos.x);
@@ -139,13 +146,10 @@ fn convert_shader(width: u32) -> String {
         let next = textureLoad(yuyv, vec2u(min(x / 2u + 1u, {last}u), y), 0);
         c = (t.ga + next.ga) * 0.5;
     }}
-    let yy = (luma - 16.0 / 255.0) * (255.0 / 219.0);
-    let cb = (c.x - 128.0 / 255.0) * (255.0 / 224.0);
-    let cr = (c.y - 128.0 / 255.0) * (255.0 / 224.0);
-    let rgb = vec3f(yy + 1.5748 * cr, yy - 0.1873 * cb - 0.4681 * cr, yy + 1.8556 * cb);
-    return vec4f(clamp(rgb, vec3f(0.0), vec3f(1.0)), 1.0);
+    return vec4f(picture(pic, vec3f(luma, c.x, c.y)), 1.0);
 }}
-"#
+"#,
+        wgsl = picture::WGSL
     )
 }
 
@@ -276,6 +280,8 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options) -> Result<(), String
     let mut app = App {
         format,
         stats: Stats::new(start, opts.stats),
+        picture: opts.picture,
+        modifiers: ModifiersState::empty(),
         opts,
         slot: slot.clone(),
         gfx: None,
@@ -415,15 +421,37 @@ impl App {
 
         let convert_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("convert"),
-            entries: &[texture_entry(0, false)],
+            entries: &[
+                texture_entry(0, false),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
+        let picture_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("picture"),
+            size: size_of::<[[f32; 4]; 4]>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&picture_buffer, 0, &picture::bytes(&self.picture.uniform(w, h)));
         let convert_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("convert"),
             layout: &convert_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&texture.create_view(&Default::default())),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture.create_view(&Default::default())),
+                },
+                wgpu::BindGroupEntry { binding: 1, resource: picture_buffer.as_entire_binding() },
+            ],
         });
         let convert_pipeline =
             pipeline(&device, "convert", &convert_shader(w), &convert_layout, wgpu::TextureFormat::Rgba8Unorm);
@@ -464,6 +492,7 @@ impl App {
             config,
             convert_pipeline,
             convert_bind_group,
+            picture_buffer,
             rgb_view,
             scale_pipeline,
             scale_bind_group,
@@ -471,6 +500,36 @@ impl App {
             upload: vec![0; self.format.frame_size()],
             feedback,
         })
+    }
+
+    /// The picture keys (mpv's 1..8; the overlay's r and l). The next frame
+    /// shows the change.
+    fn picture_key(&mut self, key: &Key) {
+        let Key::Character(c) = key else { return };
+        // A plain key only: ctrl/alt/super with a digit belong to the
+        // desktop, or to other controls.
+        if self.modifiers.intersects(ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SUPER) {
+            return;
+        }
+        let p = &mut self.picture;
+        match c.as_str() {
+            "1" => p.adjust(Colour::Contrast, -1),
+            "2" => p.adjust(Colour::Contrast, 1),
+            "3" => p.adjust(Colour::Brightness, -1),
+            "4" => p.adjust(Colour::Brightness, 1),
+            "5" => p.adjust(Colour::Gamma, -1),
+            "6" => p.adjust(Colour::Gamma, 1),
+            "7" => p.adjust(Colour::Saturation, -1),
+            "8" => p.adjust(Colour::Saturation, 1),
+            // Overlay keys in view.sh; global until the overlay exists (#12).
+            "r" => p.reset_colour(),
+            "l" => p.cycle_levels(),
+            _ => return,
+        }
+        if let Some(gfx) = &self.gfx {
+            let u = self.picture.uniform(self.format.width, self.format.height);
+            gfx.queue.write_buffer(&gfx.picture_buffer, 0, &picture::bytes(&u));
+        }
     }
 
     fn drain(&mut self) -> Result<(), String> {
@@ -626,10 +685,13 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                // q quits, as in view.sh; the other keys come with #12.
+                // q quits, as in view.sh.
                 if matches!(&event.logical_key, Key::Character(c) if c == "q") {
                     event_loop.exit();
+                } else {
+                    self.picture_key(&event.logical_key);
                 }
             }
             WindowEvent::Resized(size) => {

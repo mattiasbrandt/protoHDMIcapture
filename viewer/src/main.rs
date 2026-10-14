@@ -5,6 +5,7 @@ mod app;
 mod audio;
 mod capture;
 mod card;
+mod picture;
 mod present;
 mod pw;
 mod settings;
@@ -85,7 +86,13 @@ fn audio(s: &Settings, card: &card::Node) -> Option<audio::Audio> {
 }
 
 fn view(args: &[String]) -> Result<(), String> {
-    let mut opts = app::Options { window: app::WindowMode::Fullscreen, monitor: None, seconds: None, stats: false };
+    let mut opts = app::Options {
+        window: app::WindowMode::Fullscreen,
+        monitor: None,
+        seconds: None,
+        stats: false,
+        picture: picture::Picture::DEFAULT,
+    };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -105,6 +112,13 @@ fn view(args: &[String]) -> Result<(), String> {
         return Err(format!("settings:\n  {}", errors.join("\n  ")));
     }
     opts.window = app::WindowMode::from_settings(s.get("WINDOW"), s.get("WINDOW_SIZE"))?;
+    opts.picture = picture::Picture::from_settings(
+        s.get("LEVELS"),
+        s.get("CONTRAST"),
+        s.get("BRIGHTNESS"),
+        s.get("GAMMA"),
+        s.get("SATURATION"),
+    )?;
     let format = capture::Format::from_settings(s.get("RES"), s.get("FPS"), s.get("FMT"))?;
 
     let pins = card::Pins { dev: s.get("DEV"), serial: s.get("CARD_SERIAL"), port: s.get("CARD_PORT"), ignore: s.get("IGNORE_CARDS_RE") };
