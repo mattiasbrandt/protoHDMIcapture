@@ -94,13 +94,17 @@ end
 -- --- scaling ----------------------------------------------------------------
 -- Applied here rather than on the command line, so all three can be cycled
 -- live. The snapshot is what mpv.conf (plus --profile=low-latency) gave, i.e.
--- SCALING=config; the other two override it. "fast" is the list
--- `mpv --show-profile=fast` prints on 0.41.0.
+-- SCALING=config; the others override it. "fast" is the list
+-- `mpv --show-profile=fast` prints on 0.41.0; "high-quality" is balanced
+-- with the upscaler of mpv's high-quality profile (ewa_lanczossharp), the
+-- Rust viewer's EWA preset too.
 local SCALE_KEYS = { "scale", "cscale", "dscale", "deband", "dither", "correct-downscaling",
                      "linear-downscaling", "sigmoid-upscaling", "hdr-compute-peak",
                      "allow-delayed-peak-detect" }
 local SCALINGS = {
     balanced = { scale = "spline36", cscale = "spline36", dscale = "mitchell", deband = "no", dither = "no" },
+    ["high-quality"] = { scale = "ewa_lanczossharp", cscale = "spline36", dscale = "mitchell", deband = "no",
+                         dither = "no" },
     fast = { scale = "bilinear", dscale = "bilinear", dither = "no", ["correct-downscaling"] = "no",
              ["linear-downscaling"] = "no", ["sigmoid-upscaling"] = "no", ["hdr-compute-peak"] = "no",
              ["allow-delayed-peak-detect"] = "yes" },

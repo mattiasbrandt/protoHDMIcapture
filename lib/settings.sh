@@ -49,7 +49,7 @@ BACKEND         |mpv                            |enum:mpv,gst,ffplay            
 AUDIO           |loopback                       |enum:loopback,mpv,none             |all            |wizard
 WINDOW          |fullscreen                     |enum:fullscreen,borderless,windowed|all            |save,wizard
 WINDOW_SIZE     |1280x720                       |size                               |mpv,ffplay     |wizard
-SCALING         |balanced                       |enum:balanced,fast,config          |mpv            |save,wizard
+SCALING         |balanced                       |enum:balanced,fast,high-quality,config|mpv         |save,wizard
 LEVELS          |auto                           |enum:auto,limited,full             |mpv            |save
 BRIGHTNESS      |0                              |int:-100..100                      |mpv            |save
 CONTRAST        |0                              |int:-100..100                      |mpv            |save

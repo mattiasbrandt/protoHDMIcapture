@@ -698,6 +698,8 @@ mpv)
     #             fraction of high-quality's cost
     #   fast      the properties of mpv's fast profile: bilinear, lowest GPU
     #             time, visibly softer
+    #   high-quality  balanced with ewa_lanczossharp upscaling (mpv's
+    #             high-quality profile's scaler): sharper, more GPU time
     #   config    leave mpv.conf's settings alone
 
     if [ "$AUDIO" = "mpv" ]; then

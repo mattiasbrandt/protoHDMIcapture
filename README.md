@@ -40,7 +40,7 @@ each with its current value:
 | key | while the overlay is open |
 |---|---|
 | **l** | levels: auto → limited → full (the range of the card's frames) |
-| **c** | scaling: balanced → fast → config |
+| **c** | scaling: balanced → fast → high-quality → config |
 | **1**–**8** | colour: contrast, brightness, gamma, saturation (mpv's keys, also with the overlay closed) |
 | **ctrl −** / **ctrl +**, **alt −** / **alt +** | audio sync 10 / 50 ms earlier / later (also with the overlay closed); **w** saves it as `DELAY` |
 | **m**, **9** / **0** | mute, volume down / up of the audio loopback (also with the overlay closed). Not in the config: WirePlumber remembers the stream's volume between sessions, as it does for any app |
@@ -458,7 +458,7 @@ shows the lot without starting anything.
 | `WINDOW_SIZE` | `1280x720` | window size for `WINDOW=windowed` |
 | `DEBUG` | `off` | `log` \| `window`; see "Debug mode". `--debug` = `window` for one run |
 | `FULLSCREEN` | — | deprecated: `yes` = `WINDOW=fullscreen`, `no` = `WINDOW=windowed` |
-| `SCALING` | `balanced` | `balanced` = spline36/mitchell, no deband, no dither. `fast` = the properties of mpv's `fast` profile, bilinear throughout, lowest GPU time and visibly softer. `config` = leave mpv.conf's high-quality settings alone. Applied by the mpv script, so **c** in the overlay cycles all three live |
+| `SCALING` | `balanced` | `balanced` = spline36/mitchell, no deband, no dither. `fast` = the properties of mpv's `fast` profile, bilinear throughout, lowest GPU time and visibly softer. `high-quality` = balanced with mpv's high-quality upscaler, ewa_lanczossharp: sharper upscaling for more GPU time. `config` = leave mpv.conf's settings alone. Applied by the mpv script, so **c** in the overlay cycles them live |
 | `BRIGHTNESS`, `CONTRAST`, `SATURATION`, `GAMMA` | `0` | mpv's colour adjustments, -100..100; keys **1**–**8** change them live and the overlay's **w** saves them |
 | `SOURCE` | — | what is plugged in: a profile name from `sources/` (`ps5`); its setup tips show in the overlay. The wizard writes it |
 | `LEVELS` | `auto` | the colour range of the card's frames: `limited` or `full` if blacks look crushed or washed (mpv `--vf=format:colorlevels=`; the display's own range is untouched). `auto` trusts the frames: YUYV is read as limited, while MJPEG frames (MS2109) arrive flagged full. The MS2130 reports `Quantization: Default (maps to Limited Range)` and the PS5 outputs limited, so `auto` is right there |

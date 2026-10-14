@@ -701,6 +701,7 @@ stage_backend() {
         choose pick "Scaling" "$(cur SCALING)" \
             "balanced|Balanced · sharp upscale, low GPU cost|recommended" \
             "fast|Fast · bilinear, lowest GPU time, softer" \
+            "high-quality|High quality · EWA Lanczos upscale, more GPU time" \
             "config|Your mpv.conf · whatever it sets (may be expensive)" || exit 1
         NEW[SCALING]="$pick"
     else
