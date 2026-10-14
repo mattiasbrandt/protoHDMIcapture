@@ -1,0 +1,25 @@
+# clock_id 1 (CLOCK_MONOTONIC is 1)
+# surface_id commit_mono_ns presented_mono_ns refresh_ns flags
+presents per surface: {'4': 10963}; using wl_surface#4
+clock offset spread over the run: 0.003 ms (must be well under 1)
+frames 10976, sequence gaps 0; presents of a new frame 10584, redraws of the same frame 377, discarded 2, before any frame 0
+kernel -> presented     median  58.00  p99  65.99  min  42.47  p1  49.69  max  69.56 ms  (n=10584)
+frame done -> presented median  41.85  p99  49.50  min  26.46  p1  33.69  max  50.25 ms  (n=10584)
+      10 s  kernel -> presented median  61.45  p99  66.56 ms
+      20 s  kernel -> presented median  55.76  p99  61.32 ms
+      30 s  kernel -> presented median  61.84  p99  69.04 ms
+      40 s  kernel -> presented median  56.28  p99  62.12 ms
+      50 s  kernel -> presented median  61.67  p99  65.64 ms
+      60 s  kernel -> presented median  57.05  p99  62.21 ms
+      70 s  kernel -> presented median  60.73  p99  65.62 ms
+      80 s  kernel -> presented median  57.81  p99  62.99 ms
+      90 s  kernel -> presented median  54.39  p99  67.24 ms
+     100 s  kernel -> presented median  58.47  p99  63.70 ms
+     110 s  kernel -> presented median  54.27  p99  69.11 ms
+     120 s  kernel -> presented median  58.84  p99  64.48 ms
+     130 s  kernel -> presented median  53.77  p99  65.69 ms
+     140 s  kernel -> presented median  59.42  p99  65.30 ms
+     150 s  kernel -> presented median  53.33  p99  65.54 ms
+     160 s  kernel -> presented median  60.17  p99  65.29 ms
+     170 s  kernel -> presented median  53.70  p99  67.93 ms
+     180 s  kernel -> presented median  60.83  p99  65.67 ms
