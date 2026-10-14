@@ -36,7 +36,21 @@ struct Seen {
 
 pub struct Snapshot(Seen);
 
+/// How long one round trip to PipeWire may take: a session manager that
+/// hangs must not freeze the audio keys or the start for good.
+const SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 fn sync(core: &pw::core::CoreRc, mainloop: &pw::main_loop::MainLoopRc) -> Result<(), String> {
+    let timed_out = Rc::new(Cell::new(false));
+    let (t, l) = (timed_out.clone(), mainloop.clone());
+    let timer = mainloop.loop_().add_timer(move |_| {
+        t.set(true);
+        l.quit();
+    });
+    timer
+        .update_timer(Some(SYNC_TIMEOUT), None)
+        .into_sync_result()
+        .map_err(|e| format!("PipeWire timer: {e}"))?;
     let done = Rc::new(Cell::new(false));
     let pending = core.sync(0).map_err(|e| format!("PipeWire sync: {e}"))?;
     let (d, l) = (done.clone(), mainloop.clone());
@@ -50,6 +64,9 @@ fn sync(core: &pw::core::CoreRc, mainloop: &pw::main_loop::MainLoopRc) -> Result
         })
         .register();
     while !done.get() {
+        if timed_out.get() {
+            return Err(format!("PipeWire did not answer within {} s", SYNC_TIMEOUT.as_secs()));
+        }
         mainloop.run();
     }
     Ok(())
@@ -283,12 +300,17 @@ pub fn level(change: Option<LevelChange>) -> Result<Level, String> {
             }
         })
         .register();
-    node.enum_params(0, Some(ParamType::Props), 0, u32::MAX);
-    sync(&core, &mainloop)?;
-    let (Some(volume), mute) = read.borrow_mut().take().ok_or("the audio output stream reported no volume")? else {
-        return Err("the audio output stream reported no volume".into());
+    // The stream's Props as it reports them now.
+    let read_level = || -> Result<Level, String> {
+        *read.borrow_mut() = None;
+        node.enum_params(0, Some(ParamType::Props), 0, u32::MAX);
+        sync(&core, &mainloop)?;
+        let (Some(volume), mute) = read.borrow_mut().take().ok_or("the audio output stream reported no volume")? else {
+            return Err("the audio output stream reported no volume".into());
+        };
+        Ok(Level { volume: percent(volume), mute: mute.unwrap_or(false) })
     };
-    let now = Level { volume: percent(volume), mute: mute.unwrap_or(false) };
+    let now = read_level()?;
     let Some(change) = change else { return Ok(now) };
 
     let want = now.changed(change);
@@ -311,7 +333,9 @@ pub fn level(change: Option<LevelChange>) -> Result<Level, String> {
     let pod = Pod::from_bytes(&bytes).ok_or("volume parameter: not a pod")?;
     node.set_param(ParamType::Props, 0, pod);
     sync(&core, &mainloop)?;
-    Ok(want)
+    // What the stream took, not what was asked (as lib/audio.sh reports
+    // pactl's reading back).
+    read_level()
 }
 
 #[cfg(test)]

@@ -961,7 +961,7 @@ impl App {
         let Some(s) = &self.opts.settings else { return Vec::new() };
         let now = self.values();
         // Static names: the keys of `values`, in lib/settings.sh's order.
-        s.rows.iter().filter(|r| r.flags.split(',').any(|f| f == "save")).filter_map(|r| now.keys().find(|k| **k == r.name).copied()).collect()
+        s.rows.iter().filter(|r| r.has_flag("save")).filter_map(|r| now.keys().find(|k| **k == r.name).copied()).collect()
     }
 
     /// w: what changed since the start (or the last save), as `view.sh

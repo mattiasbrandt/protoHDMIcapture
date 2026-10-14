@@ -26,7 +26,7 @@ pub struct Row {
 }
 
 impl Row {
-    fn has_flag(&self, flag: &str) -> bool {
+    pub fn has_flag(&self, flag: &str) -> bool {
         self.flags.split(',').any(|f| f == flag)
     }
 

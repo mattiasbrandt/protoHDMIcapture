@@ -301,7 +301,16 @@ impl Audio {
         // with the last sender.
         thread::spawn(move || {
             for change in rx {
-                let r = crate::pw::level(change);
+                // The first read can come before PipeWire lists the new
+                // stream: a second's worth of retries.
+                let mut r = crate::pw::level(change);
+                for _ in 0..10 {
+                    if change.is_some() || r.is_ok() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                    r = crate::pw::level(change);
+                }
                 // The messages the mpv script shows for m, 9 and 0.
                 let message = match &r {
                     Ok(v) if change.is_some() => Some((
