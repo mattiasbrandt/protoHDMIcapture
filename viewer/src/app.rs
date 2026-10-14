@@ -18,10 +18,12 @@ use winit::keyboard::{Key, ModifiersState};
 use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Fullscreen, Window, WindowId};
 
+use crate::audio::Controls;
 use crate::capture::{Event, Format, FrameSource, now_monotonic};
 use crate::gputime::GpuTimer;
 use crate::picture::{self, Colour, Picture};
 use crate::present::{Feedback, Outcome, Presentation, Tag};
+use crate::pw::LevelChange;
 use crate::scale::{self, Filter, Scaling};
 use crate::stats::Stats;
 
@@ -65,6 +67,8 @@ pub struct Options {
     pub picture: Picture,
     /// SCALING at start.
     pub scaling: Scaling,
+    /// The audio keys, when the loopback runs (AUDIO=loopback).
+    pub audio: Option<Controls>,
 }
 
 enum UserEvent {
@@ -598,6 +602,34 @@ impl App {
         }
     }
 
+    /// The audio keys, as view.sh binds them with AUDIO=loopback: sync with
+    /// ctrl -/+ (10 ms) and alt -/+ (50 ms), m mute, 9/0 volume -5/+5.
+    /// True when the key was one of them.
+    fn audio_key(&mut self, key: &Key) -> bool {
+        let Some(audio) = &self.opts.audio else { return false };
+        let Key::Character(c) = key else { return false };
+        let m = self.modifiers;
+        let step = if m.control_key() && !m.alt_key() {
+            10
+        } else if m.alt_key() && !m.control_key() {
+            50
+        } else {
+            0
+        };
+        if m.super_key() {
+            return false;
+        }
+        match (c.as_str(), step) {
+            ("-", s) if s > 0 => eprintln!("audio sync {} ms", audio.nudge_delay(-s)),
+            ("+" | "=", s) if s > 0 => eprintln!("audio sync {} ms", audio.nudge_delay(s)),
+            ("m", 0) => audio.change_level(LevelChange::Mute),
+            ("9", 0) => audio.change_level(LevelChange::Volume(-5)),
+            ("0", 0) => audio.change_level(LevelChange::Volume(5)),
+            _ => return false,
+        }
+        true
+    }
+
     /// The picture keys (mpv's 1..8; the overlay's r and l). The next frame
     /// shows the change.
     fn picture_key(&mut self, key: &Key) {
@@ -814,7 +846,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // q quits, as in view.sh.
                 if matches!(&event.logical_key, Key::Character(c) if c == "q") {
                     event_loop.exit();
-                } else {
+                } else if !self.audio_key(&event.logical_key) {
                     self.picture_key(&event.logical_key);
                 }
             }

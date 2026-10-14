@@ -95,6 +95,7 @@ fn view(args: &[String]) -> Result<(), String> {
         stats: false,
         picture: picture::Picture::DEFAULT,
         scaling: scale::Scaling::Balanced,
+        audio: None,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -134,6 +135,7 @@ fn view(args: &[String]) -> Result<(), String> {
 
     let source = capture::V4l2::open(&picked.node.path, format)?;
     let sound = audio(&s, &picked.node);
+    opts.audio = sound.as_ref().map(audio::Audio::controls);
     let stats = opts.stats;
     let result = app::run(Box::new(source), opts);
     if let (true, Some(a)) = (stats, &sound) {

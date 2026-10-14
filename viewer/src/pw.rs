@@ -162,3 +162,173 @@ impl Snapshot {
         names
     }
 }
+
+/// The volume and mute of this process's audio output stream, as mixers
+/// and `pactl` show them: volume in percent on PulseAudio's cubic scale
+/// (linear = (percent / 100)^3), as view.sh's lib/audio.sh reads them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Level {
+    pub volume: u32,
+    pub mute: bool,
+}
+
+/// What the overlay's m, 9 and 0 ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelChange {
+    Mute,
+    /// Percent points, the result clamped to 0..100 as lib/audio.sh does
+    /// (past 100 % the loopback only clips).
+    Volume(i32),
+}
+
+/// Percent on the cubic scale from a linear channel volume, and back.
+pub fn percent(linear: f32) -> u32 {
+    (f64::from(linear.max(0.0)).cbrt() * 100.0).round() as u32
+}
+
+pub fn linear(percent: u32) -> f32 {
+    (f64::from(percent) / 100.0).powi(3) as f32
+}
+
+
+impl Level {
+    pub fn changed(self, change: LevelChange) -> Self {
+        match change {
+            LevelChange::Mute => Self { mute: !self.mute, ..self },
+            LevelChange::Volume(by) => Self { volume: (self.volume as i32 + by).clamp(0, 100) as u32, ..self },
+        }
+    }
+}
+
+/// Reads the output stream's level and, with a change, sets it on the
+/// stream (Props: channelVolumes and mute), where WirePlumber remembers it
+/// for the next session. Blocks for a few PipeWire round trips.
+pub fn level(change: Option<LevelChange>) -> Result<Level, String> {
+    use pw::spa::param::ParamType;
+    use pw::spa::pod::deserialize::PodDeserializer;
+    use pw::spa::pod::serialize::PodSerializer;
+    use pw::spa::pod::{Object, Pod, Property, PropertyFlags, Value, ValueArray};
+    use pw::spa::sys::{SPA_PARAM_Props, SPA_PROP_channelVolumes, SPA_PROP_mute, SPA_TYPE_OBJECT_Props};
+
+    pw::init();
+    let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| format!("PipeWire main loop: {e}"))?;
+    let context = pw::context::ContextRc::new(&mainloop, None).map_err(|e| format!("PipeWire context: {e}"))?;
+    let core = context.connect_rc(None).map_err(|e| format!("PipeWire connect: {e}"))?;
+    let registry = core.get_registry_rc().map_err(|e| format!("PipeWire registry: {e}"))?;
+
+    // Every output stream is bound (its client may be announced after it);
+    // ours is picked once all are known.
+    let ours: Rc<RefCell<HashSet<u32>>> = Rc::default();
+    // (client, node) of every output stream.
+    type Streams = Vec<(Option<u32>, pw::node::Node)>;
+    let streams: Rc<RefCell<Streams>> = Rc::default();
+    let pid = std::process::id().to_string();
+    let (o, st, reg) = (ours.clone(), streams.clone(), registry.clone());
+    let _registry_listener = registry
+        .add_listener_local()
+        .global(move |g| {
+            let Some(props) = g.props else { return };
+            match g.type_ {
+                ObjectType::Client => {
+                    let p = props.get("pipewire.sec.pid").or_else(|| props.get("application.process.id"));
+                    if p == Some(pid.as_str()) {
+                        o.borrow_mut().insert(g.id);
+                    }
+                }
+                ObjectType::Node if props.get("media.class") == Some("Stream/Output/Audio") => {
+                    let client = props.get("client.id").and_then(|v| v.parse().ok());
+                    if let Ok(node) = reg.bind::<pw::node::Node, _>(g) {
+                        st.borrow_mut().push((client, node));
+                    }
+                }
+                _ => {}
+            }
+        })
+        .register();
+    sync(&core, &mainloop)?;
+
+    let node = {
+        let ours = ours.borrow();
+        let mut streams = streams.borrow_mut();
+        let mut mine = streams.drain(..).filter(|(c, _)| c.is_some_and(|c| ours.contains(&c)));
+        let (_, node) = mine.next().ok_or("this viewer has no audio output stream")?;
+        if mine.next().is_some() {
+            return Err("this viewer has more than one audio output stream".into());
+        }
+        node
+    };
+
+    // The first channel volume and the mute, as the stream reports them.
+    type Read = Option<(Option<f32>, Option<bool>)>;
+    let read: Rc<RefCell<Read>> = Rc::default();
+    let r = read.clone();
+    let _node_listener = node
+        .add_listener_local()
+        .param(move |_, _, _, _, pod| {
+            let Some(pod) = pod else { return };
+            let Ok((_, Value::Object(obj))) = PodDeserializer::deserialize_any_from(pod.as_bytes()) else { return };
+            let mut volume = None;
+            let mut mute = None;
+            for p in obj.properties {
+                match p.value {
+                    Value::ValueArray(ValueArray::Float(v)) if p.key == SPA_PROP_channelVolumes => volume = v.first().copied(),
+                    Value::Bool(m) if p.key == SPA_PROP_mute => mute = Some(m),
+                    _ => {}
+                }
+            }
+            // A stream can list more than one Props object; the first
+            // with the channel volumes is the stream's own.
+            if volume.is_some() && r.borrow().is_none() {
+                *r.borrow_mut() = Some((volume, mute));
+            }
+        })
+        .register();
+    node.enum_params(0, Some(ParamType::Props), 0, u32::MAX);
+    sync(&core, &mainloop)?;
+    let (Some(volume), mute) = read.borrow_mut().take().ok_or("the audio output stream reported no volume")? else {
+        return Err("the audio output stream reported no volume".into());
+    };
+    let now = Level { volume: percent(volume), mute: mute.unwrap_or(false) };
+    let Some(change) = change else { return Ok(now) };
+
+    let want = now.changed(change);
+    let value = Value::Object(Object {
+        type_: SPA_TYPE_OBJECT_Props,
+        id: SPA_PARAM_Props,
+        properties: vec![
+            Property { key: SPA_PROP_mute, flags: PropertyFlags::empty(), value: Value::Bool(want.mute) },
+            Property {
+                key: SPA_PROP_channelVolumes,
+                flags: PropertyFlags::empty(),
+                // Every channel the same, as pactl sets a plain percentage.
+                value: Value::ValueArray(ValueArray::Float(vec![linear(want.volume); crate::audio::CHANNELS as usize])),
+            },
+        ],
+    });
+    let (bytes, _) = PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &value)
+        .map_err(|e| format!("volume parameter: {e:?}"))?;
+    let bytes = bytes.into_inner();
+    let pod = Pod::from_bytes(&bytes).ok_or("volume parameter: not a pod")?;
+    node.set_param(ParamType::Props, 0, pod);
+    sync(&core, &mainloop)?;
+    Ok(want)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn volume_on_pulseaudios_cubic_scale() {
+        assert_eq!(linear(100), 1.0);
+        assert!((linear(50) - 0.125).abs() < 1e-7);
+        for p in 0..=100 {
+            assert_eq!(percent(linear(p)), p);
+        }
+        let l = Level { volume: 97, mute: false };
+        assert_eq!(l.changed(LevelChange::Volume(5)).volume, 100);
+        assert_eq!(Level { volume: 3, ..l }.changed(LevelChange::Volume(-5)).volume, 0);
+        assert!(l.changed(LevelChange::Mute).mute);
+        assert_eq!(l.changed(LevelChange::Mute).volume, 97);
+    }
+}

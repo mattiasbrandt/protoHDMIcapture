@@ -11,14 +11,17 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, ErrorKind, HostId, StreamConfig};
 
+use crate::pw::{Level, LevelChange};
+
 pub const RATE: u32 = 48_000;
-const CHANNELS: u16 = 2;
+pub const CHANNELS: u16 = 2;
 /// Fastest the output speeds up or slows down to reach a new delay.
 const CATCH_UP: f64 = 0.03;
 /// Speed change per second of delay error: 10 ms off plays 0.5 % off.
@@ -286,6 +289,32 @@ impl Audio {
         self.counters.target_ms.load(Ordering::Relaxed)
     }
 
+    /// The live keys' handle: sync and the output stream's level.
+    pub fn controls(&self) -> Controls {
+        let (tx, rx) = mpsc::channel::<Option<LevelChange>>();
+        let level: Arc<Mutex<Option<Result<Level, String>>>> = Arc::default();
+        let l = level.clone();
+        // PipeWire round trips off the window's thread, one change at a
+        // time (lib/audio.sh serialises them with a lock); the thread ends
+        // with the last sender.
+        thread::spawn(move || {
+            for change in rx {
+                let r = crate::pw::level(change);
+                match &r {
+                    Ok(v) if change.is_some() => {
+                        eprintln!("{}", if v.mute { "audio muted".into() } else { format!("volume {}%", v.volume) })
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("audio level: {e}"),
+                }
+                *l.lock().expect("the level's lock is never poisoned") = Some(r);
+            }
+        });
+        // What WirePlumber restored for the stream, for the panel.
+        let _ = tx.send(None);
+        Controls { counters: self.counters.clone(), tx, level }
+    }
+
     /// The ring's fill as a delay.
     pub fn fill(&self) -> Duration {
         Duration::from_secs_f64(self.counters.fill.load(Ordering::Relaxed) as f64 / RATE as f64)
@@ -304,9 +333,94 @@ impl Audio {
     }
 }
 
+/// The audio keys' side of the audio: the delay target, read by the
+/// output callback (a change plays faster or slower until the ring gets
+/// there, never a restart), and the output stream's level.
+pub struct Controls {
+    counters: Arc<Counters>,
+    tx: mpsc::Sender<Option<LevelChange>>,
+    /// The last level read or set, or why it could not be.
+    #[expect(dead_code, reason = "the overlay's Audio row reads it (#12)")]
+    pub level: Arc<Mutex<Option<Result<Level, String>>>>,
+}
+
+impl Controls {
+    pub fn delay_ms(&self) -> u32 {
+        self.counters.target_ms.load(Ordering::Relaxed)
+    }
+
+    /// The sync keys: the delay moved by `by_ms`, clamped to 0..MAX_DELAY_MS
+    /// (DELAY's range). Returns the new delay.
+    pub fn nudge_delay(&self, by_ms: i32) -> u32 {
+        let ms = nudged(self.delay_ms(), by_ms);
+        self.counters.target_ms.store(ms, Ordering::Relaxed);
+        ms
+    }
+
+    /// m, 9 and 0: done on the controls' thread.
+    pub fn change_level(&self, change: LevelChange) {
+        let _ = self.tx.send(Some(change));
+    }
+}
+
+fn nudged(ms: u32, by_ms: i32) -> u32 {
+    (i64::from(ms) + i64::from(by_ms)).clamp(0, i64::from(MAX_DELAY_MS)) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// m, 9 and 0 against PipeWire itself, read back through pactl as
+    /// lib/audio.sh reads them: `cargo test -- --ignored level_on_pipewire`.
+    /// Plays silence on the default output for a moment.
+    #[test]
+    #[ignore = "needs a PipeWire session"]
+    fn level_on_pipewire() {
+        use crate::pw::{level, LevelChange};
+        let host = cpal::host_from_id(HostId::PipeWire).unwrap();
+        let dev = host.default_output_device().unwrap();
+        let config = StreamConfig { channels: CHANNELS, sample_rate: RATE, buffer_size: BufferSize::Default };
+        let stream = dev.build_output_stream::<f32, _, _>(config, |out, _| out.fill(0.0), |e| eprintln!("{e}"), None).unwrap();
+        stream.play().unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+
+        // pactl's view of this process's stream: "volume mute".
+        let pactl = || {
+            let out = std::process::Command::new("pactl").args(["list", "sink-inputs"]).output().unwrap();
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            let pid = format!("media.name = \"cpal-playback-{}\"", std::process::id());
+            let block = text.split("Sink Input #").find(|b| b.contains(&pid)).unwrap_or_else(|| panic!("our stream ({pid}) not in pactl:\n{text}"));
+            let field = |k: &str| block.lines().find_map(|l| l.trim().strip_prefix(k)).unwrap().trim().to_string();
+            let vol: u32 = field("Volume:").split_whitespace().nth(3).unwrap().trim_end_matches('%').parse().unwrap();
+            (vol, field("Mute:") == "yes")
+        };
+
+        let start = level(None).unwrap();
+        assert_eq!((start.volume, start.mute), pactl(), "read as pactl reads it");
+        let down = level(Some(LevelChange::Volume(-5))).unwrap();
+        assert_eq!(down.volume, start.volume.saturating_sub(5));
+        assert_eq!((down.volume, down.mute), pactl());
+        let muted = level(Some(LevelChange::Mute)).unwrap();
+        assert_eq!((muted.volume, muted.mute), (down.volume, !start.mute));
+        assert_eq!(pactl(), (down.volume, !start.mute));
+        // Back as it was.
+        level(Some(LevelChange::Mute)).unwrap();
+        let back = level(Some(LevelChange::Volume(start.volume as i32 - down.volume as i32))).unwrap();
+        assert_eq!(back, start);
+        assert_eq!(pactl(), (start.volume, start.mute));
+    }
+
+    #[test]
+    fn sync_keys_clamp_to_delays_range() {
+        assert_eq!(nudged(50, 10), 60);
+        assert_eq!(nudged(5, -10), 0);
+        assert_eq!(nudged(990, 50), MAX_DELAY_MS);
+        // DELAY's range in lib/settings.sh is the ring's.
+        let rows = crate::settings::rows();
+        let delay = rows.iter().find(|r| r.name == "DELAY").unwrap();
+        assert_eq!(delay.values, format!("num:0..{}", MAX_DELAY_MS / 1000));
+    }
 
     #[test]
     fn the_ring_holds_the_largest_delay_with_room_to_spare() {
