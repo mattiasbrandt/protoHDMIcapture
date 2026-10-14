@@ -130,6 +130,9 @@ pub struct Options {
     pub windowed: bool,
     pub seconds: Option<u64>,
     pub mailbox: bool,
+    /// Immediate present: a frame goes out at once and may tear, where the
+    /// desktop allows tearing (#8).
+    pub immediate: bool,
     /// Fullscreen on this output (e.g. DP-2) instead of the compositor's pick.
     pub monitor: Option<String>,
     pub delay_ms: u32,
@@ -349,20 +352,24 @@ impl App {
             .find(|f| *f == wgpu::TextureFormat::Bgra8Unorm)
             .or_else(|| caps.formats.iter().copied().find(|f| !f.is_srgb()))
             .ok_or("no non-sRGB surface format")?;
-        config.present_mode = if self.opts.mailbox && caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+        let wanted = if self.opts.immediate {
+            wgpu::PresentMode::Immediate
+        } else if self.opts.mailbox {
             wgpu::PresentMode::Mailbox
         } else {
             wgpu::PresentMode::Fifo
         };
+        config.present_mode =
+            if caps.present_modes.contains(&wanted) { wanted } else { wgpu::PresentMode::Fifo };
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
         eprintln!(
-            "surface: {}x{} {:?}, present mode {:?} ({} requested), frame latency {}, paced {}",
+            "surface: {}x{} {:?}, present mode {:?} ({:?} requested), frame latency {}, paced {}",
             config.width,
             config.height,
             config.format,
             config.present_mode,
-            if self.opts.mailbox { "Mailbox" } else { "Fifo" },
+            wanted,
             config.desired_maximum_frame_latency,
             self.opts.pace
         );
