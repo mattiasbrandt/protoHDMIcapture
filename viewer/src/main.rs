@@ -10,6 +10,7 @@ mod picture;
 mod present;
 mod pw;
 mod scale;
+mod screenshot;
 mod settings;
 mod stats;
 

@@ -25,6 +25,7 @@ use crate::picture::{self, Colour, Picture};
 use crate::present::{Feedback, Outcome, Presentation, Tag};
 use crate::pw::LevelChange;
 use crate::scale::{self, Filter, Scaling};
+use crate::screenshot::Screenshot;
 use crate::stats::Stats;
 
 /// A frame callback this late counts as lost: pacing stops waiting for it.
@@ -93,7 +94,10 @@ struct Gfx {
     convert_pipeline: wgpu::RenderPipeline,
     convert_bind_group: wgpu::BindGroup,
     picture_buffer: wgpu::Buffer,
+    /// The converted frame at the capture's size (what s saves).
+    rgb: wgpu::Texture,
     rgb_view: wgpu::TextureView,
+    screenshot: Screenshot,
     scale_pipeline: wgpu::RenderPipeline,
     scale_bind_group: wgpu::BindGroup,
     filter_pipeline: wgpu::RenderPipeline,
@@ -475,7 +479,11 @@ impl App {
             })
         };
         let texture = frame_texture("yuyv", w / 2, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
-        let rgb = frame_texture("rgb", w, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let rgb = frame_texture(
+            "rgb",
+            w,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        );
         let rgb_view = rgb.create_view(&Default::default());
 
         let convert_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -557,6 +565,7 @@ impl App {
         });
         let filter_pipeline = pipeline(&device, "filter", scale::WGSL, &filter_layout, config.format);
 
+        let screenshot = Screenshot::new(&device, w, h);
         Ok(Gfx {
             window,
             surface,
@@ -566,6 +575,8 @@ impl App {
             convert_pipeline,
             convert_bind_group,
             picture_buffer,
+            screenshot,
+            rgb,
             rgb_view,
             scale_pipeline,
             scale_bind_group,
@@ -668,11 +679,15 @@ impl App {
 
     fn drain(&mut self) -> Result<(), String> {
         let Some(gfx) = self.gfx.as_mut() else { return Ok(()) };
-        if let Some(timer) = gfx.timer.as_mut() {
-            gfx.device.poll(wgpu::PollType::Poll).map_err(|e| format!("device poll: {e}"))?;
-            if let Some([convert, scale]) = timer.take()? {
-                self.stats.gpu(convert, scale);
-            }
+        // Runs the readbacks' callbacks (screenshot, pass times).
+        gfx.device.poll(wgpu::PollType::Poll).map_err(|e| format!("device poll: {e}"))?;
+        if let Err(e) = gfx.screenshot.poll() {
+            eprintln!("{e}");
+        }
+        if let Some(timer) = gfx.timer.as_mut()
+            && let Some([convert, scale]) = timer.take()?
+        {
+            self.stats.gpu(convert, scale);
         }
         let Some(feedback) = gfx.feedback.as_mut() else { return Ok(()) };
         for o in feedback.drain()? {
@@ -764,6 +779,7 @@ impl App {
             pass.set_bind_group(0, &gfx.convert_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
+        gfx.screenshot.copy(&mut encoder, &gfx.rgb);
         {
             let attachments = target(&view);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -789,6 +805,7 @@ impl App {
             t.resolve(&mut encoder);
         }
         gfx.queue.submit([encoder.finish()]);
+        gfx.screenshot.submitted();
         if let Some(t) = gfx.timer.as_mut() {
             t.submitted();
         }
@@ -843,9 +860,16 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                let plain = !self.modifiers.intersects(ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SUPER);
                 // q quits, as in view.sh.
                 if matches!(&event.logical_key, Key::Character(c) if c == "q") {
                     event_loop.exit();
+                } else if plain && matches!(&event.logical_key, Key::Character(c) if c == "s") {
+                    if let Some(gfx) = self.gfx.as_mut()
+                        && !gfx.screenshot.request()
+                    {
+                        eprintln!("screenshot: the last one is still being saved");
+                    }
                 } else if !self.audio_key(&event.logical_key) {
                     self.picture_key(&event.logical_key);
                 }
