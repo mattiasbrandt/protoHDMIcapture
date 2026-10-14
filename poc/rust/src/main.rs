@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use capture::{Capture, Event};
 
-const USAGE: &str = "usage: hdmipoc capture [--device /dev/videoN] [--seconds N]\n       hdmipoc view [--device /dev/videoN] [--seconds N] [--windowed | --monitor NAME] [--mailbox] [--delay MS]\n       hdmipoc audio [--seconds N] [--delay MS] [--sweep]";
+const USAGE: &str = "usage: hdmipoc capture [--device /dev/videoN] [--seconds N]\n       hdmipoc view [--device /dev/videoN] [--seconds N] [--windowed | --monitor NAME] [--mailbox] [--no-pace] [--delay MS]\n       hdmipoc audio [--seconds N] [--delay MS] [--sweep]";
 
 fn run_capture(args: &[String]) -> Result<(), String> {
     let mut device: Option<PathBuf> = None;
@@ -187,6 +187,7 @@ fn run_view(args: &[String]) -> Result<(), String> {
         mailbox: false,
         monitor: None,
         delay_ms: audio::DEFAULT_DELAY_MS,
+        pace: true,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -195,6 +196,7 @@ fn run_view(args: &[String]) -> Result<(), String> {
             "--seconds" => opts.seconds = Some(it.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?),
             "--windowed" => opts.windowed = true,
             "--mailbox" => opts.mailbox = true,
+            "--no-pace" => opts.pace = false,
             "--monitor" => opts.monitor = Some(it.next().ok_or(USAGE)?.clone()),
             "--delay" => opts.delay_ms = it.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?,
             _ => return Err(USAGE.into()),

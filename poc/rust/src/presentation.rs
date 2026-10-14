@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use wayland_backend::client::{Backend, ObjectId};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
+use wayland_client::protocol::wl_callback::{self, WlCallback};
 use wayland_client::protocol::wl_registry::WlRegistry;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
@@ -31,6 +32,9 @@ pub struct Tag {
 pub enum Outcome {
     Presented { tag: Tag, at: Duration, refresh: Duration, flags: u32 },
     Discarded,
+    /// The frame callback: the compositor took the frame for a refresh and
+    /// is ready for the next one (before that refresh is scanned out).
+    FrameDone,
 }
 
 #[derive(Default)]
@@ -74,10 +78,11 @@ impl Presentation {
         self.state.clock_id
     }
 
-    /// Asks for feedback on the surface's next commit: call right before
-    /// `present()`, whose commit it attaches to.
+    /// Asks for feedback and a frame callback on the surface's next commit:
+    /// call right before `present()`, whose commit they attach to.
     pub fn request(&mut self, tag: Tag) -> Result<(), String> {
         self.presentation.feedback(&self.surface, &self.qh, tag);
+        self.surface.frame(&self.qh, ());
         self.conn.flush().map_err(|e| format!("wayland flush: {e}"))
     }
 
@@ -99,6 +104,21 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<WlCallback, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &WlCallback,
+        event: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            state.outcomes.push(Outcome::FrameDone);
+        }
     }
 }
 

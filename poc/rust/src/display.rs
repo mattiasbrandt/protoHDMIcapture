@@ -133,7 +133,13 @@ pub struct Options {
     /// Fullscreen on this output (e.g. DP-2) instead of the compositor's pick.
     pub monitor: Option<String>,
     pub delay_ms: u32,
+    /// Hand a frame to the compositor only once it has taken the previous
+    /// one (its frame callback; see `App::render`).
+    pub pace: bool,
 }
+
+/// A frame callback this late counts as lost: pacing stops waiting for it.
+const PACE_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// `[` and `]` change the audio delay by this much.
 const DELAY_STEP_MS: u32 = 10;
@@ -174,6 +180,10 @@ struct App {
     gfx: Option<Gfx>,
     stats: Stats,
     audio: Audio,
+    /// Presents whose frame callback has not arrived yet, and when the
+    /// last one was submitted.
+    in_flight: u32,
+    last_submit: Duration,
     error: Option<String>,
 }
 
@@ -256,7 +266,7 @@ pub fn run(node: &std::path::Path, opts: Options) -> Result<(), String> {
         })
     };
 
-    let mut app = App { opts, slot: slot.clone(), gfx: None, stats: Stats::new(start), audio, error: None };
+    let mut app = App { opts, slot: slot.clone(), gfx: None, stats: Stats::new(start), audio, in_flight: 0, last_submit: start, error: None };
     let loop_result = event_loop.run_app(&mut app);
     quit.store(true, Ordering::Relaxed);
     let captured = capture_thread.join().map_err(|_| "capture thread panicked".to_string())?;
@@ -347,13 +357,14 @@ impl App {
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
         eprintln!(
-            "surface: {}x{} {:?}, present mode {:?} ({} requested), frame latency {}",
+            "surface: {}x{} {:?}, present mode {:?} ({} requested), frame latency {}, paced {}",
             config.width,
             config.height,
             config.format,
             config.present_mode,
             if self.opts.mailbox { "Mailbox" } else { "Fifo" },
-            config.desired_maximum_frame_latency
+            config.desired_maximum_frame_latency,
+            self.opts.pace
         );
 
         let frame_texture = |label, width, format, usage| {
@@ -448,13 +459,28 @@ impl App {
             match o {
                 Outcome::Presented { tag, at, refresh, flags } => self.stats.presented(tag, at, refresh, flags),
                 Outcome::Discarded => self.stats.discarded(),
+                Outcome::FrameDone => self.in_flight = self.in_flight.saturating_sub(1),
             }
         }
         Ok(())
     }
 
     /// Uploads the newest frame and presents it, now.
+    ///
+    /// Paced, it waits until the compositor has taken the previous frame
+    /// (frame callback): the card (60.000 Hz) outruns a 59.95 Hz display,
+    /// and every frame handed over early queues behind the last (Fifo grew
+    /// to ~4 frames, 72 ms median, over 10 minutes). Meanwhile the slot
+    /// keeps only the newest frame. Waiting for "presented" instead halved
+    /// the frame rate: it comes a refresh or more after the hand-over.
     fn render(&mut self) -> Result<(), String> {
+        if self.opts.pace && self.in_flight > 0 {
+            if now_monotonic() - self.last_submit < PACE_TIMEOUT {
+                return Ok(());
+            }
+            self.stats.pace_timeout();
+            self.in_flight = 0;
+        }
         let Some(gfx) = self.gfx.as_mut() else { return Ok(()) };
         let tag = {
             let mut s = self.slot.lock().unwrap();
@@ -546,6 +572,8 @@ impl App {
         gfx.presentation.request(tag)?;
         gfx.window.pre_present_notify();
         gfx.queue.present(frame);
+        self.in_flight += 1;
+        self.last_submit = now_monotonic();
         self.stats.submitted();
         self.drain()
     }
@@ -620,7 +648,8 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if let Err(e) = self.drain() {
+        // Feedback may have freed the way for a frame that had to wait.
+        if let Err(e) = self.drain().and_then(|()| self.render()) {
             self.error = Some(e);
             event_loop.exit();
         }

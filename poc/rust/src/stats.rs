@@ -42,6 +42,8 @@ pub struct Stats {
     presented: u64,
     discarded: u64,
     not_acquired: u64,
+    /// Pacing waited `PACE_TIMEOUT` for feedback that never came.
+    pace_timeouts: u64,
     /// Presented before it was dequeued: a clock or bookkeeping error.
     before_dequeue: u64,
     /// Refreshes that passed between two presents with nothing new shown.
@@ -64,6 +66,7 @@ impl Stats {
             presented: 0,
             discarded: 0,
             not_acquired: 0,
+            pace_timeouts: 0,
             before_dequeue: 0,
             skipped_refreshes: 0,
             last_present: None,
@@ -80,6 +83,10 @@ impl Stats {
 
     pub fn acquired(&mut self, wait: Duration) {
         self.acquire.push(wait);
+    }
+
+    pub fn pace_timeout(&mut self) {
+        self.pace_timeouts += 1;
     }
 
     pub fn not_acquired(&mut self) {
@@ -133,8 +140,8 @@ impl Stats {
 
     pub fn summary(&mut self, superseded: u64) {
         eprintln!(
-            "summary: submitted {}, presented {}, discarded {}, not acquired {}, superseded before upload {}, presented before dequeue {}",
-            self.submitted, self.presented, self.discarded, self.not_acquired, superseded, self.before_dequeue
+            "summary: submitted {}, presented {}, discarded {}, not acquired {}, superseded before upload {}, presented before dequeue {}, pace timeouts {}",
+            self.submitted, self.presented, self.discarded, self.not_acquired, superseded, self.before_dequeue, self.pace_timeouts
         );
         eprintln!("summary: dequeue->present {}  (gating: median <= 16.7, p99 <= 33.3)", fmt(&mut self.to_present));
         eprintln!("summary: kernel->present  {}", fmt(&mut self.kernel_to_present));
