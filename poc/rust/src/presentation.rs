@@ -9,7 +9,7 @@
 use std::ffi::c_void;
 use std::time::Duration;
 
-use wayland_backend::client::{Backend, ObjectId};
+use wayland_backend::client::{Backend, ObjectId, WaylandError};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::wl_callback::{self, WlCallback};
 use wayland_client::protocol::wl_registry::WlRegistry;
@@ -86,8 +86,17 @@ impl Presentation {
         self.conn.flush().map_err(|e| format!("wayland flush: {e}"))
     }
 
-    /// Feedback that has arrived since the last call.
+    /// Feedback that has arrived since the last call. Reads the socket too
+    /// (never blocking): with EGL, Mesa reads it during swap, so winit is
+    /// not always woken for ours.
     pub fn drain(&mut self) -> Result<Vec<Outcome>, String> {
+        if let Some(guard) = self.queue.prepare_read() {
+            match guard.read() {
+                Ok(_) => {}
+                Err(WaylandError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(format!("wayland read: {e}")),
+            }
+        }
         self.queue
             .dispatch_pending(&mut self.state)
             .map_err(|e| format!("wayland dispatch: {e}"))?;

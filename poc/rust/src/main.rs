@@ -5,6 +5,7 @@ mod audio;
 mod capture;
 mod display;
 mod meta;
+mod mpvview;
 mod presentation;
 mod stats;
 
@@ -18,7 +19,7 @@ use std::time::Duration;
 
 use capture::{Capture, Event};
 
-const USAGE: &str = "usage: hdmipoc capture [--device /dev/videoN] [--seconds N]\n       hdmipoc view [--device /dev/videoN] [--seconds N] [--windowed | --monitor NAME] [--mailbox] [--no-pace] [--delay MS]\n       hdmipoc audio [--seconds N] [--delay MS] [--sweep]\n       hdmipoc meta --out FILE [--seconds N]";
+const USAGE: &str = "usage: hdmipoc capture [--device /dev/videoN] [--seconds N]\n       hdmipoc view [--device /dev/videoN] [--seconds N] [--windowed | --monitor NAME] [--mailbox] [--no-pace] [--delay MS]\n       hdmipoc audio [--seconds N] [--delay MS] [--sweep]\n       hdmipoc meta --out FILE [--seconds N]\n       hdmipoc mpv [--seconds N] [--monitor NAME] [--no-pace]";
 
 fn run_capture(args: &[String]) -> Result<(), String> {
     let mut device: Option<PathBuf> = None;
@@ -213,6 +214,22 @@ fn run_meta(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// #7: libmpv rendering into our window, paced on the frame callback.
+fn run_mpv(args: &[String]) -> Result<(), String> {
+    let mut opts = mpvview::Options { seconds: None, monitor: None, pace: true };
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--seconds" => opts.seconds = Some(it.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?),
+            "--monitor" => opts.monitor = Some(it.next().ok_or(USAGE)?.clone()),
+            "--no-pace" => opts.pace = false,
+            _ => return Err(USAGE.into()),
+        }
+    }
+    let node = capture::find_card().map_err(|e| e.to_string())?;
+    mpvview::run(&node, opts)
+}
+
 fn run_view(args: &[String]) -> Result<(), String> {
     let mut device: Option<PathBuf> = None;
     let mut opts = display::Options {
@@ -250,6 +267,7 @@ fn main() -> ExitCode {
         Some("view") => run_view(&args[1..]),
         Some("audio") => run_audio(&args[1..]),
         Some("meta") => run_meta(&args[1..]),
+        Some("mpv") => run_mpv(&args[1..]),
         _ => Err(USAGE.into()),
     };
     match result {
