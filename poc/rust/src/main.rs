@@ -2,6 +2,9 @@
 //! against a latency budget. Linux only, throwaway.
 
 mod capture;
+mod display;
+mod presentation;
+mod stats;
 
 use std::env;
 use std::path::PathBuf;
@@ -13,17 +16,7 @@ use std::time::Duration;
 
 use capture::{Capture, Event};
 
-const USAGE: &str = "usage: hdmipoc capture [--device /dev/videoN] [--seconds N]";
-
-/// Median and p99 of a set of durations, in milliseconds.
-fn percentiles(samples: &mut [Duration]) -> Option<(f64, f64)> {
-    if samples.is_empty() {
-        return None;
-    }
-    samples.sort_unstable();
-    let at = |q: f64| samples[((samples.len() - 1) as f64 * q).round() as usize].as_secs_f64() * 1e3;
-    Some((at(0.5), at(0.99)))
-}
+const USAGE: &str = "usage: hdmipoc capture [--device /dev/videoN] [--seconds N]\n       hdmipoc view [--device /dev/videoN] [--seconds N] [--windowed | --monitor NAME] [--mailbox]";
 
 fn run_capture(args: &[String]) -> Result<(), String> {
     let mut device: Option<PathBuf> = None;
@@ -111,7 +104,7 @@ fn run_capture(args: &[String]) -> Result<(), String> {
     let elapsed = (capture::now_monotonic() - start).as_secs_f64();
     let span = first_seq.map_or(0, |f| last_seq.wrapping_sub(f) as u64 + 1);
     eprintln!("summary: {elapsed:.1} s, {frames} frames, sequence span {span}, {gaps} gaps, {lost} lost");
-    match percentiles(&mut to_dequeue) {
+    match stats::percentiles(&mut to_dequeue) {
         // uvcvideo stamps a buffer when its first packet arrives
         // (V4L2_BUF_FLAG_TSTAMP_SRC_SOE); dequeue comes after the last, so
         // this is mostly the frame's USB transfer.
@@ -121,10 +114,32 @@ fn run_capture(args: &[String]) -> Result<(), String> {
     result.map_err(|e| format!("capture: {e}"))
 }
 
+fn run_view(args: &[String]) -> Result<(), String> {
+    let mut device: Option<PathBuf> = None;
+    let mut opts = display::Options { windowed: false, seconds: None, mailbox: false, monitor: None };
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--device" => device = Some(it.next().ok_or(USAGE)?.into()),
+            "--seconds" => opts.seconds = Some(it.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?),
+            "--windowed" => opts.windowed = true,
+            "--mailbox" => opts.mailbox = true,
+            "--monitor" => opts.monitor = Some(it.next().ok_or(USAGE)?.clone()),
+            _ => return Err(USAGE.into()),
+        }
+    }
+    let node = match device {
+        Some(d) => d,
+        None => capture::find_card().map_err(|e| e.to_string())?,
+    };
+    display::run(&node, opts)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("capture") => run_capture(&args[1..]),
+        Some("view") => run_view(&args[1..]),
         _ => Err(USAGE.into()),
     };
     match result {

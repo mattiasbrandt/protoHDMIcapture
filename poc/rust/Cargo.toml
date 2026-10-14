@@ -7,6 +7,13 @@ edition = "2024"
 ctrlc = "3.5.2"
 libc = "0.2.190"
 linuxvideo = "=0.3.5"
+pollster = "1.0.1"
+raw-window-handle = "0.6"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
+wgpu = "30"
+winit = "0.30"
 
 # linuxvideo 0.3.5 with each buffer's timestamp and sequence number exposed;
 # the diff is vendor/linuxvideo-timestamp-sequence.patch (to offer upstream).
