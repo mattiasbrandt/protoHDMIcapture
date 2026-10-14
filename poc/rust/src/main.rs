@@ -1,6 +1,7 @@
 //! protoHDMIcapture Rust PoC (issue #5): a single-process viewer measured
 //! against a latency budget. Linux only, throwaway.
 
+mod audio;
 mod capture;
 mod display;
 mod presentation;
@@ -16,7 +17,7 @@ use std::time::Duration;
 
 use capture::{Capture, Event};
 
-const USAGE: &str = "usage: hdmipoc capture [--device /dev/videoN] [--seconds N]\n       hdmipoc view [--device /dev/videoN] [--seconds N] [--windowed | --monitor NAME] [--mailbox]";
+const USAGE: &str = "usage: hdmipoc capture [--device /dev/videoN] [--seconds N]\n       hdmipoc view [--device /dev/videoN] [--seconds N] [--windowed | --monitor NAME] [--mailbox] [--delay MS]\n       hdmipoc audio [--seconds N] [--delay MS] [--sweep]";
 
 fn run_capture(args: &[String]) -> Result<(), String> {
     let mut device: Option<PathBuf> = None;
@@ -114,9 +115,79 @@ fn run_capture(args: &[String]) -> Result<(), String> {
     result.map_err(|e| format!("capture: {e}"))
 }
 
+/// Audio alone: the loopback, its granted buffers, and (with --sweep)
+/// live delay changes, each timed until the ring's fill reaches it.
+fn run_audio(args: &[String]) -> Result<(), String> {
+    let mut seconds: Option<u64> = None;
+    let mut delay = audio::DEFAULT_DELAY_MS;
+    let mut sweep = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--seconds" => seconds = Some(it.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?),
+            "--delay" => delay = it.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?,
+            "--sweep" => sweep = true,
+            _ => return Err(USAGE.into()),
+        }
+    }
+    let node = capture::find_card().map_err(|e| e.to_string())?;
+    let usb = capture::usb_id(&node).ok_or("the card is not on USB")?;
+    let quit = Arc::new(AtomicBool::new(false));
+    let q = quit.clone();
+    ctrlc::set_handler(move || q.store(true, Ordering::Relaxed)).map_err(|e| e.to_string())?;
+
+    let a = audio::Audio::start(&usb, delay)?;
+    eprintln!("{}", a.describe());
+    // Every 10 s with --sweep: 50 -> 150 -> 20 -> 50 ms, and so on.
+    let steps = [150, 20, 50];
+    let start = capture::now_monotonic();
+    let mut next_report = Duration::from_secs(10);
+    let mut changed: Option<(Duration, u32)> = None;
+    let mut step = 0;
+    let mut granted_shown = false;
+    while !quit.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(20));
+        let t = capture::now_monotonic() - start;
+        if seconds.is_some_and(|s| t >= Duration::from_secs(s)) {
+            break;
+        }
+        if !granted_shown && t >= Duration::from_secs(1) {
+            eprintln!("{}", a.granted());
+            granted_shown = true;
+        }
+        if let Some((at, ms)) = changed {
+            let fill_ms = a.fill().as_secs_f64() * 1000.0;
+            if (fill_ms - ms as f64).abs() <= 10.0 {
+                eprintln!("{:6.1} s  delay reached {ms} ms after {:.2} s", t.as_secs_f64(), (t - at).as_secs_f64());
+                changed = None;
+            }
+        }
+        if t >= next_report {
+            eprintln!("{:6.1} s  {}", t.as_secs_f64(), a.status());
+            if sweep {
+                let ms = steps[step % steps.len()];
+                step += 1;
+                eprintln!("{:6.1} s  delay {} -> {ms} ms", t.as_secs_f64(), a.delay_ms());
+                a.set_delay_ms(ms);
+                changed = Some((t, ms));
+            }
+            next_report += Duration::from_secs(10);
+        }
+    }
+    eprintln!("summary: {}", a.granted());
+    eprintln!("summary: {}", a.status());
+    Ok(())
+}
+
 fn run_view(args: &[String]) -> Result<(), String> {
     let mut device: Option<PathBuf> = None;
-    let mut opts = display::Options { windowed: false, seconds: None, mailbox: false, monitor: None };
+    let mut opts = display::Options {
+        windowed: false,
+        seconds: None,
+        mailbox: false,
+        monitor: None,
+        delay_ms: audio::DEFAULT_DELAY_MS,
+    };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -125,6 +196,7 @@ fn run_view(args: &[String]) -> Result<(), String> {
             "--windowed" => opts.windowed = true,
             "--mailbox" => opts.mailbox = true,
             "--monitor" => opts.monitor = Some(it.next().ok_or(USAGE)?.clone()),
+            "--delay" => opts.delay_ms = it.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?,
             _ => return Err(USAGE.into()),
         }
     }
@@ -140,6 +212,7 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("capture") => run_capture(&args[1..]),
         Some("view") => run_view(&args[1..]),
+        Some("audio") => run_audio(&args[1..]),
         _ => Err(USAGE.into()),
     };
     match result {

@@ -16,6 +16,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
+use crate::audio::Audio;
 use crate::capture::{self, Capture, Event, now_monotonic};
 use crate::presentation::{Outcome, Presentation, Tag};
 use crate::stats::Stats;
@@ -131,7 +132,11 @@ pub struct Options {
     pub mailbox: bool,
     /// Fullscreen on this output (e.g. DP-2) instead of the compositor's pick.
     pub monitor: Option<String>,
+    pub delay_ms: u32,
 }
+
+/// `[` and `]` change the audio delay by this much.
+const DELAY_STEP_MS: u32 = 10;
 
 enum UserEvent {
     Frame,
@@ -168,6 +173,7 @@ struct App {
     slot: Arc<Mutex<Slot>>,
     gfx: Option<Gfx>,
     stats: Stats,
+    audio: Audio,
     error: Option<String>,
 }
 
@@ -180,6 +186,10 @@ pub fn run(node: &std::path::Path, opts: Options) -> Result<(), String> {
         capture::HEIGHT,
         capture::FPS
     );
+
+    let usb = capture::usb_id(node).ok_or("the card is not on USB")?;
+    let audio = Audio::start(&usb, opts.delay_ms)?;
+    eprintln!("{}", audio.describe());
 
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
@@ -246,13 +256,15 @@ pub fn run(node: &std::path::Path, opts: Options) -> Result<(), String> {
         })
     };
 
-    let mut app = App { opts, slot: slot.clone(), gfx: None, stats: Stats::new(start), error: None };
+    let mut app = App { opts, slot: slot.clone(), gfx: None, stats: Stats::new(start), audio, error: None };
     let loop_result = event_loop.run_app(&mut app);
     quit.store(true, Ordering::Relaxed);
     let captured = capture_thread.join().map_err(|_| "capture thread panicked".to_string())?;
 
     let superseded = slot.lock().unwrap().superseded;
     app.stats.summary(superseded);
+    eprintln!("summary: audio {}", app.audio.granted());
+    eprintln!("summary: audio {}", app.audio.status());
     match &captured {
         Ok((frames, gaps)) => eprintln!("summary: captured {frames} frames, {gaps} capture gaps"),
         Err(e) => eprintln!("summary: {e}"),
@@ -574,6 +586,16 @@ impl ApplicationHandler<UserEvent> for App {
                 match event.logical_key {
                     Key::Named(NamedKey::Escape) => event_loop.exit(),
                     Key::Character(c) if c == "q" => event_loop.exit(),
+                    Key::Character(c) if c == "[" || c == "]" => {
+                        let a = &self.audio;
+                        let ms = if c == "]" {
+                            a.delay_ms() + DELAY_STEP_MS
+                        } else {
+                            a.delay_ms().saturating_sub(DELAY_STEP_MS)
+                        };
+                        eprintln!("audio delay {} -> {ms} ms", a.delay_ms());
+                        a.set_delay_ms(ms);
+                    }
                     _ => {}
                 }
             }

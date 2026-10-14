@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+cpal = { version = "0.18", features = ["pipewire", "realtime-dbus"] }
 ctrlc = "3.5.2"
 libc = "0.2.190"
 linuxvideo = "=0.3.5"

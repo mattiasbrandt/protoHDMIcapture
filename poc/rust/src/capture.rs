@@ -66,7 +66,7 @@ fn card_ids() -> io::Result<Vec<String>> {
 }
 
 /// The USB `vvvv:pppp` of a video node, if it sits on USB.
-fn usb_id(node: &Path) -> Option<String> {
+pub fn usb_id(node: &Path) -> Option<String> {
     let name = node.file_name()?;
     // device -> the USB interface; its parent is the USB device.
     let dev = Path::new("/sys/class/video4linux").join(name).join("device/..");
