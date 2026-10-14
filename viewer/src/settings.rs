@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const SETTINGS_SH: &str = include_str!("../../lib/settings.sh");
 
@@ -254,6 +254,111 @@ impl Settings {
     }
 }
 
+/// `_config_quote`: plain when it is safe, else in single quotes.
+fn quote(v: &str) -> String {
+    if v.bytes().all(|b| b.is_ascii_alphanumeric() || b"._/:@+-".contains(&b)) {
+        v.to_string()
+    } else {
+        format!("'{v}'")
+    }
+}
+
+/// The file's lines as `read -r` sees them: split on newlines only (a
+/// carriage return stays part of the line), the last line kept even without
+/// a final newline.
+fn file_lines(text: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if lines.last() == Some(&"") {
+        lines.pop();
+    }
+    lines
+}
+
+/// `config_write`: sets the keys in the settings file in one pass. Comments,
+/// blank and unknown lines stay where they are; a key already present is
+/// replaced in place (duplicates dropped); a new key is appended. Written to
+/// a temp file (mode 600, as mktemp makes it) and renamed, so a crash never
+/// leaves half a file.
+pub fn write(config_file: &Path, pairs: &[(&str, &str)]) -> Result<(), String> {
+    let rows = rows();
+    for (k, v) in pairs {
+        if v.contains('\'') {
+            return Err(format!("{k}: values cannot contain a single quote"));
+        }
+    }
+    let want = |k: &str| pairs.iter().rev().find(|(n, _)| *n == k).map(|(_, v)| *v);
+    let dir = config_file.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+
+    // NotFound starts a new file; any other read error stops, so a file we
+    // cannot read is never replaced by one holding only the header.
+    let text = match fs::read_to_string(config_file) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("cannot read {}: {e}", config_file.display())),
+    };
+    let mut out = String::new();
+    let mut done: Vec<&str> = Vec::new();
+    match &text {
+        Some(text) => {
+            for line in file_lines(text) {
+                if let Ok(Some((k, _))) = config_line(line, &rows)
+                    && let Some(v) = want(k)
+                {
+                    if !done.contains(&k) {
+                        done.push(k);
+                        let _ = writeln!(out, "{k}={}", quote(v));
+                    }
+                    continue;
+                }
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        None => {
+            out.push_str("# protoHDMIcapture settings, written by ./view.sh --setup.\n");
+            out.push_str("# One KEY=value per line; see config.example in the repo.\n");
+        }
+    }
+    for (k, _) in pairs {
+        if !done.contains(k) {
+            done.push(k);
+            let _ = writeln!(out, "{k}={}", quote(want(k).unwrap_or_default()));
+        }
+    }
+
+    let tmp = dir.join(format!(
+        ".{}.{}.tmp",
+        config_file.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+        std::process::id()
+    ));
+    let written = (|| {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        f.write_all(out.as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&tmp, config_file)
+    })();
+    written.map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("cannot replace {}: {e}", config_file.display())
+    })
+}
+
+impl Settings {
+    /// view.sh --save: only the settings flagged `save` (the overlay's w).
+    #[cfg_attr(not(test), expect(dead_code, reason = "the overlay's w calls it (#12)"))]
+    pub fn save(&self, pairs: &[(&str, &str)]) -> Result<(), String> {
+        for (k, _) in pairs {
+            if !self.rows.iter().any(|r| r.name == *k && r.has_flag("save")) {
+                return Err(format!("{k} is not a setting the overlay saves"));
+            }
+        }
+        write(&self.config_file, pairs)
+    }
+}
+
 /// `_settings_check`: is `v` allowed for the row? Err says what is.
 fn check(r: &Row, v: &str) -> Result<(), String> {
     let spec = r.values.as_str();
@@ -346,6 +451,72 @@ mod tests {
         let s = with("DELAY=0.08 \n", &[]);
         assert_eq!(s.get("DELAY"), "0.08 ");
         assert_eq!(s.errors().len(), 1);
+    }
+
+    /// `config_write` from lib/card.sh on a copy of `start` (None: no file).
+    fn bash_write(start: Option<&str>, args: &[&str]) -> (Option<String>, bool) {
+        let dir = std::env::temp_dir().join(format!("phc-bash-{}-{}", std::process::id(), args.join("_").len()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("config");
+        let _ = fs::remove_file(&f);
+        if let Some(t) = start {
+            fs::write(&f, t).unwrap();
+        }
+        let ok = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(r#". "$1/lib/card.sh"; shift; config_write "$@""#)
+            .arg("bash")
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/.."))
+            .args(args)
+            .env("CONFIG_FILE", &f)
+            .status()
+            .unwrap()
+            .success();
+        let out = fs::read_to_string(&f).ok();
+        fs::remove_dir_all(&dir).unwrap();
+        (out, ok)
+    }
+
+    fn rust_write(start: Option<&str>, args: &[&str]) -> (Option<String>, bool) {
+        let dir = std::env::temp_dir().join(format!("phc-rust-{}-{}", std::process::id(), args.join("_").len()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("config");
+        let _ = fs::remove_file(&f);
+        if let Some(t) = start {
+            fs::write(&f, t).unwrap();
+        }
+        let pairs: Vec<(&str, &str)> = args.iter().map(|a| a.split_once('=').unwrap()).collect();
+        let ok = write(&f, &pairs).is_ok();
+        let out = fs::read_to_string(&f).ok();
+        fs::remove_dir_all(&dir).unwrap();
+        (out, ok)
+    }
+
+    #[test]
+    fn writes_byte_for_byte_like_config_write() {
+        let start = "# my settings\n  DELAY=0.05\nNOPE=1\n\nLEVELS=auto\nLEVELS=full\nWINDOW=fullscreen\r\nSOURCE='ps5'";
+        let cases: &[(Option<&str>, &[&str])] = &[
+            (None, &["DELAY=0.08"]),
+            (Some(start), &["LEVELS=limited", "DELAY=0.07", "BRIGHTNESS=-5", "SINK=a b"]),
+            (Some(start), &["WINDOW=windowed", "SOURCE=ps5"]),
+            (Some(""), &["GAMMA=3", "GAMMA=4"]),
+            (Some(start), &["SOURCE=it's"]),
+        ];
+        for (start, args) in cases {
+            let b = bash_write(*start, args);
+            let r = rust_write(*start, args);
+            assert_eq!(r, b, "start {start:?}, args {args:?}");
+        }
+    }
+
+    #[test]
+    fn save_writes_only_save_flagged_settings_mode_600() {
+        use std::os::unix::fs::PermissionsExt;
+        let s = with("# mine\nLEVELS=auto\n", &[]);
+        assert_eq!(s.save(&[("SOURCE", "ps5")]).unwrap_err(), "SOURCE is not a setting the overlay saves");
+        s.save(&[("LEVELS", "full"), ("DELAY", "0.07")]).unwrap();
+        assert_eq!(fs::read_to_string(&s.config_file).unwrap(), "# mine\nLEVELS=full\nDELAY=0.07\n");
+        assert_eq!(fs::metadata(&s.config_file).unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     #[test]
