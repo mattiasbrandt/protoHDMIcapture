@@ -100,6 +100,8 @@ PoC it too matched the PoC's own timing exactly (41.50 / 49.77 / 51.01).
 | bare mpv (the user's `mpv.conf`) | 74.2 | 82.2 | `mpv-bare-fullscreen-dp2`, 3 min |
 | GStreamer (view.sh `BACKEND=gst` pipeline) | 57.4 | 65.8 | `gst-fullscreen-dp2`, 3 min (#6) |
 | ffplay | 58.0 | 66.0 | `ffplay-fullscreen-dp2`, 3 min (#6) |
+| **libmpv in the Rust window, swap interval 0** | **42.5** | **50.8** | `libmpv-swap0-fullscreen-dp2`, 3 min (#7) |
+| libmpv in the Rust window, paced on the frame callback | 57.2 | 65.2 | 20 s only (#7) |
 
 - **view.sh's mpv builds the same queue** the unpaced PoC did: 41.7 ms in
   the first 10 s, then +8.6 ms every 10 s (the 60.000 vs 59.95 Hz
@@ -114,6 +116,15 @@ PoC it too matched the PoC's own timing exactly (41.50 / 49.77 / 51.01).
   behind the PoC (~57–58 ms). GStreamer lost 1 frame in 3 minutes,
   ffplay none. ffplay opens fullscreen on a display of its own choosing
   (DP-1 twice); it was started windowed on DP-2, then put in fullscreen.
+- **libmpv inside the Rust window** (#7, `hdmipoc mpv`) matches the PoC
+  within ~2 ms when every frame is swapped at once with swap interval 0:
+  the compositor keeps only the newest buffer, so no queue forms and mpv
+  is never blocked. Paced the PoC's way it is one frame worse: while a
+  frame waits for the callback, mpv sits in `vo_libmpv.c`'s
+  `flip_page()` and cannot swap in the newer frame. So mpv's own latency
+  is not its renderer but its window and swap handling, and an embedder
+  can fix it. This keeps mpv's scalers and colour handling (libmpv's
+  render API is OpenGL, so EGL here; on Windows OpenGL or ANGLE).
 - The PoC's lead comes from one thing: it hands the compositor a frame
   only after the compositor's frame callback for the previous one
   (`App::render`). That is core Wayland (`wl_surface.frame`), not a
