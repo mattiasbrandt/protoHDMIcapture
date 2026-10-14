@@ -1,0 +1,20 @@
+[package]
+name = "linuxvideo"
+version = "0.3.5"
+edition = "2021"
+license = "0BSD"
+description = "V4L2 video capture and output library"
+repository = "https://github.com/SludgePhD/LinuxVideo.git"
+categories = ["multimedia::video", "os::linux-apis"]
+keywords = ["linux", "video", "webcam"]
+
+[dependencies]
+log = "0.4.14"
+uoctl = "1.0.1"
+libc = "0.2.172"
+bitflags = "1.2.1"
+
+[dev-dependencies]
+env_logger = { version = "0.11.8", default-features = false }
+anyhow = "1.0.68"
+png = "0.17.13"
