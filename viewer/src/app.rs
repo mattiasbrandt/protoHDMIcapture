@@ -1360,6 +1360,10 @@ impl ApplicationHandler<UserEvent> for App {
         if let Err(e) = self.drain() {
             self.error.get_or_insert(e);
         }
+        // A screenshot still coming back is finished, not dropped.
+        if let Some(gfx) = self.gfx.as_mut() {
+            gfx.screenshot.finish(&gfx.device, &self.notify);
+        }
         self.gfx = None;
     }
 }

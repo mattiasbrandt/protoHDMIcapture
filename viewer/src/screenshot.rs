@@ -14,6 +14,9 @@ use std::time::Duration;
 
 use crate::overlay::Notify;
 
+/// How long the end waits for a screenshot still on its way back.
+const FINISH_WAIT: Duration = Duration::from_secs(2);
+
 const IDLE: u8 = 0;
 const MAPPING: u8 = 1;
 const MAPPED: u8 = 2;
@@ -36,6 +39,9 @@ pub struct Screenshot {
     /// The thread writing the last shot, joined before the next and at
     /// the end (a q right after s still gets its file).
     saving: Option<thread::JoinHandle<()>>,
+    /// Where shots go (`~/Pictures/protoHDMIcapture`), or why there is no
+    /// such place.
+    folder: Result<PathBuf, String>,
 }
 
 impl Screenshot {
@@ -56,6 +62,7 @@ impl Screenshot {
             wanted: false,
             copying: false,
             saving: None,
+            folder: folder(),
         }
     }
 
@@ -116,8 +123,9 @@ impl Screenshot {
         let Some(rgb) = self.take()? else { return Ok(()) };
         let (w, h) = (self.width, self.height);
         let notify = notify.clone();
+        let folder = self.folder.clone();
         self.saving = Some(thread::spawn(move || {
-            let message = match save(&rgb, w, h) {
+            let message = match folder.and_then(|dir| save_in(&dir, &stamp(), &rgb, w, h)) {
                 Ok(path) => {
                     eprintln!("saved {}", path.display());
                     (format!("Saved {}", path.display()), Duration::from_secs(3))
@@ -130,6 +138,30 @@ impl Screenshot {
             notify(Some(message));
         }));
         Ok(())
+    }
+
+    /// At the end: a shot on its way back is waited for (at most
+    /// `FINISH_WAIT`) and saved, so s then q still gives a file; anything
+    /// that cannot be finished is said, not dropped silently. The save
+    /// itself is joined when this is dropped.
+    pub fn finish(&mut self, device: &wgpu::Device, notify: &Notify) {
+        if self.wanted {
+            self.wanted = false;
+            eprintln!("screenshot not taken: the viewer quit before the next frame");
+        }
+        if !self.reading() {
+            return;
+        }
+        let wait = wgpu::PollType::Wait { submission_index: None, timeout: Some(FINISH_WAIT) };
+        if let Err(e) = device.poll(wait) {
+            eprintln!("screenshot lost: the GPU did not return it ({e})");
+            return;
+        }
+        match self.poll(notify) {
+            Ok(()) if self.reading() => eprintln!("screenshot lost: the GPU did not return it in time"),
+            Ok(()) => {}
+            Err(e) => eprintln!("screenshot lost: {e}"),
+        }
     }
 
     /// The copy as packed RGB, once it is back.
@@ -244,10 +276,6 @@ fn save_in(dir: &Path, stamp: &str, rgb: &[u8], width: u32, height: u32) -> Resu
     Ok(path)
 }
 
-fn save(rgb: &[u8], width: u32, height: u32) -> Result<PathBuf, String> {
-    save_in(&folder()?, &stamp(), rgb, width, height)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +361,22 @@ mod tests {
         queue.submit([encoder.finish()]);
         shot.submitted();
         assert!(!shot.request(), "not while it comes back");
+        // Quitting now (s then q): the end waits for the readback.
+        let notify: Notify = std::sync::Arc::new(|_| {});
+        let mut quitting = Screenshot::new(&device, w, h);
+        quitting.request();
+        let mut e2 = device.create_command_encoder(&Default::default());
+        quitting.copy(&mut e2, &frame);
+        queue.submit([e2.finish()]);
+        quitting.submitted();
+        let dir = std::env::temp_dir().join(format!("phc-shots-quit-{}", std::process::id()));
+        quitting.folder = Ok(dir.clone());
+        quitting.finish(&device, &notify);
+        drop(quitting);
+        let saved: Vec<_> = fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(saved.len(), 1, "s then q still gives the file");
+        fs::remove_dir_all(&dir).unwrap();
+
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let rgb = shot.take().unwrap().expect("the copy is back");
         let want: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
