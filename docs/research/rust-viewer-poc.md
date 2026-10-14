@@ -14,7 +14,8 @@ added visual delay in games is not acceptable. Capture and audio passed.
 **Measured after the decision:** today's viewer (view.sh -> mpv) is ~29 ms
 slower than the PoC on the same screen (kernel -> presented median 69.0 vs
 40.5 ms; "Compared with today's viewer"). The decision is open again on
-that basis.
+that basis, and the user keeps the PoC: other tech approaches get
+evaluated with the same timing method before any go / no-go.
 
 ## Results against the go criteria
 
