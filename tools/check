@@ -47,6 +47,28 @@ for cfg in "${FIX[@]}"; do
     done < <(tail -n +2 "$base.expect")
 done
 
+# The Rust viewer (viewer/, #10): build, tests and clippy; then every settings
+# fixture through both viewers, which must print the same and exit the same,
+# since they share the settings file.
+step "viewer: cargo build, test, clippy"
+if ! command -v cargo >/dev/null; then
+    bad "cargo not found: the Rust viewer (viewer/) needs a Rust toolchain (rustup)"
+else
+    cargo build --manifest-path viewer/Cargo.toml --quiet || bad "viewer: cargo build"
+    cargo test --manifest-path viewer/Cargo.toml --quiet >/dev/null || bad "viewer: cargo test (rerun it to see which)"
+    cargo clippy --manifest-path viewer/Cargo.toml --all-targets --quiet -- -D warnings || bad "viewer: cargo clippy"
+    step "settings fixtures: view.sh and the Rust viewer agree (${#FIX[@]})"
+    for cfg in "${FIX[@]}"; do
+        base="${cfg%.config}"; name="${base##*/}"
+        envs=(); [ -r "$base.env" ] && mapfile -t envs <"$base.env"
+        sh_out=$(env -i HOME="$HOME" PATH="$PATH" XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}" \
+                 CONFIG_FILE="$cfg" "${envs[@]}" ./view.sh --settings 2>&1; echo "exit $?")
+        rs_out=$(env -i HOME="$HOME" PATH="$PATH" \
+                 CONFIG_FILE="$cfg" "${envs[@]}" viewer/target/debug/protohdmicapture --settings 2>&1; echo "exit $?")
+        [ "$sh_out" = "$rs_out" ] || { bad "settings fixture $name: the viewers differ"; diff <(echo "$sh_out") <(echo "$rs_out") | head -10; }
+    done
+fi
+
 # A source profile may suggest only the settings flagged "suggest".
 step "source profile suggestions"
 mapfile -t SUGGESTABLE < <(bash -c '. lib/settings.sh; settings_with suggest')

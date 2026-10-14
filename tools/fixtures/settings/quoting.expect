@@ -1,0 +1,7 @@
+exit 0
+^DELAY +0.07 +saved$
+^LEVELS +full +saved$
+^SOURCE +'ps5 +saved$
+^WINDOW +borderless +saved$
+^note: .*quoting.config: ignoring unknown line: NOT_A_SETTING=1$
+^all valid$
