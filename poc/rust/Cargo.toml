@@ -1,0 +1,17 @@
+[package]
+name = "hdmipoc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ctrlc = "3.5.2"
+libc = "0.2.190"
+linuxvideo = "=0.3.5"
+
+# linuxvideo 0.3.5 with each buffer's timestamp and sequence number exposed;
+# the diff is vendor/linuxvideo-timestamp-sequence.patch (to offer upstream).
+[patch.crates-io]
+linuxvideo = { path = "vendor/linuxvideo" }
+
+[profile.release]
+debug = 1
