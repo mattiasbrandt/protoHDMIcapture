@@ -125,6 +125,12 @@ PoC it too matched the PoC's own timing exactly (41.50 / 49.77 / 51.01).
   is not its renderer but its window and swap handling, and an embedder
   can fix it. This keeps mpv's scalers and colour handling (libmpv's
   render API is OpenGL, so EGL here; on Windows OpenGL or ANGLE).
+- **Tearing** (#8) could not be measured here. Under `--immediate` Mesa
+  asks for it (`wp_tearing_control_v1.set_presentation_hint(1)`, async),
+  but Hyprland 0.56 on amdgpu showed every present with the vsync flag,
+  even with `general:allow_tearing` on and an `immediate` window rule (both
+  for the runs only). Latency stayed at ~41–42 ms. Whether a desktop tears
+  is the desktop's choice, which is what the Rust route must not depend on.
 - The PoC's lead comes from one thing: it hands the compositor a frame
   only after the compositor's frame callback for the previous one
   (`App::render`). That is core Wayland (`wl_surface.frame`), not a
