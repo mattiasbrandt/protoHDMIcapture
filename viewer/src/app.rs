@@ -1240,10 +1240,12 @@ impl ApplicationHandler<UserEvent> for App {
             event_loop.exit();
         }
         // Wake for the next change, and while a repaint waits on pacing
-        // (no frame from the card may come to wake us).
+        // (no frame from the card may come to wake us); not while the
+        // window has no area, which nothing is drawn into.
         let now = Instant::now();
         self.deadline = self.overlay.next_change(now);
-        let wake = if self.repaint {
+        let hidden = self.gfx.as_ref().is_some_and(|g| g.hidden);
+        let wake = if self.repaint && !hidden {
             let soon = now + PACE_TIMEOUT;
             Some(self.deadline.map_or(soon, |d| d.min(soon)))
         } else {
@@ -1345,6 +1347,17 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "# mine\nLEVELS=limited\nCONTRAST=2\nSCALING=fast\n");
         assert_eq!(app.overlay.current_message(Instant::now()), Some("Saved: SCALING=fast LEVELS=limited"));
         assert_eq!(panel(&app)[9], "w     Save         nothing changed", "the save is the new baseline");
+        // view.sh reads what w wrote as saved and valid.
+        let out = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../view.sh"))
+            .arg("--settings")
+            .env("CONFIG_FILE", &file)
+            .output()
+            .unwrap();
+        let report = String::from_utf8_lossy(&out.stdout);
+        let row = |k: &str| report.lines().find(|l| l.split_whitespace().next() == Some(k)).unwrap_or("").split_whitespace().collect::<Vec<_>>();
+        assert_eq!(row("LEVELS"), ["LEVELS", "limited", "saved"], "{report}");
+        assert_eq!(row("SCALING"), ["SCALING", "fast", "saved"], "{report}");
+        assert!(out.status.success() && report.contains("all valid"), "{report}");
 
         assert!(press(&mut app, "r"));
         assert_eq!(panel(&app)[9], "w     Save         CONTRAST=0");
