@@ -4,6 +4,7 @@
 mod audio;
 mod capture;
 mod display;
+mod meta;
 mod presentation;
 mod stats;
 
@@ -17,7 +18,7 @@ use std::time::Duration;
 
 use capture::{Capture, Event};
 
-const USAGE: &str = "usage: hdmipoc capture [--device /dev/videoN] [--seconds N]\n       hdmipoc view [--device /dev/videoN] [--seconds N] [--windowed | --monitor NAME] [--mailbox] [--no-pace] [--delay MS]\n       hdmipoc audio [--seconds N] [--delay MS] [--sweep]";
+const USAGE: &str = "usage: hdmipoc capture [--device /dev/videoN] [--seconds N]\n       hdmipoc view [--device /dev/videoN] [--seconds N] [--windowed | --monitor NAME] [--mailbox] [--no-pace] [--delay MS]\n       hdmipoc audio [--seconds N] [--delay MS] [--sweep]\n       hdmipoc meta --out FILE [--seconds N]";
 
 fn run_capture(args: &[String]) -> Result<(), String> {
     let mut device: Option<PathBuf> = None;
@@ -179,6 +180,39 @@ fn run_audio(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Logs the card's metadata buffers (the frames another player gets).
+fn run_meta(args: &[String]) -> Result<(), String> {
+    let mut seconds: Option<u64> = None;
+    let mut out: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--seconds" => seconds = Some(it.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?),
+            "--out" => out = Some(it.next().ok_or(USAGE)?.into()),
+            _ => return Err(USAGE.into()),
+        }
+    }
+    let out = out.ok_or(USAGE)?;
+    let node = capture::find_card_node(linuxvideo::CapabilityFlags::META_CAPTURE).map_err(|e| e.to_string())?;
+    let quit = Arc::new(AtomicBool::new(false));
+    let q = quit.clone();
+    ctrlc::set_handler(move || q.store(true, Ordering::Relaxed)).map_err(|e| e.to_string())?;
+    if let Some(s) = seconds {
+        let q = quit.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(s));
+            q.store(true, Ordering::Relaxed);
+        });
+    }
+    let file = std::fs::File::create(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let mut w = std::io::BufWriter::new(file);
+    eprintln!("meta: {} -> {}", node.display(), out.display());
+    let n = meta::run(&node, &quit, &mut w).map_err(|e| format!("meta: {e}"))?;
+    std::io::Write::flush(&mut w).map_err(|e| e.to_string())?;
+    eprintln!("meta: {n} buffers");
+    Ok(())
+}
+
 fn run_view(args: &[String]) -> Result<(), String> {
     let mut device: Option<PathBuf> = None;
     let mut opts = display::Options {
@@ -215,6 +249,7 @@ fn main() -> ExitCode {
         Some("capture") => run_capture(&args[1..]),
         Some("view") => run_view(&args[1..]),
         Some("audio") => run_audio(&args[1..]),
+        Some("meta") => run_meta(&args[1..]),
         _ => Err(USAGE.into()),
     };
     match result {

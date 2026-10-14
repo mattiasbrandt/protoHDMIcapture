@@ -76,6 +76,12 @@ pub fn usb_id(node: &Path) -> Option<String> {
 
 /// The video capture node of the first MS2130 found.
 pub fn find_card() -> io::Result<PathBuf> {
+    find_card_node(CapabilityFlags::VIDEO_CAPTURE)
+}
+
+/// The first MS2130 node with capability `cap` (the card has a video
+/// capture node and a metadata node).
+pub fn find_card_node(cap: CapabilityFlags) -> io::Result<PathBuf> {
     let ids = card_ids()?;
     let mut nodes: Vec<PathBuf> = fs::read_dir("/dev")?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -87,9 +93,8 @@ pub fn find_card() -> io::Result<PathBuf> {
         if !ids.contains(&id) {
             continue;
         }
-        // The card has a metadata node too; only the capture node will do.
         let caps = Device::open(&node)?.capabilities()?.device_capabilities();
-        if caps.contains(CapabilityFlags::VIDEO_CAPTURE) {
+        if caps.contains(cap) {
             return Ok(node);
         }
     }
