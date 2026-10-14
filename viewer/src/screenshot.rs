@@ -87,6 +87,11 @@ impl Screenshot {
         );
     }
 
+    /// A copy is on its way back (polling the device takes it).
+    pub fn reading(&self) -> bool {
+        self.state.load(Ordering::Acquire) != IDLE
+    }
+
     /// After the submit: start reading the copy back.
     pub fn submitted(&mut self) {
         if !self.copying {

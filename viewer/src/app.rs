@@ -35,6 +35,8 @@ use crate::stats::Stats;
 
 /// A frame callback this late counts as lost: pacing stops waiting for it.
 const PACE_TIMEOUT: Duration = Duration::from_millis(100);
+/// How often the device is polled while a screenshot comes back.
+const READBACK_POLL: Duration = Duration::from_millis(10);
 
 /// WINDOW and WINDOW_SIZE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +163,9 @@ struct Gfx {
     /// --stats, where the GPU can time its passes.
     timer: Option<GpuTimer>,
     osd: Osd,
+    /// A card frame has been uploaded (before that the YUYV texture is all
+    /// zeros, which converts to green, not black).
+    have_frame: bool,
     /// The window has no area (minimised, or resized to nothing): nothing
     /// is drawn until it has.
     hidden: bool,
@@ -186,6 +191,9 @@ struct App {
     notify: Notify,
     /// Draw again without a new frame (the overlay changed).
     repaint: bool,
+    /// LEVELS or a colour value changed: convert the last frame again on a
+    /// repaint, so a frozen feed shows it too.
+    reconvert: bool,
     /// When the overlay next changes on its own.
     deadline: Option<Instant>,
     modifiers: ModifiersState,
@@ -407,6 +415,7 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options) -> Result<(), String
         notices,
         notify,
         repaint: false,
+        reconvert: false,
         deadline: None,
         modifiers: ModifiersState::empty(),
         opts,
@@ -670,6 +679,7 @@ impl App {
             viewport: [0, 0, 1, 1],
             timer,
             osd,
+            have_frame: false,
             hidden: false,
             texture,
             upload: vec![0; self.format.frame_size()],
@@ -778,6 +788,7 @@ impl App {
             gfx.queue.write_buffer(&gfx.picture_buffer, 0, &picture::bytes(&u));
         }
         self.repaint = true;
+        self.reconvert = true;
     }
 
     /// Tab, and the keys that only mean something while the overlay is
@@ -1036,18 +1047,21 @@ impl App {
 
         let (w, h) = (self.format.width, self.format.height);
         if new_frame {
-        gfx.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &gfx.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &gfx.upload,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 2), rows_per_image: Some(h) },
-            wgpu::Extent3d { width: w / 2, height: h, depth_or_array_layers: 1 },
-        );
+            gfx.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &gfx.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &gfx.upload,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 2), rows_per_image: Some(h) },
+                wgpu::Extent3d { width: w / 2, height: h, depth_or_array_layers: 1 },
+            );
+            gfx.have_frame = true;
         }
+        // A new frame, or the last one again after a picture change.
+        let convert = new_frame || (self.reconvert && gfx.have_frame);
 
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = gfx.device.create_command_encoder(&Default::default());
@@ -1064,7 +1078,7 @@ impl App {
                 ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
             })]
         };
-        if new_frame {
+        if convert {
             let attachments = target(&gfx.rgb_view);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("convert"),
@@ -1131,6 +1145,9 @@ impl App {
         self.in_flight += 1;
         self.last_submit = now_monotonic();
         self.repaint = false;
+        if convert {
+            self.reconvert = false;
+        }
         if new_frame {
             self.stats.submitted();
         }
@@ -1147,6 +1164,9 @@ impl ApplicationHandler<UserEvent> for App {
             Ok(gfx) => {
                 self.gfx = Some(gfx);
                 self.relayout();
+                // Drawn at once, card frame or not: on Wayland a window maps
+                // with its first buffer, and the key bar shows from the start.
+                self.repaint = true;
                 // As view.sh's place job: the start mode, finished.
                 self.place_window();
             }
@@ -1221,6 +1241,8 @@ impl ApplicationHandler<UserEvent> for App {
                         gfx.config.height = size.height;
                         gfx.surface.configure(&gfx.device, &gfx.config);
                         self.relayout();
+                        // The new size drawn even without a card frame.
+                        self.repaint = true;
                     }
                 }
             }
@@ -1245,11 +1267,21 @@ impl ApplicationHandler<UserEvent> for App {
         let now = Instant::now();
         self.deadline = self.overlay.next_change(now);
         let hidden = self.gfx.as_ref().is_some_and(|g| g.hidden);
-        let wake = if self.repaint && !hidden {
-            let soon = now + PACE_TIMEOUT;
-            Some(self.deadline.map_or(soon, |d| d.min(soon)))
+        // A card frame held back by pacing: if the card stops now, nothing
+        // else would wake the loop for it.
+        let held = self.slot.lock().expect("the slot's lock is never poisoned").tag.is_some();
+        // A screenshot on its way back is taken by polling the device.
+        let reading = self.gfx.as_ref().is_some_and(|g| g.screenshot.reading());
+        let soon = if reading {
+            Some(now + READBACK_POLL)
+        } else if (self.repaint || held) && !hidden {
+            Some(now + PACE_TIMEOUT)
         } else {
-            self.deadline
+            None
+        };
+        let wake = match (self.deadline, soon) {
+            (Some(d), Some(s)) => Some(d.min(s)),
+            (d, s) => d.or(s),
         };
         event_loop.set_control_flow(wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
@@ -1291,6 +1323,7 @@ mod tests {
             notices: Arc::default(),
             notify: Arc::new(|_| {}),
             repaint: false,
+            reconvert: false,
             deadline: None,
             modifiers: ModifiersState::empty(),
             stats: Stats::new(Duration::ZERO, false),
@@ -1366,6 +1399,10 @@ mod tests {
         assert!(press(&mut app, "Esc"));
         assert_eq!(app.overlay.page, None);
         assert!(app.repaint, "every change draws again");
+        app.repaint = false;
+        app.reconvert = false;
+        app.picture_key(&Key::Character("2".into()));
+        assert!(app.repaint && app.reconvert, "a colour key redraws a frozen frame converted again");
 
         // f: the panel's Display line and w's WINDOW follow it.
         press(&mut app, "Tab");
