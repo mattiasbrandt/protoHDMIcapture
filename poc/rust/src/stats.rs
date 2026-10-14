@@ -26,6 +26,17 @@ fn fmt(samples: &mut [Duration]) -> String {
     }
 }
 
+/// `fmt` plus the extremes and p1: the shape of the spread, not just its middle.
+fn fmt_full(samples: &mut [Duration]) -> String {
+    if samples.is_empty() {
+        return "no samples".into();
+    }
+    let s = fmt(samples); // sorts
+    let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    let p1 = samples[((samples.len() - 1) as f64 * 0.01).round() as usize];
+    format!("{s}  min {:6.2}  p1 {:6.2}  max {:6.2} ms", ms(samples[0]), ms(p1), ms(samples[samples.len() - 1]))
+}
+
 #[derive(Default)]
 struct Window {
     to_present: Vec<Duration>,
@@ -143,8 +154,8 @@ impl Stats {
             "summary: submitted {}, presented {}, discarded {}, not acquired {}, superseded before upload {}, presented before dequeue {}, pace timeouts {}",
             self.submitted, self.presented, self.discarded, self.not_acquired, superseded, self.before_dequeue, self.pace_timeouts
         );
-        eprintln!("summary: dequeue->present {}  (gating: median <= 16.7, p99 <= 33.3)", fmt(&mut self.to_present));
-        eprintln!("summary: kernel->present  {}", fmt(&mut self.kernel_to_present));
+        eprintln!("summary: dequeue->present {}  (gating: median <= 16.7, p99 <= 33.3)", fmt_full(&mut self.to_present));
+        eprintln!("summary: kernel->present  {}", fmt_full(&mut self.kernel_to_present));
         eprintln!("summary: get_current_texture wait {}", fmt(&mut self.acquire));
         eprintln!(
             "summary: refresh {}, repeated refreshes {}",
