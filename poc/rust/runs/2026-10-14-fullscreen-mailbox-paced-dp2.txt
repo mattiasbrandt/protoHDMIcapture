@@ -1,0 +1,81 @@
+capture: /dev/video0 YUYV 1920x1080 @ 60
+audio: pipewire:alsa_input.usb-1e4e_7016_20000130041415-02.analog-stereo -> pipewire:output_default, asked 480 frames (10 ms) at 48000 Hz, delay 50 ms
+frame 0: 111071 bytes, error flag, skipped
+wp_presentation clock id Some(1) (CLOCK_MONOTONIC is 1)
+WARNING: radv is not a conformant Vulkan implementation, testing use only.
+frame 1: 4102552 bytes, error flag, skipped
+gpu: AMD Radeon RX 9070 XT (RADV GFX1201) (Vulkan, Mesa 26.2.2-arch1.1)
+present modes offered: [Mailbox, Fifo, Immediate]
+surface: 1710x1367 Bgra8Unorm, present mode Mailbox (Mailbox requested), frame latency 1, paced true
+audio input: Failed to promote audio thread to real-time priority: AudioThreadPriorityError: org.freedesktop.DBus.Error.ServiceUnknown:The name is not activatable
+audio output: Failed to promote audio thread to real-time priority: AudioThreadPriorityError: org.freedesktop.DBus.Error.ServiceUnknown:The name is not activatable
+surface: resized to 1710x1367 on ? at 0.000 Hz, fullscreen false
+surface: resized to 1920x1200 on DP-2 at 59.950 Hz, fullscreen true
+  10.0 s  dequeue->present median  27.48 ms  p99  33.17 ms  | kernel->present median  43.79 ms  p99  49.25 ms  | repeated refreshes 1
+  20.0 s  dequeue->present median  20.27 ms  p99  33.65 ms  | kernel->present median  36.53 ms  p99  49.71 ms  | repeated refreshes 16
+  30.0 s  dequeue->present median  28.04 ms  p99  33.23 ms  | kernel->present median  44.06 ms  p99  49.76 ms  | repeated refreshes 2
+  40.0 s  dequeue->present median  20.82 ms  p99  33.52 ms  | kernel->present median  36.86 ms  p99  49.56 ms  | repeated refreshes 12
+  50.0 s  dequeue->present median  28.31 ms  p99  33.26 ms  | kernel->present median  44.37 ms  p99  49.34 ms  | repeated refreshes 4
+  60.1 s  dequeue->present median  21.17 ms  p99  26.70 ms  | kernel->present median  37.20 ms  p99  42.68 ms  | repeated refreshes 2
+  70.1 s  dequeue->present median  28.45 ms  p99  33.41 ms  | kernel->present median  44.67 ms  p99  49.45 ms  | repeated refreshes 12
+  80.1 s  dequeue->present median  21.88 ms  p99  27.57 ms  | kernel->present median  38.01 ms  p99  43.55 ms  | repeated refreshes 5
+  90.1 s  dequeue->present median  27.97 ms  p99  33.56 ms  | kernel->present median  44.32 ms  p99  49.59 ms  | repeated refreshes 11
+ 100.1 s  dequeue->present median  22.29 ms  p99  28.28 ms  | kernel->present median  38.64 ms  p99  44.25 ms  | repeated refreshes 3
+ 110.1 s  dequeue->present median  28.52 ms  p99  33.69 ms  | kernel->present median  44.57 ms  p99  50.19 ms  | repeated refreshes 11
+ 120.1 s  dequeue->present median  22.83 ms  p99  29.06 ms  | kernel->present median  39.07 ms  p99  45.04 ms  | repeated refreshes 5
+ 130.1 s  dequeue->present median  28.88 ms  p99  33.59 ms  | kernel->present median  44.94 ms  p99  49.77 ms  | repeated refreshes 14
+ 140.1 s  dequeue->present median  23.51 ms  p99  28.82 ms  | kernel->present median  39.57 ms  p99  45.37 ms  | repeated refreshes 0
+ 150.1 s  dequeue->present median  27.30 ms  p99  33.41 ms  | kernel->present median  43.33 ms  p99  49.44 ms  | repeated refreshes 9
+ 160.1 s  dequeue->present median  24.30 ms  p99  29.50 ms  | kernel->present median  40.34 ms  p99  45.46 ms  | repeated refreshes 0
+ 170.1 s  dequeue->present median  20.50 ms  p99  33.62 ms  | kernel->present median  36.52 ms  p99  49.61 ms  | repeated refreshes 11
+ 180.2 s  dequeue->present median  25.07 ms  p99  30.29 ms  | kernel->present median  41.11 ms  p99  46.26 ms  | repeated refreshes 0
+ 190.2 s  dequeue->present median  21.24 ms  p99  33.57 ms  | kernel->present median  37.27 ms  p99  50.11 ms  | repeated refreshes 15
+ 200.2 s  dequeue->present median  25.52 ms  p99  31.08 ms  | kernel->present median  41.86 ms  p99  47.05 ms  | repeated refreshes 0
+ 210.2 s  dequeue->present median  20.60 ms  p99  33.57 ms  | kernel->present median  36.62 ms  p99  49.67 ms  | repeated refreshes 12
+ 220.2 s  dequeue->present median  25.98 ms  p99  31.87 ms  | kernel->present median  42.30 ms  p99  47.84 ms  | repeated refreshes 0
+ 230.2 s  dequeue->present median  20.11 ms  p99  33.57 ms  | kernel->present median  36.41 ms  p99  49.55 ms  | repeated refreshes 13
+ 240.2 s  dequeue->present median  26.77 ms  p99  32.39 ms  | kernel->present median  42.78 ms  p99  48.63 ms  | repeated refreshes 0
+ 250.2 s  dequeue->present median  19.79 ms  p99  33.46 ms  | kernel->present median  35.81 ms  p99  49.48 ms  | repeated refreshes 9
+ 260.2 s  dequeue->present median  27.54 ms  p99  32.78 ms  | kernel->present median  43.57 ms  p99  49.07 ms  | repeated refreshes 0
+ 270.2 s  dequeue->present median  20.42 ms  p99  33.61 ms  | kernel->present median  36.45 ms  p99  50.20 ms  | repeated refreshes 7
+ 280.2 s  dequeue->present median  28.28 ms  p99  33.25 ms  | kernel->present median  44.31 ms  p99  49.26 ms  | repeated refreshes 4
+ 290.2 s  dequeue->present median  20.65 ms  p99  32.95 ms  | kernel->present median  36.74 ms  p99  49.07 ms  | repeated refreshes 6
+ 300.3 s  dequeue->present median  27.80 ms  p99  33.42 ms  | kernel->present median  44.11 ms  p99  49.45 ms  | repeated refreshes 5
+ 310.3 s  dequeue->present median  21.15 ms  p99  33.27 ms  | kernel->present median  37.49 ms  p99  49.31 ms  | repeated refreshes 11
+ 320.3 s  dequeue->present median  27.79 ms  p99  33.46 ms  | kernel->present median  43.85 ms  p99  49.48 ms  | repeated refreshes 6
+ 330.3 s  dequeue->present median  21.54 ms  p99  33.19 ms  | kernel->present median  37.76 ms  p99  49.22 ms  | repeated refreshes 7
+ 340.3 s  dequeue->present median  28.42 ms  p99  33.42 ms  | kernel->present median  44.45 ms  p99  50.13 ms  | repeated refreshes 10
+ 350.3 s  dequeue->present median  22.11 ms  p99  27.43 ms  | kernel->present median  38.13 ms  p99  44.16 ms  | repeated refreshes 2
+ 360.3 s  dequeue->present median  28.41 ms  p99  33.48 ms  | kernel->present median  44.46 ms  p99  49.45 ms  | repeated refreshes 12
+ 370.3 s  dequeue->present median  22.85 ms  p99  28.12 ms  | kernel->present median  38.86 ms  p99  44.09 ms  | repeated refreshes 1
+ 380.3 s  dequeue->present median  28.02 ms  p99  33.56 ms  | kernel->present median  44.46 ms  p99  49.57 ms  | repeated refreshes 11
+ 390.3 s  dequeue->present median  23.54 ms  p99  28.83 ms  | kernel->present median  39.63 ms  p99  44.81 ms  | repeated refreshes 0
+ 400.3 s  dequeue->present median  27.11 ms  p99  33.25 ms  | kernel->present median  43.13 ms  p99  49.45 ms  | repeated refreshes 11
+ 410.3 s  dequeue->present median  23.95 ms  p99  29.61 ms  | kernel->present median  40.30 ms  p99  45.60 ms  | repeated refreshes 0
+ 420.4 s  dequeue->present median  27.88 ms  p99  33.52 ms  | kernel->present median  43.89 ms  p99  49.69 ms  | repeated refreshes 15
+ 430.4 s  dequeue->present median  24.51 ms  p99  30.42 ms  | kernel->present median  40.73 ms  p99  46.39 ms  | repeated refreshes 0
+ 440.4 s  dequeue->present median  21.22 ms  p99  33.57 ms  | kernel->present median  37.51 ms  p99  49.59 ms  | repeated refreshes 17
+ 450.4 s  dequeue->present median  25.30 ms  p99  30.48 ms  | kernel->present median  41.32 ms  p99  47.13 ms  | repeated refreshes 0
+ 460.4 s  dequeue->present median  20.15 ms  p99  33.49 ms  | kernel->present median  36.31 ms  p99  49.52 ms  | repeated refreshes 14
+ 470.4 s  dequeue->present median  26.07 ms  p99  31.25 ms  | kernel->present median  42.09 ms  p99  47.22 ms  | repeated refreshes 0
+ 480.4 s  dequeue->present median  20.14 ms  p99  33.43 ms  | kernel->present median  36.16 ms  p99  49.80 ms  | repeated refreshes 5
+ 490.4 s  dequeue->present median  26.78 ms  p99  32.05 ms  | kernel->present median  42.87 ms  p99  48.01 ms  | repeated refreshes 0
+ 500.4 s  dequeue->present median  20.42 ms  p99  33.33 ms  | kernel->present median  36.44 ms  p99  49.38 ms  | repeated refreshes 7
+ 510.4 s  dequeue->present median  27.22 ms  p99  32.85 ms  | kernel->present median  43.56 ms  p99  48.81 ms  | repeated refreshes 0
+ 520.4 s  dequeue->present median  20.56 ms  p99  33.59 ms  | kernel->present median  36.90 ms  p99  49.62 ms  | repeated refreshes 18
+ 530.4 s  dequeue->present median  27.58 ms  p99  33.32 ms  | kernel->present median  43.78 ms  p99  49.29 ms  | repeated refreshes 4
+ 540.5 s  dequeue->present median  20.32 ms  p99  33.31 ms  | kernel->present median  36.49 ms  p99  49.34 ms  | repeated refreshes 12
+ 550.5 s  dequeue->present median  28.32 ms  p99  33.38 ms  | kernel->present median  44.37 ms  p99  50.19 ms  | repeated refreshes 4
+ 560.5 s  dequeue->present median  20.91 ms  p99  33.27 ms  | kernel->present median  36.94 ms  p99  49.29 ms  | repeated refreshes 9
+ 570.5 s  dequeue->present median  28.44 ms  p99  33.50 ms  | kernel->present median  44.47 ms  p99  49.47 ms  | repeated refreshes 7
+ 580.5 s  dequeue->present median  21.68 ms  p99  33.18 ms  | kernel->present median  37.71 ms  p99  51.91 ms  | repeated refreshes 9
+ 590.5 s  dequeue->present median  28.20 ms  p99  33.54 ms  | kernel->present median  44.51 ms  p99  49.54 ms  | repeated refreshes 9
+summary: submitted 35574, presented 35571, discarded 1, not acquired 0, superseded before upload 426, presented before dequeue 0, pace timeouts 0
+summary: dequeue->present median  24.36 ms  p99  33.35 ms  (gating: median <= 16.7, p99 <= 33.3)
+summary: kernel->present  median  40.51 ms  p99  49.50 ms
+summary: get_current_texture wait median   0.03 ms  p99   0.05 ms
+summary: refresh 59.950 Hz, repeated refreshes 395
+summary: presentation flags 0x7x35571
+summary: audio granted: input 256..256 frames (5.3..5.3 ms), output 256..256 frames (5.3..5.3 ms)
+summary: audio delay 50 ms (ring 51.5 ms), ring underruns 0, xruns 0, errors 2
+summary: captured 36001 frames, 0 capture gaps
