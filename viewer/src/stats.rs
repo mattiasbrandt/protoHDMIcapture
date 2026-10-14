@@ -51,6 +51,9 @@ pub struct Stats {
     to_present: Vec<Duration>,
     kernel_to_present: Vec<Duration>,
     acquire: Vec<Duration>,
+    /// GPU time of the convert and the scale pass, where measured.
+    gpu_convert: Vec<Duration>,
+    gpu_scale: Vec<Duration>,
     submitted: u64,
     presented: u64,
     discarded: u64,
@@ -76,6 +79,8 @@ impl Stats {
             to_present: Vec::with_capacity(64 * 1024),
             kernel_to_present: Vec::with_capacity(64 * 1024),
             acquire: Vec::with_capacity(64 * 1024),
+            gpu_convert: Vec::with_capacity(64 * 1024),
+            gpu_scale: Vec::with_capacity(64 * 1024),
             submitted: 0,
             presented: 0,
             discarded: 0,
@@ -98,6 +103,13 @@ impl Stats {
     pub fn acquired(&mut self, wait: Duration) {
         if self.verbose {
             self.acquire.push(wait);
+        }
+    }
+
+    pub fn gpu(&mut self, convert: Duration, scale: Duration) {
+        if self.verbose {
+            self.gpu_convert.push(convert);
+            self.gpu_scale.push(scale);
         }
     }
 
@@ -167,6 +179,14 @@ impl Stats {
         eprintln!("summary: dequeue->present {}  (gating: median <= 16.7, p99 <= 33.3)", fmt_full(&mut self.to_present));
         eprintln!("summary: kernel->present  {}", fmt_full(&mut self.kernel_to_present));
         eprintln!("summary: get_current_texture wait {}", fmt(&mut self.acquire));
+        if !self.gpu_scale.is_empty() {
+            eprintln!(
+                "summary: GPU time ({} frames)  convert {}  | scale {}",
+                self.gpu_scale.len(),
+                fmt(&mut self.gpu_convert),
+                fmt(&mut self.gpu_scale)
+            );
+        }
         eprintln!(
             "summary: refresh {}, repeated refreshes {}",
             self.refresh.map_or("unknown".into(), |r| format!("{:.3} Hz", 1.0 / r.as_secs_f64())),

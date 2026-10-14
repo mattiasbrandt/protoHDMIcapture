@@ -5,9 +5,11 @@ mod app;
 mod audio;
 mod capture;
 mod card;
+mod gputime;
 mod picture;
 mod present;
 mod pw;
+mod scale;
 mod settings;
 mod stats;
 
@@ -92,6 +94,7 @@ fn view(args: &[String]) -> Result<(), String> {
         seconds: None,
         stats: false,
         picture: picture::Picture::DEFAULT,
+        scaling: scale::Scaling::Balanced,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -119,6 +122,7 @@ fn view(args: &[String]) -> Result<(), String> {
         s.get("GAMMA"),
         s.get("SATURATION"),
     )?;
+    opts.scaling = scale::Scaling::from_settings(s.get("SCALING"))?;
     let format = capture::Format::from_settings(s.get("RES"), s.get("FPS"), s.get("FMT"))?;
 
     let pins = card::Pins { dev: s.get("DEV"), serial: s.get("CARD_SERIAL"), port: s.get("CARD_PORT"), ignore: s.get("IGNORE_CARDS_RE") };

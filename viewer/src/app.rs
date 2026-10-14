@@ -19,8 +19,10 @@ use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::capture::{Event, Format, FrameSource, now_monotonic};
+use crate::gputime::GpuTimer;
 use crate::picture::{self, Colour, Picture};
 use crate::present::{Feedback, Outcome, Presentation, Tag};
+use crate::scale::{self, Filter, Scaling};
 use crate::stats::Stats;
 
 /// A frame callback this late counts as lost: pacing stops waiting for it.
@@ -61,6 +63,8 @@ pub struct Options {
     pub stats: bool,
     /// LEVELS and the colour values at start.
     pub picture: Picture,
+    /// SCALING at start.
+    pub scaling: Scaling,
 }
 
 enum UserEvent {
@@ -88,6 +92,15 @@ struct Gfx {
     rgb_view: wgpu::TextureView,
     scale_pipeline: wgpu::RenderPipeline,
     scale_bind_group: wgpu::BindGroup,
+    filter_pipeline: wgpu::RenderPipeline,
+    filter_bind_group: wgpu::BindGroup,
+    filter_buffer: wgpu::Buffer,
+    /// The scaler in use: None is the bilinear sampler.
+    filter: Option<Filter>,
+    /// Where the frame lands on the surface: x, y, width, height.
+    viewport: [u32; 4],
+    /// --stats, where the GPU can time its passes.
+    timer: Option<GpuTimer>,
     texture: wgpu::Texture,
     upload: Vec<u8>,
     /// None: the desktop gives no presentation feedback; frames go out
@@ -101,6 +114,7 @@ struct App {
     slot: Arc<Mutex<Slot>>,
     gfx: Option<Gfx>,
     picture: Picture,
+    scaling: Scaling,
     modifiers: ModifiersState,
     stats: Stats,
     in_flight: u32,
@@ -153,8 +167,9 @@ fn convert_shader(width: u32) -> String {
     )
 }
 
-/// Pass 2: the RGB frame scaled bilinearly into the letterboxed viewport
-/// (1:1 when the viewport is the capture's size). Presets come with #12.
+/// Pass 2: the RGB frame scaled into the letterboxed viewport, with the
+/// bilinear sampler (SCALING=fast, and 1:1 where it is the frame itself) or
+/// with a filter (scale.rs).
 const SCALE: &str = r#"
 @group(0) @binding(0) var rgb: texture_2d<f32>;
 @group(0) @binding(1) var smp: sampler;
@@ -164,7 +179,17 @@ const SCALE: &str = r#"
 }
 "#;
 
-fn pipeline(
+/// The frame at the largest size that fits the surface, centred, in whole
+/// pixels as mpv places it: x, y, width, height.
+fn letterbox(surface: (u32, u32), frame: (u32, u32)) -> [u32; 4] {
+    let (sw, sh) = (f64::from(surface.0), f64::from(surface.1));
+    let (w, h) = (f64::from(frame.0), f64::from(frame.1));
+    let scale = (sw / w).min(sh / h);
+    let (vw, vh) = ((w * scale).round().clamp(1.0, sw), (h * scale).round().clamp(1.0, sh));
+    [((sw - vw) / 2.0).round() as u32, ((sh - vh) / 2.0).round() as u32, vw as u32, vh as u32]
+}
+
+pub(crate) fn pipeline(
     device: &wgpu::Device,
     label: &str,
     fragment: &str,
@@ -203,7 +228,7 @@ fn pipeline(
     })
 }
 
-fn texture_entry(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
+pub(crate) fn texture_entry(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -212,6 +237,15 @@ fn texture_entry(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
             view_dimension: wgpu::TextureViewDimension::D2,
             multisampled: false,
         },
+        count: None,
+    }
+}
+
+pub(crate) fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
         count: None,
     }
 }
@@ -281,6 +315,7 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options) -> Result<(), String
         format,
         stats: Stats::new(start, opts.stats),
         picture: opts.picture,
+        scaling: opts.scaling,
         modifiers: ModifiersState::empty(),
         opts,
         slot: slot.clone(),
@@ -367,8 +402,25 @@ impl App {
             apply_limit_buckets: false,
         }))
         .map_err(|e| format!("graphics adapter: {e}"))?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-            .map_err(|e| format!("graphics device: {e}"))?;
+        // Pass times only when measuring, and only where the GPU has them.
+        let timestamps = wgpu::Features::TIMESTAMP_QUERY;
+        let required_features = if self.opts.stats && adapter.features().contains(timestamps) {
+            timestamps
+        } else {
+            wgpu::Features::empty()
+        };
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features, ..Default::default() }))
+                .map_err(|e| format!("graphics device: {e}"))?;
+        let timer = if self.opts.stats {
+            let t = GpuTimer::new(&device, &queue);
+            if t.is_none() {
+                eprintln!("note: the GPU cannot time its passes; no GPU times");
+            }
+            t
+        } else {
+            None
+        };
 
         let caps = surface.get_capabilities(&adapter);
         let size = window.inner_size();
@@ -423,16 +475,7 @@ impl App {
             label: Some("convert"),
             entries: &[
                 texture_entry(0, false),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
+                uniform_entry(1),
             ],
         });
         let picture_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -484,6 +527,29 @@ impl App {
         });
         let scale_pipeline = pipeline(&device, "scale", SCALE, &scale_layout, config.format);
 
+        let filter_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("filter"),
+            entries: &[
+                texture_entry(0, false),
+                uniform_entry(1),
+            ],
+        });
+        let filter_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("filter"),
+            size: scale::UNIFORM_SIZE,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let filter_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("filter"),
+            layout: &filter_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&rgb_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: filter_buffer.as_entire_binding() },
+            ],
+        });
+        let filter_pipeline = pipeline(&device, "filter", scale::WGSL, &filter_layout, config.format);
+
         Ok(Gfx {
             window,
             surface,
@@ -496,10 +562,36 @@ impl App {
             rgb_view,
             scale_pipeline,
             scale_bind_group,
+            filter_pipeline,
+            filter_bind_group,
+            filter_buffer,
+            filter: None,
+            viewport: [0, 0, 1, 1],
+            timer,
             texture,
             upload: vec![0; self.format.frame_size()],
             feedback,
         })
+    }
+
+    /// The viewport and the scaler for the surface's size and SCALING; after
+    /// a resize and on c.
+    fn relayout(&mut self) {
+        let Some(gfx) = self.gfx.as_mut() else { return };
+        let frame = (self.format.width, self.format.height);
+        gfx.viewport = letterbox((gfx.config.width, gfx.config.height), frame);
+        let [_, _, vw, vh] = gfx.viewport;
+        gfx.filter = scale::filter(self.scaling, frame, (vw, vh));
+        if let Some(f) = &gfx.filter {
+            gfx.queue.write_buffer(&gfx.filter_buffer, 0, &f.bytes(frame));
+        }
+        if self.opts.stats {
+            eprintln!(
+                "scaling: {} -> {vw}x{vh}, {}",
+                self.scaling.as_str(),
+                gfx.filter.as_ref().map_or("bilinear sampler", |f| f.name)
+            );
+        }
     }
 
     /// The picture keys (mpv's 1..8; the overlay's r and l). The next frame
@@ -524,6 +616,12 @@ impl App {
             // Overlay keys in view.sh; global until the overlay exists (#12).
             "r" => p.reset_colour(),
             "l" => p.cycle_levels(),
+            // The overlay's c, global until the overlay exists (#12).
+            "c" => {
+                self.scaling = self.scaling.next();
+                self.relayout();
+                return;
+            }
             _ => return,
         }
         if let Some(gfx) = &self.gfx {
@@ -534,6 +632,12 @@ impl App {
 
     fn drain(&mut self) -> Result<(), String> {
         let Some(gfx) = self.gfx.as_mut() else { return Ok(()) };
+        if let Some(timer) = gfx.timer.as_mut() {
+            gfx.device.poll(wgpu::PollType::Poll).map_err(|e| format!("device poll: {e}"))?;
+            if let Some([convert, scale]) = timer.take()? {
+                self.stats.gpu(convert, scale);
+            }
+        }
         let Some(feedback) = gfx.feedback.as_mut() else { return Ok(()) };
         for o in feedback.drain()? {
             match o {
@@ -596,6 +700,9 @@ impl App {
 
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = gfx.device.create_command_encoder(&Default::default());
+        if let Some(t) = gfx.timer.as_mut() {
+            t.arm();
+        }
         let target = |view| {
             [Some(wgpu::RenderPassColorAttachment {
                 view,
@@ -610,7 +717,7 @@ impl App {
                 label: Some("convert"),
                 color_attachments: &attachments,
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: gfx.timer.as_ref().and_then(|t| t.writes(0)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -624,21 +731,28 @@ impl App {
                 label: Some("scale"),
                 color_attachments: &attachments,
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: gfx.timer.as_ref().and_then(|t| t.writes(1)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            // Letterbox into whatever the surface is, at a whole-pixel origin
-            // so a same-size surface lands 1:1.
-            let (sw, sh) = (gfx.config.width as f32, gfx.config.height as f32);
-            let scale = (sw / w as f32).min(sh / h as f32);
-            let (vw, vh) = (w as f32 * scale, h as f32 * scale);
-            pass.set_viewport(((sw - vw) / 2.0).round(), ((sh - vh) / 2.0).round(), vw, vh, 0.0, 1.0);
-            pass.set_pipeline(&gfx.scale_pipeline);
-            pass.set_bind_group(0, &gfx.scale_bind_group, &[]);
+            let [x, y, vw, vh] = gfx.viewport.map(|v| v as f32);
+            pass.set_viewport(x, y, vw, vh, 0.0, 1.0);
+            if gfx.filter.is_some() {
+                pass.set_pipeline(&gfx.filter_pipeline);
+                pass.set_bind_group(0, &gfx.filter_bind_group, &[]);
+            } else {
+                pass.set_pipeline(&gfx.scale_pipeline);
+                pass.set_bind_group(0, &gfx.scale_bind_group, &[]);
+            }
             pass.draw(0..3, 0..1);
         }
+        if let Some(t) = &gfx.timer {
+            t.resolve(&mut encoder);
+        }
         gfx.queue.submit([encoder.finish()]);
+        if let Some(t) = gfx.timer.as_mut() {
+            t.submitted();
+        }
 
         // `present` commits the surface; feedback asked for first attaches
         // to that commit.
@@ -660,7 +774,10 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         match self.init(event_loop) {
-            Ok(gfx) => self.gfx = Some(gfx),
+            Ok(gfx) => {
+                self.gfx = Some(gfx);
+                self.relayout();
+            }
             Err(e) => {
                 self.error = Some(e);
                 event_loop.exit();
@@ -699,6 +816,7 @@ impl ApplicationHandler<UserEvent> for App {
                     gfx.config.width = size.width.max(1);
                     gfx.config.height = size.height.max(1);
                     gfx.surface.configure(&gfx.device, &gfx.config);
+                    self.relayout();
                 }
             }
             _ => {}
@@ -725,6 +843,14 @@ impl ApplicationHandler<UserEvent> for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn letterbox_in_whole_pixels() {
+        assert_eq!(letterbox((1920, 1200), (1920, 1080)), [0, 60, 1920, 1080], "1:1, bars above and below");
+        assert_eq!(letterbox((2560, 1440), (1920, 1080)), [0, 0, 2560, 1440]);
+        assert_eq!(letterbox((3440, 1440), (1920, 1080)), [440, 0, 2560, 1440]);
+        assert_eq!(letterbox((950, 1127), (1920, 1080)), [0, 297, 950, 534]);
+    }
 
     #[test]
     fn window_modes_from_the_settings() {
