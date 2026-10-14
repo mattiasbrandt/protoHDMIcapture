@@ -1,0 +1,14 @@
+feedback requests per wp_presentation object: {'54': 5463, '22': 2543}; using #54
+clock offset spread over the run: 0.000 ms (must be well under 1)
+frames 5425, sequence gaps 1; presents of a new frame 5178, redraws of the same frame 116, discarded 160, before any frame 2
+kernel -> presented   median  69.02  p99  81.86  min  35.97  p1  37.96  max  85.11 ms  (n=5178)
+frame done -> presented median  52.97  p99  65.73  min  19.96  p1  21.95  max  66.64 ms  (n=5178)
+      10 s  kernel -> presented median  41.67  p99  47.42 ms
+      20 s  kernel -> presented median  50.30  p99  56.10 ms
+      30 s  kernel -> presented median  59.01  p99  64.87 ms
+      40 s  kernel -> presented median  67.73  p99  73.03 ms
+      50 s  kernel -> presented median  76.45  p99  81.61 ms
+      60 s  kernel -> presented median  70.20  p99  84.64 ms
+      70 s  kernel -> presented median  77.13  p99  82.07 ms
+      80 s  kernel -> presented median  70.45  p99  81.86 ms
+      90 s  kernel -> presented median  76.44  p99  81.17 ms

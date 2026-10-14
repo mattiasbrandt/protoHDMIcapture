@@ -7,11 +7,14 @@ audio`); the run logs it cites are `poc/rust/runs/`. Measured on: RX 9070 XT
 (RADV, Mesa 26.2.2), Hyprland, wgpu 30.0.1, winit 0.30.13, cpal 0.18.2,
 PipeWire; every run with `MANGOHUD=0` (see "What broke").
 
-**Decision (the user, 2026-10-14): no-go.** The feed's median time to the
-screen (23.7 ms at best) misses the 16.7 ms budget, and added visual delay
-in games is not acceptable. Capture and audio passed. Read "Why the median
-sits at ~24 ms" before choosing the next route: the floor is the
-compositor's, so it likely binds any vsynced viewer, mpv included.
+**Decision (the user, 2026-10-14): no-go** on the budget as written: the
+feed's median time to the screen (23.7 ms at best) misses 16.7 ms, and
+added visual delay in games is not acceptable. Capture and audio passed.
+
+**Measured after the decision:** today's viewer (view.sh -> mpv) is ~29 ms
+slower than the PoC on the same screen (kernel -> presented median 69.0 vs
+40.5 ms; "Compared with today's viewer"). The decision is open again on
+that basis.
 
 ## Results against the go criteria
 
@@ -68,8 +71,43 @@ over 10 minutes. What remains is the compositor and the clocks:
 So the 16.7 ms median would need the frame shown in the refresh it arrives
 in: tearing (`Immediate` present + Hyprland `allow_tearing`) or VRR, both
 compositor-side and outside the one tuning round #5 allows. The same floor
-applies to any vsynced viewer on this compositor, including the libmpv
-route #5 names for a no-go (inferred from the model, not measured).
+applies to any vsynced viewer on this compositor. mpv, measured, does not
+reach it: it queues frames as the unpaced PoC did (next section).
+
+## Compared with today's viewer
+
+Same screen (DP-2, 59.95 Hz, fullscreen), same card, same PS5, measured
+from outside every player: `hdmipoc meta` reads the card's metadata node
+(uvcvideo copies each frame's sequence number and kernel timestamp onto
+it) while the player owns the video node, and
+`poc/rust/tools/present-latency.py` matches each present's
+`wp_presentation` feedback (from `WAYLAND_DEBUG=client`) to the newest
+frame the card had finished. Kernel timestamp -> presented, so it
+includes the ~16 ms USB transfer in every row. For mpv this is a lower
+bound: if mpv shows an older frame than the newest, it is slower still.
+Checked on the PoC: the external method gave median 42.19 / p99 49.75 /
+max 54.21 ms, exactly its own timing.
+
+| Viewer | Median | p99 | Run (`poc/rust/runs/2026-10-14-…`) |
+|---|---|---|---|
+| PoC, paced Mailbox | 40.5 | 49.5 | `fullscreen-mailbox-paced-dp2`, 10 min |
+| PoC, paced, direct scanout | 39.9 | 49.1 | `fullscreen-mailbox-paced-scanout-dp2`, 10 min |
+| view.sh (mpv `--untimed --profile=low-latency --swapchain-depth=1`) | 69.0 | 81.9 | `viewsh-fullscreen-dp2`, ~90 s |
+| bare mpv (the user's `mpv.conf`) | 74.2 | 82.2 | `mpv-bare-fullscreen-dp2`, 3 min |
+
+- **view.sh's mpv builds the same queue** the unpaced PoC did: 41.7 ms in
+  the first 10 s, then +8.6 ms every 10 s (the 60.000 vs 59.95 Hz
+  difference) until it levels off at ~70–85 ms after ~50 s.
+  `--swapchain-depth=1` does not stop it. The run is ~90 s because the
+  user quit it (keys reached the fullscreen window); the queue had
+  levelled off by then.
+- **Bare mpv** sits at ~70–78 ms from the start, and lost frames: 490
+  sequence gaps in 3 minutes (10,241 frames, ~57 fps), with no gaps in
+  the view.sh or PoC runs.
+- The PoC's lead comes from one thing: it hands the compositor a frame
+  only after the compositor's frame callback for the previous one
+  (`App::render`). That is core Wayland (`wl_surface.frame`), not a
+  Hyprland setting; on Windows the counterpart is a waitable swapchain.
 
 ## What broke, and what it taught
 
@@ -113,6 +151,8 @@ route #5 names for a no-go (inferred from the model, not measured).
   sets `target.object` but not `node.dont-fallback`, so PipeWire may link
   the default source (the microphone) instead, as `pw-loopback` did. The
   runs checked the link with `pw-link`; the PoC itself does not.
+- view.sh for a full 10 minutes (~90 s; the user quit it) and mpv's frame
+  identity (the comparison uses the lower bound above).
 - Offering the `linuxvideo` patch upstream
   (`poc/rust/vendor/linuxvideo-timestamp-sequence.patch`): not done.
 
