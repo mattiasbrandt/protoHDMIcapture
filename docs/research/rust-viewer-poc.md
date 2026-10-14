@@ -13,9 +13,12 @@ added visual delay in games is not acceptable. Capture and audio passed.
 
 **Measured after the decision:** today's viewer (view.sh -> mpv) is ~29 ms
 slower than the PoC on the same screen (kernel -> presented median 69.0 vs
-40.5 ms; "Compared with today's viewer"). The decision is open again on
-that basis, and the user keeps the PoC: other tech approaches get
-evaluated with the same timing method before any go / no-go.
+40.5 ms; "Compared with today's viewer"), and libmpv embedded in the
+Rust window matches the PoC (#7).
+
+**Decision (the user, 2026-10-14, after #6–#8): go further with the Rust
+PoC.** Measured against today's viewer rather than the fixed budget, it is
+the faster route.
 
 ## Results against the go criteria
 
@@ -159,6 +162,13 @@ PoC it too matched the PoC's own timing exactly (41.50 / 49.77 / 51.01).
   conversion pixel for pixel.
 - **MangoHud hooks every Vulkan app** here (`MANGOHUD=1` in the session
   environment), the PoC included. Measured with `MANGOHUD=0`.
+- **A missing card audio input became the microphone** (Codex review):
+  cpal sets `target.object` but not `node.dont-fallback`, and WirePlumber
+  then links the default source, as with `pw-loopback`. Fixed: the PoC
+  sets `PIPEWIRE_PROPS={ node.dont-fallback = true }`, checks the actual
+  link in PipeWire's registry, and starts the output only when every
+  linked source is the card (`pwlinks.rs`). Forced on the card: the
+  microphone fallback is refused, and a missing input fails within 2 s.
 - **No realtime audio threads.** cpal's promotion goes through rtkit, which
   is not installed; the two "errors" in every audio summary are that
   failure. The threads ran `SCHED_OTHER` and still had 0 underruns.
@@ -174,10 +184,6 @@ PoC it too matched the PoC's own timing exactly (41.50 / 49.77 / 51.01).
   the user was at the desktop. The audio sync path they call is the one
   `hdmipoc audio --sweep` exercised.
 - Windowed latency over 10 minutes (15 s runs only).
-- That cpal falls back loudly when the card audio input is missing: cpal
-  sets `target.object` but not `node.dont-fallback`, so PipeWire may link
-  the default source (the microphone) instead, as `pw-loopback` did. The
-  runs checked the link with `pw-link`; the PoC itself does not.
 - view.sh for a full 10 minutes (~90 s; the user quit it) and mpv's frame
   identity (the comparison uses the lower bound above).
 - Offering the `linuxvideo` patch upstream
