@@ -842,6 +842,7 @@ dependencies = [
  "libc",
  "libmpv2",
  "linuxvideo",
+ "pipewire",
  "pollster",
  "raw-window-handle",
  "wayland-backend",

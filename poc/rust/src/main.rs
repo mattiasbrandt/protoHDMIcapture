@@ -7,6 +7,7 @@ mod display;
 mod meta;
 mod mpvview;
 mod presentation;
+mod pwlinks;
 mod stats;
 
 use std::env;
@@ -262,7 +263,24 @@ fn run_view(args: &[String]) -> Result<(), String> {
     display::run(&node, opts)
 }
 
+/// Every PipeWire stream of this process (cpal's) waits for its named
+/// target instead of falling back to the default source: a missing card
+/// audio input must not become the microphone. libpipewire adds
+/// PIPEWIRE_PROPS to each new stream's properties; WirePlumber honours
+/// node.dont-fallback. An existing PIPEWIRE_PROPS is kept, with a warning.
+fn no_audio_fallback() {
+    if let Ok(v) = env::var("PIPEWIRE_PROPS") {
+        if !v.contains("node.dont-fallback") {
+            eprintln!("warning: PIPEWIRE_PROPS is set without node.dont-fallback; the audio may fall back to the default source");
+        }
+        return;
+    }
+    // Safety: called first thing in main, before any thread exists.
+    unsafe { env::set_var("PIPEWIRE_PROPS", "{ node.dont-fallback = true }") };
+}
+
 fn main() -> ExitCode {
+    no_audio_fallback();
     let args: Vec<String> = env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("capture") => run_capture(&args[1..]),

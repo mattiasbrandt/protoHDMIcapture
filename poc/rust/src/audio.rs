@@ -103,6 +103,32 @@ fn on_error(counters: &Arc<Counters>, side: &'static str) -> impl FnMut(cpal::Er
     }
 }
 
+/// How long the session manager gets to link the input.
+const LINK_WAIT: Duration = Duration::from_secs(2);
+
+/// Fails unless every source linked into our capture stream is the card's
+/// (`want` is its node name prefix) and at least one is, within LINK_WAIT.
+fn verify_linked(want: &str) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + LINK_WAIT;
+    loop {
+        let linked = crate::pwlinks::sources_linked_to_us()?;
+        if !linked.is_empty() {
+            if linked.iter().all(|n| n.starts_with(want)) {
+                eprintln!("audio: input linked to {}", linked.join(", "));
+                return Ok(());
+            }
+            return Err(format!("the audio input linked to {linked:?}, not the card's {want}*"));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "the card's audio input ({want}*) was not linked within {} s",
+                LINK_WAIT.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 impl Drop for Audio {
     fn drop(&mut self) {
         self.counters.closing.store(true, Ordering::Relaxed);
@@ -213,6 +239,9 @@ impl Audio {
                 .map_err(|e| format!("output stream on {out_name}: {e}"))?
         };
         input.play().map_err(|e| format!("input play: {e}"))?;
+        // The output starts only once the input is proven linked to the
+        // card, so a fallback source never reaches the speakers.
+        verify_linked(&want)?;
         output.play().map_err(|e| format!("output play: {e}"))?;
         Ok(Self { _input: input, _output: output, input: in_name, output: out_name, counters })
     }
