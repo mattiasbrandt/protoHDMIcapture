@@ -8,6 +8,8 @@ description = "Low-latency HDMI capture card viewer"
 [dependencies]
 cpal = { version = "0.18", features = ["pipewire", "realtime-dbus"] }
 ctrlc = "3.5.2"
+egui = "0.36.2"
+egui-wgpu = { version = "0.36.2", default-features = false }
 libc = "0.2.190"
 linuxvideo = "=0.3.5"
 pipewire = "0.10"

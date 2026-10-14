@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::thread;
+use std::time::Duration;
+
+use crate::overlay::Notify;
 
 const IDLE: u8 = 0;
 const MAPPING: u8 = 1;
@@ -98,13 +101,23 @@ impl Screenshot {
     }
 
     /// Once the copy is back (the device polled), hands it to a thread that
-    /// writes the file, and reports where on stderr.
-    pub fn poll(&mut self) -> Result<(), String> {
+    /// writes the file and says where, on screen and on stderr.
+    pub fn poll(&mut self, notify: &Notify) -> Result<(), String> {
         let Some(rgb) = self.take()? else { return Ok(()) };
         let (w, h) = (self.width, self.height);
-        thread::spawn(move || match save(&rgb, w, h) {
-            Ok(path) => eprintln!("saved {}", path.display()),
-            Err(e) => eprintln!("screenshot failed: {e}"),
+        let notify = notify.clone();
+        thread::spawn(move || {
+            let message = match save(&rgb, w, h) {
+                Ok(path) => {
+                    eprintln!("saved {}", path.display());
+                    (format!("Saved {}", path.display()), Duration::from_secs(3))
+                }
+                Err(e) => {
+                    eprintln!("screenshot failed: {e}");
+                    (format!("Screenshot failed: {e}"), Duration::from_secs(5))
+                }
+            };
+            notify(Some(message));
         });
         Ok(())
     }

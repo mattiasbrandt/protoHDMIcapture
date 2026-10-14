@@ -20,7 +20,6 @@ pub enum Levels {
 }
 
 impl Levels {
-    #[cfg_attr(not(test), expect(dead_code, reason = "the overlay's Levels row and w use it (#12)"))]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",

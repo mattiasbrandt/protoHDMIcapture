@@ -6,12 +6,15 @@ mod audio;
 mod capture;
 mod card;
 mod gputime;
+mod osd;
+mod overlay;
 mod picture;
 mod present;
 mod pw;
 mod scale;
 mod screenshot;
 mod settings;
+mod sources;
 mod stats;
 
 use std::env;
@@ -43,32 +46,24 @@ fn environment() {
     }
 }
 
-/// The audio loopback the settings ask for, or why there is none. A failed
-/// start is reported and the feed goes on without sound, as in view.sh.
-fn audio(s: &Settings, card: &card::Node) -> Option<audio::Audio> {
+/// The audio loopback the settings ask for: None for AUDIO=none, Err with
+/// why it could not start. A failed start is reported and the feed goes on
+/// without sound, as in view.sh.
+fn audio(s: &Settings, card: &card::Node) -> Result<Option<audio::Audio>, String> {
     match s.get("AUDIO") {
-        "none" => return None,
+        "none" => return Ok(None),
         "mpv" => eprintln!("note: AUDIO=mpv means mpv's own audio in view.sh; the Rust viewer uses its loopback"),
         _ => {}
     }
     let source = match s.get("SRC") {
         "" => {
-            let Some(usb) = card::usb_dir(&card.path) else {
-                eprintln!("warning: no audio: the card is not on USB, so its audio input cannot be found; set SRC=<name from pactl list short sources>");
-                return None;
-            };
+            let usb = card::usb_dir(&card.path).ok_or(
+                "the card is not on USB, so its audio input cannot be found; set SRC=<name from pactl list short sources>",
+            )?;
             let usb = usb.to_string_lossy();
-            let found = pw::snapshot()
-                .map_err(|e| eprintln!("warning: no audio: {e}"))
-                .ok()?
-                .card_source(usb.strip_prefix("/sys").unwrap_or(&usb));
-            match found {
-                Some(name) => name,
-                None => {
-                    eprintln!("warning: no audio: the card has no PipeWire source; set SRC=<name from pactl list short sources>");
-                    return None;
-                }
-            }
+            pw::snapshot()?
+                .card_source(usb.strip_prefix("/sys").unwrap_or(&usb))
+                .ok_or("the card has no PipeWire source; set SRC=<name from pactl list short sources>")?
         }
         src => src.to_string(),
     };
@@ -76,16 +71,9 @@ fn audio(s: &Settings, card: &card::Node) -> Option<audio::Audio> {
     // Validated: DELAY is 0..1 s, LAT_MS 1..1000.
     let delay_ms = (s.get("DELAY").parse::<f64>().unwrap_or(0.05) * 1000.0).round() as u32;
     let buffer_ms = s.get("LAT_MS").parse().unwrap_or(10);
-    match audio::Audio::start(&source, sink, delay_ms, buffer_ms) {
-        Ok(a) => {
-            eprintln!("{}", a.describe());
-            Some(a)
-        }
-        Err(e) => {
-            eprintln!("warning: no audio: {e}");
-            None
-        }
-    }
+    let a = audio::Audio::start(&source, sink, delay_ms, buffer_ms)?;
+    eprintln!("{}", a.describe());
+    Ok(Some(a))
 }
 
 fn view(args: &[String]) -> Result<(), String> {
@@ -96,7 +84,9 @@ fn view(args: &[String]) -> Result<(), String> {
         stats: false,
         picture: picture::Picture::DEFAULT,
         scaling: scale::Scaling::Balanced,
-        audio: None,
+        audio: app::AudioSetup::Off(String::new()),
+        source: String::new(),
+        settings: None,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -135,8 +125,21 @@ fn view(args: &[String]) -> Result<(), String> {
     eprintln!("video device: {} ({})", picked.node.path.display(), picked.node.card_type);
 
     let source = capture::V4l2::open(&picked.node.path, format)?;
-    let sound = audio(&s, &picked.node);
-    opts.audio = sound.as_ref().map(audio::Audio::controls);
+    let sound = match audio(&s, &picked.node) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("warning: no audio: {e}");
+            opts.audio = app::AudioSetup::Failed(e);
+            None
+        }
+    };
+    match &sound {
+        Some(a) => opts.audio = app::AudioSetup::Running(a.controls()),
+        None if s.get("AUDIO") == "none" => opts.audio = app::AudioSetup::Off("none".into()),
+        None => {}
+    }
+    opts.source = s.get("SOURCE").to_string();
+    opts.settings = Some(s);
     let stats = opts.stats;
     let result = app::run(Box::new(source), opts);
     if let (true, Some(a)) = (stats, &sound) {

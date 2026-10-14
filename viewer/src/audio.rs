@@ -18,6 +18,7 @@ use std::time::Duration;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, ErrorKind, HostId, StreamConfig};
 
+use crate::overlay::Notify;
 use crate::pw::{Level, LevelChange};
 
 pub const RATE: u32 = 48_000;
@@ -293,26 +294,35 @@ impl Audio {
     pub fn controls(&self) -> Controls {
         let (tx, rx) = mpsc::channel::<Option<LevelChange>>();
         let level: Arc<Mutex<Option<Result<Level, String>>>> = Arc::default();
-        let l = level.clone();
+        let notify: Arc<Mutex<Option<Notify>>> = Arc::default();
+        let (l, n) = (level.clone(), notify.clone());
         // PipeWire round trips off the window's thread, one change at a
         // time (lib/audio.sh serialises them with a lock); the thread ends
         // with the last sender.
         thread::spawn(move || {
             for change in rx {
                 let r = crate::pw::level(change);
-                match &r {
-                    Ok(v) if change.is_some() => {
-                        eprintln!("{}", if v.mute { "audio muted".into() } else { format!("volume {}%", v.volume) })
+                // The messages the mpv script shows for m, 9 and 0.
+                let message = match &r {
+                    Ok(v) if change.is_some() => Some((
+                        if v.mute { "Audio muted".to_string() } else { format!("Volume {}%", v.volume) },
+                        Duration::from_millis(1500),
+                    )),
+                    Ok(_) => None,
+                    Err(e) => {
+                        eprintln!("audio level: {e}");
+                        Some((format!("Audio: {e}"), Duration::from_secs(3)))
                     }
-                    Ok(_) => {}
-                    Err(e) => eprintln!("audio level: {e}"),
-                }
+                };
                 *l.lock().expect("the level's lock is never poisoned") = Some(r);
+                if let Some(notify) = n.lock().expect("the notify lock is never poisoned").as_ref() {
+                    notify(message);
+                }
             }
         });
         // What WirePlumber restored for the stream, for the panel.
         let _ = tx.send(None);
-        Controls { counters: self.counters.clone(), tx, level }
+        Controls { counters: self.counters.clone(), tx, level, notify }
     }
 
     /// The ring's fill as a delay.
@@ -340,8 +350,9 @@ pub struct Controls {
     counters: Arc<Counters>,
     tx: mpsc::Sender<Option<LevelChange>>,
     /// The last level read or set, or why it could not be.
-    #[expect(dead_code, reason = "the overlay's Audio row reads it (#12)")]
     pub level: Arc<Mutex<Option<Result<Level, String>>>>,
+    /// Told when the level changes (the window, once it runs).
+    notify: Arc<Mutex<Option<Notify>>>,
 }
 
 impl Controls {
@@ -355,6 +366,15 @@ impl Controls {
         let ms = nudged(self.delay_ms(), by_ms);
         self.counters.target_ms.store(ms, Ordering::Relaxed);
         ms
+    }
+
+    pub fn set_notify(&self, notify: Notify) {
+        *self.notify.lock().expect("the notify lock is never poisoned") = Some(notify);
+    }
+
+    /// The level as last read, if it was.
+    pub fn current_level(&self) -> Option<Result<Level, String>> {
+        self.level.lock().expect("the level's lock is never poisoned").clone()
     }
 
     /// m, 9 and 0: done on the controls' thread.

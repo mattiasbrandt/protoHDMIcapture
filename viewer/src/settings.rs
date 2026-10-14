@@ -348,7 +348,6 @@ pub fn write(config_file: &Path, pairs: &[(&str, &str)]) -> Result<(), String> {
 
 impl Settings {
     /// view.sh --save: only the settings flagged `save` (the overlay's w).
-    #[cfg_attr(not(test), expect(dead_code, reason = "the overlay's w calls it (#12)"))]
     pub fn save(&self, pairs: &[(&str, &str)]) -> Result<(), String> {
         for (k, _) in pairs {
             if !self.rows.iter().any(|r| r.name == *k && r.has_flag("save")) {

@@ -126,6 +126,9 @@ impl Stats {
     }
 
     pub fn presented(&mut self, tag: Tag, at: Duration, refresh: Duration, flags: u32) {
+        if tag.repaint {
+            return;
+        }
         self.presented += 1;
         // Samples are kept only to be printed (--stats): a viewer runs for
         // hours. The dashboard (#16) gets its own rolling numbers.

@@ -29,6 +29,9 @@ pub struct Tag {
     pub captured: Duration,
     /// Dequeued by the capture loop, `CLOCK_MONOTONIC`.
     pub dequeued: Duration,
+    /// The last frame drawn again for the overlay (no new frame came): paced
+    /// like any present, not measured.
+    pub repaint: bool,
 }
 
 /// The platform seam for presentation timing and pacing.

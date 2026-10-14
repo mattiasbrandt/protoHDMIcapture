@@ -7,25 +7,29 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
-use winit::keyboard::{Key, ModifiersState};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::audio::Controls;
 use crate::capture::{Event, Format, FrameSource, now_monotonic};
 use crate::gputime::GpuTimer;
+use crate::osd::{Osd, Scene};
+use crate::overlay::{self, Notify, Overlay, Page};
 use crate::picture::{self, Colour, Picture};
 use crate::present::{Feedback, Outcome, Presentation, Tag};
 use crate::pw::LevelChange;
 use crate::scale::{self, Filter, Scaling};
 use crate::screenshot::Screenshot;
+use crate::settings::Settings;
+use crate::sources;
 use crate::stats::Stats;
 
 /// A frame callback this late counts as lost: pacing stops waiting for it.
@@ -68,12 +72,45 @@ pub struct Options {
     pub picture: Picture,
     /// SCALING at start.
     pub scaling: Scaling,
-    /// The audio keys, when the loopback runs (AUDIO=loopback).
-    pub audio: Option<Controls>,
+    pub audio: AudioSetup,
+    /// SOURCE: whose setup tips the overlay opens on.
+    pub source: String,
+    /// The settings, for w (None: w cannot save).
+    pub settings: Option<Settings>,
+}
+
+/// The sound, as the audio keys and the panel see it.
+pub enum AudioSetup {
+    /// AUDIO is not loopback: its value.
+    Off(String),
+    /// The loopback did not start: why.
+    Failed(String),
+    Running(Controls),
+}
+
+impl WindowMode {
+    /// As the settings spell it, and as the panel names it.
+    fn names(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Fullscreen => ("fullscreen", "Fullscreen"),
+            Self::Borderless => ("borderless", "Borderless"),
+            Self::Windowed { .. } => ("windowed", "Windowed"),
+        }
+    }
+}
+
+/// The overlay's text for one frame (osd.rs draws it).
+struct SceneText {
+    page: Option<Vec<String>>,
+    key_bar: Option<String>,
+    no_signal: Option<String>,
+    message: Option<String>,
 }
 
 enum UserEvent {
     Frame,
+    /// A thread has something to show (`Notify`).
+    Notice,
     Quit,
 }
 
@@ -109,6 +146,7 @@ struct Gfx {
     viewport: [u32; 4],
     /// --stats, where the GPU can time its passes.
     timer: Option<GpuTimer>,
+    osd: Osd,
     /// The window has no area (minimised, or resized to nothing): nothing
     /// is drawn until it has.
     hidden: bool,
@@ -126,6 +164,16 @@ struct App {
     gfx: Option<Gfx>,
     picture: Picture,
     scaling: Scaling,
+    overlay: Overlay,
+    /// The saveable settings at start or at the last save: what w compares.
+    baseline: overlay::Values,
+    /// Messages from other threads, taken on `UserEvent::Notice`.
+    notices: Arc<Mutex<Vec<(String, Duration)>>>,
+    notify: Notify,
+    /// Draw again without a new frame (the overlay changed).
+    repaint: bool,
+    /// When the overlay next changes on its own.
+    deadline: Option<Instant>,
     modifiers: ModifiersState,
     stats: Stats,
     in_flight: u32,
@@ -304,7 +352,7 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options) -> Result<(), String
                             s.superseded += 1;
                         }
                         s.data.copy_from_slice(f.data);
-                        s.tag = Some(Tag { captured: f.captured, dequeued: f.dequeued });
+                        s.tag = Some(Tag { captured: f.captured, dequeued: f.dequeued, repaint: false });
                     }
                     let _ = proxy.send_event(UserEvent::Frame);
                 }
@@ -322,11 +370,30 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options) -> Result<(), String
         })
     };
 
+    let notices: Arc<Mutex<Vec<(String, Duration)>>> = Arc::default();
+    let notify: Notify = {
+        let (n, p) = (notices.clone(), event_loop.create_proxy());
+        Arc::new(move |message| {
+            if let Some(m) = message {
+                n.lock().expect("the notices' lock is never poisoned").push(m);
+            }
+            let _ = p.send_event(UserEvent::Notice);
+        })
+    };
+    if let AudioSetup::Running(c) = &opts.audio {
+        c.set_notify(notify.clone());
+    }
     let mut app = App {
         format,
         stats: Stats::new(start, opts.stats),
         picture: opts.picture,
         scaling: opts.scaling,
+        overlay: Overlay::new(&opts.source, Instant::now()),
+        baseline: overlay::Values::new(),
+        notices,
+        notify,
+        repaint: false,
+        deadline: None,
         modifiers: ModifiersState::empty(),
         opts,
         slot: slot.clone(),
@@ -335,6 +402,7 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options) -> Result<(), String
         last_submit: start,
         error: None,
     };
+    app.baseline = app.values();
     let loop_result = event_loop.run_app(&mut app);
     quit.store(true, Ordering::Relaxed);
     let captured = capture_thread.join().map_err(|_| "the capture thread panicked".to_string())?;
@@ -566,6 +634,7 @@ impl App {
         let filter_pipeline = pipeline(&device, "filter", scale::WGSL, &filter_layout, config.format);
 
         let screenshot = Screenshot::new(&device, w, h);
+        let osd = Osd::new(&device, config.format);
         Ok(Gfx {
             window,
             surface,
@@ -586,6 +655,7 @@ impl App {
             filter: None,
             viewport: [0, 0, 1, 1],
             timer,
+            osd,
             hidden: false,
             texture,
             upload: vec![0; self.format.frame_size()],
@@ -617,7 +687,7 @@ impl App {
     /// ctrl -/+ (10 ms) and alt -/+ (50 ms), m mute, 9/0 volume -5/+5.
     /// True when the key was one of them.
     fn audio_key(&mut self, key: &Key) -> bool {
-        let Some(audio) = &self.opts.audio else { return false };
+        let AudioSetup::Running(audio) = &self.opts.audio else { return false };
         let Key::Character(c) = key else { return false };
         let m = self.modifiers;
         let step = if m.control_key() && !m.alt_key() {
@@ -630,14 +700,28 @@ impl App {
         if m.super_key() {
             return false;
         }
-        match (c.as_str(), step) {
-            ("-", s) if s > 0 => eprintln!("audio sync {} ms", audio.nudge_delay(-s)),
-            ("+" | "=", s) if s > 0 => eprintln!("audio sync {} ms", audio.nudge_delay(s)),
-            ("m", 0) => audio.change_level(LevelChange::Mute),
-            ("9", 0) => audio.change_level(LevelChange::Volume(-5)),
-            ("0", 0) => audio.change_level(LevelChange::Volume(5)),
+        let synced = match (c.as_str(), step) {
+            ("-", s) if s > 0 => Some(audio.nudge_delay(-s)),
+            ("+" | "=", s) if s > 0 => Some(audio.nudge_delay(s)),
+            // Their messages come from the controls' thread (Notify).
+            ("m", 0) => {
+                audio.change_level(LevelChange::Mute);
+                None
+            }
+            ("9", 0) => {
+                audio.change_level(LevelChange::Volume(-5));
+                None
+            }
+            ("0", 0) => {
+                audio.change_level(LevelChange::Volume(5));
+                None
+            }
             _ => return false,
+        };
+        if let Some(ms) = synced {
+            self.overlay.message(format!("Audio sync {ms} ms"), Duration::from_millis(1500), Instant::now());
         }
+        self.repaint = true;
         true
     }
 
@@ -650,38 +734,177 @@ impl App {
         if self.modifiers.intersects(ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SUPER) {
             return;
         }
-        let p = &mut self.picture;
-        match c.as_str() {
-            "1" => p.adjust(Colour::Contrast, -1),
-            "2" => p.adjust(Colour::Contrast, 1),
-            "3" => p.adjust(Colour::Brightness, -1),
-            "4" => p.adjust(Colour::Brightness, 1),
-            "5" => p.adjust(Colour::Gamma, -1),
-            "6" => p.adjust(Colour::Gamma, 1),
-            "7" => p.adjust(Colour::Saturation, -1),
-            "8" => p.adjust(Colour::Saturation, 1),
-            // Overlay keys in view.sh; global until the overlay exists (#12).
-            "r" => p.reset_colour(),
-            "l" => p.cycle_levels(),
-            // The overlay's c, global until the overlay exists (#12).
-            "c" => {
-                self.scaling = self.scaling.next();
-                self.relayout();
-                return;
-            }
+        let (colour, by) = match c.as_str() {
+            "1" => (Colour::Contrast, -1),
+            "2" => (Colour::Contrast, 1),
+            "3" => (Colour::Brightness, -1),
+            "4" => (Colour::Brightness, 1),
+            "5" => (Colour::Gamma, -1),
+            "6" => (Colour::Gamma, 1),
+            "7" => (Colour::Saturation, -1),
+            "8" => (Colour::Saturation, 1),
             _ => return,
-        }
+        };
+        self.picture.adjust(colour, by);
+        let p = self.picture;
+        // mpv's message for its colour keys.
+        let (name, v) = match colour {
+            Colour::Contrast => ("Contrast", p.contrast),
+            Colour::Brightness => ("Brightness", p.brightness),
+            Colour::Gamma => ("Gamma", p.gamma),
+            Colour::Saturation => ("Saturation", p.saturation),
+        };
+        self.overlay.message(format!("{name}: {v}"), Duration::from_millis(1500), Instant::now());
+        self.picture_changed();
+    }
+
+    fn picture_changed(&mut self) {
         if let Some(gfx) = &self.gfx {
             let u = self.picture.uniform(self.format.width, self.format.height);
             gfx.queue.write_buffer(&gfx.picture_buffer, 0, &picture::bytes(&u));
         }
+        self.repaint = true;
+    }
+
+    /// Tab, and the keys that only mean something while the overlay is
+    /// open, as the mpv script binds them. True when the key was taken.
+    fn overlay_key(&mut self, key: &Key) -> bool {
+        let open = self.overlay.page.is_some();
+        match key {
+            Key::Named(NamedKey::Tab) => self.overlay.toggle(),
+            _ if !open => return false,
+            Key::Named(NamedKey::Escape) => self.overlay.page = None,
+            Key::Named(NamedKey::ArrowLeft) if self.overlay.page == Some(Page::Tips) => self.overlay.cycle_source(-1),
+            Key::Named(NamedKey::ArrowRight) if self.overlay.page == Some(Page::Tips) => self.overlay.cycle_source(1),
+            Key::Character(c) => match c.as_str() {
+                "l" => {
+                    self.picture.cycle_levels();
+                    self.picture_changed();
+                }
+                "c" => {
+                    self.scaling = self.scaling.next();
+                    self.relayout();
+                }
+                "r" => {
+                    self.picture.reset_colour();
+                    self.picture_changed();
+                }
+                "w" => self.save(),
+                "t" => self.overlay.toggle_tips(),
+                _ => return false,
+            },
+            _ => return false,
+        }
+        self.repaint = true;
+        true
+    }
+
+    /// The saveable settings' live values, spelled as the settings file
+    /// spells them (DELAY in seconds, as the mpv script writes it).
+    fn values(&self) -> overlay::Values {
+        let p = &self.picture;
+        let mut v: overlay::Values = [
+            ("WINDOW", self.opts.window.names().0.to_string()),
+            ("LEVELS", p.levels.as_str().to_string()),
+            ("SCALING", self.scaling.as_str().to_string()),
+            ("BRIGHTNESS", p.brightness.to_string()),
+            ("CONTRAST", p.contrast.to_string()),
+            ("SATURATION", p.saturation.to_string()),
+            ("GAMMA", p.gamma.to_string()),
+        ]
+        .into();
+        if let AudioSetup::Running(a) = &self.opts.audio {
+            v.insert("DELAY", format!("{:.3}", f64::from(a.delay_ms()) / 1000.0));
+        }
+        v
+    }
+
+    fn saveable(&self) -> Vec<&'static str> {
+        let Some(s) = &self.opts.settings else { return Vec::new() };
+        let now = self.values();
+        // Static names: the keys of `values`, in lib/settings.sh's order.
+        s.rows.iter().filter(|r| r.flags.split(',').any(|f| f == "save")).filter_map(|r| now.keys().find(|k| **k == r.name).copied()).collect()
+    }
+
+    /// w: what changed since the start (or the last save), as `view.sh
+    /// --save` writes it.
+    fn save(&mut self) {
+        let now = Instant::now();
+        let values = self.values();
+        let loopback = matches!(self.opts.audio, AudioSetup::Running(_));
+        let changed = overlay::changes(&self.saveable(), &self.baseline, &values, loopback);
+        if changed.is_empty() {
+            self.overlay.message("Nothing changed since the feed started", Duration::from_secs(2), now);
+            return;
+        }
+        // The wizard's test feed reads a preview config the wizard deletes.
+        let result = if std::env::var_os("PROTOHDMI_SETUP_CHILD").is_some_and(|v| !v.is_empty()) {
+            Err("this is the wizard's test feed; change settings in the wizard".to_string())
+        } else if let Some(s) = &self.opts.settings {
+            let pairs: Vec<(&str, &str)> = changed.iter().filter_map(|kv| kv.split_once('=')).collect();
+            s.save(&pairs)
+        } else {
+            Err("no settings to save to".to_string())
+        };
+        match result {
+            Ok(()) => {
+                self.baseline = values;
+                self.overlay.message(format!("Saved: {}", changed.join(" ")), Duration::from_secs(3), now);
+            }
+            Err(e) => {
+                eprintln!("save failed: {e}");
+                self.overlay.message(format!("Save failed: {e}"), Duration::from_secs(5), now);
+            }
+        }
+    }
+
+    /// The overlay's text for this frame, or None when nothing shows.
+    fn scene_text(&self, now: Instant) -> Option<SceneText> {
+        if !self.overlay.visible(now) {
+            return None;
+        }
+        let loopback = matches!(self.opts.audio, AudioSetup::Running(_));
+        let page = match self.overlay.page {
+            None => None,
+            Some(Page::Tips) => {
+                let id = &self.overlay.tips_id;
+                Some(overlay::tips_lines(id, sources::get(id).as_ref()))
+            }
+            Some(Page::Panel) => {
+                let values = self.values();
+                let changes = overlay::changes(&self.saveable(), &self.baseline, &values, loopback);
+                let id = &self.overlay.tips_id;
+                let p = &self.picture;
+                Some(overlay::panel_lines(&overlay::Panel {
+                    display: self.opts.window.names().1,
+                    levels: p.levels.as_str(),
+                    scaling: self.scaling.as_str(),
+                    colour: [p.contrast, p.brightness, p.gamma, p.saturation],
+                    audio: match &self.opts.audio {
+                        AudioSetup::Off(v) => overlay::Audio::Other(v.clone()),
+                        AudioSetup::Failed(why) => overlay::Audio::Failed(why.clone()),
+                        AudioSetup::Running(a) => {
+                            overlay::Audio::Running { level: a.current_level(), delay_ms: a.delay_ms() }
+                        }
+                    },
+                    tips_name: sources::get(id).map_or_else(|| id.clone(), |s| s.name),
+                    changes: &changes,
+                }))
+            }
+        };
+        Some(SceneText {
+            page,
+            key_bar: self.overlay.key_bar_showing(now).then(|| overlay::key_bar(loopback)),
+            no_signal: self.overlay.no_signal(now),
+            message: self.overlay.current_message(now).map(str::to_string),
+        })
     }
 
     fn drain(&mut self) -> Result<(), String> {
         let Some(gfx) = self.gfx.as_mut() else { return Ok(()) };
         // Runs the readbacks' callbacks (screenshot, pass times).
         gfx.device.poll(wgpu::PollType::Poll).map_err(|e| format!("device poll: {e}"))?;
-        if let Err(e) = gfx.screenshot.poll() {
+        if let Err(e) = gfx.screenshot.poll(&self.notify) {
             eprintln!("{e}");
         }
         if let Some(timer) = gfx.timer.as_mut()
@@ -712,16 +935,29 @@ impl App {
             self.stats.pace_timeout();
             self.in_flight = 0;
         }
-        let Some(gfx) = self.gfx.as_mut() else { return Ok(()) };
-        if gfx.hidden {
+        if self.gfx.as_ref().is_none_or(|g| g.hidden) {
             return Ok(());
         }
+        // Built before the frame is taken: it reads the app's state.
+        let scene = self.scene_text(Instant::now());
+        let Some(gfx) = self.gfx.as_mut() else { return Ok(()) };
         let tag = {
             let mut s = self.slot.lock().expect("the slot's lock is never poisoned");
-            let Some(tag) = s.tag.take() else { return Ok(()) };
-            std::mem::swap(&mut s.data, &mut gfx.upload);
-            tag
+            match s.tag.take() {
+                Some(tag) => {
+                    std::mem::swap(&mut s.data, &mut gfx.upload);
+                    tag
+                }
+                // Nothing new from the card, but the overlay changed: the
+                // last frame (black before the first) drawn again.
+                None if self.repaint => {
+                    let now = now_monotonic();
+                    Tag { captured: now, dequeued: now, repaint: true }
+                }
+                None => return Ok(()),
+            }
         };
+        let new_frame = !tag.repaint;
 
         let acquire_start = now_monotonic();
         let frame = match gfx.surface.get_current_texture() {
@@ -740,6 +976,7 @@ impl App {
         self.stats.acquired(now_monotonic() - acquire_start);
 
         let (w, h) = (self.format.width, self.format.height);
+        if new_frame {
         gfx.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &gfx.texture,
@@ -751,10 +988,13 @@ impl App {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 2), rows_per_image: Some(h) },
             wgpu::Extent3d { width: w / 2, height: h, depth_or_array_layers: 1 },
         );
+        }
 
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = gfx.device.create_command_encoder(&Default::default());
-        if let Some(t) = gfx.timer.as_mut() {
+        if let Some(t) = gfx.timer.as_mut()
+            && new_frame
+        {
             t.arm();
         }
         let target = |view| {
@@ -765,7 +1005,7 @@ impl App {
                 ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
             })]
         };
-        {
+        if new_frame {
             let attachments = target(&gfx.rgb_view);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("convert"),
@@ -801,10 +1041,22 @@ impl App {
             }
             pass.draw(0..3, 0..1);
         }
+        let mut extra = Vec::new();
+        if let Some(text) = &scene {
+            let lines = text.page.as_deref();
+            let s = Scene {
+                page: lines,
+                key_bar: text.key_bar.as_deref(),
+                no_signal: text.no_signal.as_deref(),
+                message: text.message.as_deref(),
+            };
+            let size = (gfx.config.width, gfx.config.height);
+            extra = gfx.osd.draw(&gfx.device, &gfx.queue, &mut encoder, &view, size, &s);
+        }
         if let Some(t) = &gfx.timer {
             t.resolve(&mut encoder);
         }
-        gfx.queue.submit([encoder.finish()]);
+        gfx.queue.submit(extra.into_iter().chain([encoder.finish()]));
         gfx.screenshot.submitted();
         if let Some(t) = gfx.timer.as_mut() {
             t.submitted();
@@ -819,7 +1071,10 @@ impl App {
         gfx.queue.present(frame);
         self.in_flight += 1;
         self.last_submit = now_monotonic();
-        self.stats.submitted();
+        self.repaint = false;
+        if new_frame {
+            self.stats.submitted();
+        }
         self.drain()
     }
 }
@@ -843,7 +1098,18 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         let result = match event {
-            UserEvent::Frame => self.render(),
+            UserEvent::Frame => {
+                self.overlay.signal.frame(Instant::now());
+                self.render()
+            }
+            UserEvent::Notice => {
+                let now = Instant::now();
+                for (text, for_) in self.notices.lock().expect("the notices' lock is never poisoned").drain(..) {
+                    self.overlay.message(text, for_, now);
+                }
+                self.repaint = true;
+                self.render()
+            }
             UserEvent::Quit => {
                 event_loop.exit();
                 Ok(())
@@ -860,18 +1126,27 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                let key = &event.logical_key;
                 let plain = !self.modifiers.intersects(ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SUPER);
+                let is = |k: &str| matches!(key, Key::Character(c) if c == k);
+                // Held down, these act once (the mpv script binds them
+                // without repeat); the rest repeat.
+                let once = matches!(key, Key::Named(NamedKey::Tab)) || ["f", "m", "s", "w", "t"].into_iter().any(is);
                 // q quits, as in view.sh.
-                if matches!(&event.logical_key, Key::Character(c) if c == "q") {
+                if is("q") {
                     event_loop.exit();
-                } else if plain && matches!(&event.logical_key, Key::Character(c) if c == "s") {
+                } else if (event.repeat && once) || (plain && self.overlay_key(key)) {
+                    // Ignored, or taken by the overlay.
+                } else if plain && is("s") {
                     if let Some(gfx) = self.gfx.as_mut()
                         && !gfx.screenshot.request()
                     {
                         eprintln!("screenshot: the last one is still being saved");
                     }
-                } else if !self.audio_key(&event.logical_key) {
-                    self.picture_key(&event.logical_key);
+                    // Without frames from the card, a repaint takes the shot.
+                    self.repaint = true;
+                } else if !self.audio_key(key) {
+                    self.picture_key(key);
                 }
             }
             WindowEvent::Resized(size) => {
@@ -891,11 +1166,27 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Something shown changed on its own (a message went, the banner
+        // came): draw again even without a frame.
+        if self.deadline.is_some_and(|d| d <= Instant::now()) {
+            self.repaint = true;
+        }
         // Feedback may have freed the way for a frame that had to wait.
         if let Err(e) = self.drain().and_then(|()| self.render()) {
             self.error = Some(e);
             event_loop.exit();
         }
+        // Wake for the next change, and while a repaint waits on pacing
+        // (no frame from the card may come to wake us).
+        let now = Instant::now();
+        self.deadline = self.overlay.next_change(now);
+        let wake = if self.repaint {
+            let soon = now + PACE_TIMEOUT;
+            Some(self.deadline.map_or(soon, |d| d.min(soon)))
+        } else {
+            self.deadline
+        };
+        event_loop.set_control_flow(wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
@@ -910,6 +1201,104 @@ impl ApplicationHandler<UserEvent> for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An app with no window, its settings in a temp file.
+    fn app_with(config: &str) -> (App, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("phc-app-{}-{:p}", std::process::id(), config));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config");
+        std::fs::write(&file, config).unwrap();
+        let path = file.display().to_string();
+        let s = Settings::resolve_with(&move |k| (k == "CONFIG_FILE").then(|| path.clone()));
+        let picture =
+            Picture::from_settings(s.get("LEVELS"), s.get("CONTRAST"), s.get("BRIGHTNESS"), s.get("GAMMA"), s.get("SATURATION"))
+                .unwrap();
+        let scaling = Scaling::from_settings(s.get("SCALING")).unwrap();
+        let format = Format { width: 1920, height: 1080, fps: 60.0 };
+        let mut app = App {
+            format,
+            slot: Arc::new(Mutex::new(Slot { data: Vec::new(), tag: None, superseded: 0 })),
+            gfx: None,
+            picture,
+            scaling,
+            overlay: Overlay::new("ps5", Instant::now()),
+            baseline: overlay::Values::new(),
+            notices: Arc::default(),
+            notify: Arc::new(|_| {}),
+            repaint: false,
+            deadline: None,
+            modifiers: ModifiersState::empty(),
+            stats: Stats::new(Duration::ZERO, false),
+            in_flight: 0,
+            last_submit: Duration::ZERO,
+            error: None,
+            opts: Options {
+                window: WindowMode::Fullscreen,
+                monitor: None,
+                seconds: None,
+                stats: false,
+                picture,
+                scaling,
+                audio: AudioSetup::Off("none".into()),
+                source: "ps5".into(),
+                settings: Some(s),
+            },
+        };
+        app.baseline = app.values();
+        (app, file)
+    }
+
+    fn press(app: &mut App, k: &str) -> bool {
+        let key = match k {
+            "Tab" => Key::Named(NamedKey::Tab),
+            "Esc" => Key::Named(NamedKey::Escape),
+            c => Key::Character(c.into()),
+        };
+        app.overlay_key(&key)
+    }
+
+    fn panel(app: &App) -> Vec<String> {
+        app.scene_text(Instant::now()).and_then(|t| t.page).expect("the panel is open")
+    }
+
+    #[test]
+    fn overlay_keys_and_w_save_through_the_settings() {
+        let (mut app, file) = app_with("# mine\nLEVELS=auto\nCONTRAST=2\n");
+        assert!(!press(&mut app, "l"), "l only with the overlay open");
+        assert!(press(&mut app, "Tab"));
+        let p = panel(&app);
+        assert_eq!(p[3], "l     Levels       auto");
+        assert_eq!(p[5], "1-8   Colour       contrast 2 · brightness 0 · gamma 0 · saturation 0");
+        assert_eq!(p[6], "      Audio        none");
+        assert_eq!(p[8], "t     Setup tips   PlayStation 5");
+        assert_eq!(p[9], "w     Save         nothing changed");
+
+        assert!(press(&mut app, "l"));
+        assert!(press(&mut app, "c"));
+        assert_eq!(panel(&app)[9], "w     Save         SCALING=fast LEVELS=limited", "lib/settings.sh's order");
+        assert!(press(&mut app, "w"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "# mine\nLEVELS=limited\nCONTRAST=2\nSCALING=fast\n");
+        assert_eq!(app.overlay.current_message(Instant::now()), Some("Saved: SCALING=fast LEVELS=limited"));
+        assert_eq!(panel(&app)[9], "w     Save         nothing changed", "the save is the new baseline");
+
+        assert!(press(&mut app, "r"));
+        assert_eq!(panel(&app)[9], "w     Save         CONTRAST=0");
+        assert!(press(&mut app, "t"));
+        assert_eq!(app.overlay.page, Some(Page::Tips));
+        assert!(press(&mut app, "Esc"));
+        assert_eq!(app.overlay.page, None);
+        assert!(app.repaint, "every change draws again");
+
+        // w with nothing changed says so and writes nothing.
+        let (mut quiet, quiet_file) = app_with("LEVELS=full\n");
+        press(&mut quiet, "Tab");
+        press(&mut quiet, "w");
+        assert_eq!(quiet.overlay.current_message(Instant::now()), Some("Nothing changed since the feed started"));
+        assert_eq!(std::fs::read_to_string(&quiet_file).unwrap(), "LEVELS=full\n");
+        for f in [file, quiet_file] {
+            std::fs::remove_dir_all(f.parent().unwrap()).unwrap();
+        }
+    }
 
     #[test]
     fn letterbox_in_whole_pixels() {
