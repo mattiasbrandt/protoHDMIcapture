@@ -33,6 +33,9 @@ pub struct Screenshot {
     wanted: bool,
     /// This frame's encoder holds the copy.
     copying: bool,
+    /// The thread writing the last shot, joined before the next and at
+    /// the end (a q right after s still gets its file).
+    saving: Option<thread::JoinHandle<()>>,
 }
 
 impl Screenshot {
@@ -52,13 +55,15 @@ impl Screenshot {
             state: Arc::new(AtomicU8::new(IDLE)),
             wanted: false,
             copying: false,
+            saving: None,
         }
     }
 
     /// s: the next frame is saved. False while the last one is still on
     /// its way back (the key is ignored, not queued).
     pub fn request(&mut self) -> bool {
-        if self.wanted || self.state.load(Ordering::Acquire) != IDLE {
+        let writing = self.saving.as_ref().is_some_and(|t| !t.is_finished());
+        if self.wanted || writing || self.state.load(Ordering::Acquire) != IDLE {
             return false;
         }
         self.wanted = true;
@@ -111,7 +116,7 @@ impl Screenshot {
         let Some(rgb) = self.take()? else { return Ok(()) };
         let (w, h) = (self.width, self.height);
         let notify = notify.clone();
-        thread::spawn(move || {
+        self.saving = Some(thread::spawn(move || {
             let message = match save(&rgb, w, h) {
                 Ok(path) => {
                     eprintln!("saved {}", path.display());
@@ -123,7 +128,7 @@ impl Screenshot {
                 }
             };
             notify(Some(message));
-        });
+        }));
         Ok(())
     }
 
@@ -144,6 +149,14 @@ impl Screenshot {
         self.buffer.unmap();
         self.state.store(IDLE, Ordering::Release);
         Ok(Some(rgb))
+    }
+}
+
+impl Drop for Screenshot {
+    fn drop(&mut self) {
+        if let Some(t) = self.saving.take() {
+            let _ = t.join();
+        }
     }
 }
 
@@ -182,17 +195,23 @@ fn stamp() -> String {
     )
 }
 
-/// `<stamp>.png` in `dir`, or `<stamp>-2.png` and on when that is taken
-/// (two shots in one second).
-fn free_name(dir: &Path, stamp: &str) -> PathBuf {
-    let mut path = dir.join(format!("{stamp}.png"));
-    let mut n = 2;
-    while path.exists() {
-        path = dir.join(format!("{stamp}-{n}.png"));
-        n += 1;
+/// Gives the written `tmp` its name: `<stamp>.png`, or `<stamp>-2.png`
+/// and on when taken (two shots in one second). A hard link fails rather
+/// than replace an existing file, so no check-then-rename race.
+fn claim_name(dir: &Path, stamp: &str, tmp: &Path) -> std::io::Result<PathBuf> {
+    for n in 1.. {
+        let path = dir.join(if n == 1 { format!("{stamp}.png") } else { format!("{stamp}-{n}.png") });
+        match fs::hard_link(tmp, &path) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
     }
-    path
+    unreachable!("the names run out only with u64")
 }
+
+/// Temp files of this process, one per save.
+static TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn encode(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
@@ -210,18 +229,18 @@ fn encode(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
 fn save_in(dir: &Path, stamp: &str, rgb: &[u8], width: u32, height: u32) -> Result<PathBuf, String> {
     let png = encode(rgb, width, height)?;
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let path = free_name(dir, stamp);
-    let tmp = dir.join(format!(".{stamp}.{}.tmp", std::process::id()));
+    let n = TEMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(".{stamp}.{}.{n}.tmp", std::process::id()));
     let written = (|| {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(&png)?;
         f.sync_all()?;
-        fs::rename(&tmp, &path)
+        claim_name(dir, stamp, &tmp)
     })();
-    written.map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("cannot write {}: {e}", path.display())
-    })?;
+    // The temp name goes either way; once linked, the shot has its own.
+    let removed = fs::remove_file(&tmp);
+    let path = written.map_err(|e| format!("cannot write a screenshot in {}: {e}", dir.display()))?;
+    removed.map_err(|e| format!("saved {}, but cannot remove {}: {e}", path.display(), tmp.display()))?;
     Ok(path)
 }
 
@@ -259,6 +278,24 @@ mod tests {
         assert_eq!(&buf[..info.buffer_size()], &rgb[..]);
         // Nothing but the two shots: the temp files were renamed.
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn shots_saved_at_once_in_one_second_all_land() {
+        let dir = std::env::temp_dir().join(format!("phc-shots-race-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let threads: Vec<_> = (0..8u8)
+            .map(|i| {
+                let dir = dir.clone();
+                thread::spawn(move || save_in(&dir, "2026-10-14_22-31-05", &[i; 3], 1, 1).unwrap())
+            })
+            .collect();
+        let mut paths: Vec<PathBuf> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(paths.len(), 8, "eight shots, eight names");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 8, "no temp file left");
         fs::remove_dir_all(&dir).unwrap();
     }
 
