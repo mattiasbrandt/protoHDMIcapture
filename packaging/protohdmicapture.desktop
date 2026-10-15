@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=protoHDMIcapture
+GenericName=Capture card viewer
+Comment=Low-latency HDMI capture card viewer (consoles, cameras, other PCs)
+Exec=protohdmicapture
+Icon=protohdmicapture
+Terminal=false
+StartupNotify=true
+Categories=AudioVideo;Video;Player;
+Keywords=hdmi;capture;console;game;ps5;playstation;

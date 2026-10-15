@@ -1,0 +1,75 @@
+# Maintainer: Mattias Brandt <mattias@protonic.net>
+#
+# The Rust viewer (viewer/), built from a tagged release (#14). On a new
+# tag: set pkgver, then `updpkgsums` and `makepkg --printsrcinfo > .SRCINFO`
+# (b2sums stays SKIP here because no release is tagged yet).
+
+pkgname=protohdmicapture
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Low-latency HDMI capture card viewer'
+arch=('x86_64')
+url='https://github.com/mattiasbrandt/protoHDMIcapture'
+license=('MIT OR Apache-2.0')
+# Linked: glibc, libgcc, libpipewire, alsa-lib, dbus. Loaded at run time:
+# wayland and libxkbcommon (winit), vulkan-icd-loader and a Vulkan driver
+# (wgpu).
+depends=(
+  'alsa-lib'
+  'dbus'
+  'glibc'
+  'libgcc'
+  'libpipewire'
+  'libxkbcommon'
+  'vulkan-driver'
+  'vulkan-icd-loader'
+  'wayland'
+)
+# clang: bindgen, for the PipeWire bindings.
+makedepends=('cargo' 'clang')
+# The tests compare with view.sh and lib/pick-refresh-mode.py.
+checkdepends=('python')
+optdepends=(
+  'pipewire: the card audio loopback'
+  'wireplumber: links the loopback to the card and the output'
+  'hyprland: refresh matching and window placement'
+)
+# libspa-sys compiles small C wrappers; with makepkg's GCC LTO they become
+# LTO bytecode that rust-lld cannot link (undefined spa_format_parse_libspa_rs).
+# Rust's own optimisation is unaffected.
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+b2sums=('SKIP')
+
+_src="protoHDMIcapture-$pkgver"
+
+prepare() {
+  cd "$_src/viewer"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc --print host-tuple)"
+}
+
+build() {
+  cd "$_src/viewer"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --all-features
+}
+
+check() {
+  cd "$_src/viewer"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo test --frozen --all-features
+}
+
+package() {
+  cd "$_src"
+  install -Dm0755 -t "$pkgdir/usr/bin/" viewer/target/release/protohdmicapture
+  install -Dm0644 -t "$pkgdir/usr/share/applications/" packaging/protohdmicapture.desktop
+  install -Dm0644 -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/" desktop/protohdmicapture.svg
+  install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname/" LICENSE-MIT LICENSE-APACHE
+  install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/" README.md
+  install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/capture-cards/" capture-cards/*.md
+  install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/sources/" sources/*.md
+}
