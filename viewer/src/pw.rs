@@ -159,6 +159,17 @@ impl Snapshot {
         names.first().map(|n| n.to_string())
     }
 
+    /// Every audio input's node name, sorted: what `pactl list short
+    /// sources` lists less the sinks' monitors, which are no Audio/Source
+    /// nodes in PipeWire (the wizard's audio stage).
+    pub fn audio_sources(&self) -> Vec<String> {
+        let mut names: Vec<String> =
+            self.0.nodes.values().filter(|n| n.class.starts_with("Audio/Source")).map(|n| n.name.clone()).collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// The node names linked into this process's capture streams.
     pub fn sources_linked_to_us(&self) -> Vec<String> {
         let s = &self.0;

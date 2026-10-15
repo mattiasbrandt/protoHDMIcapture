@@ -5,6 +5,7 @@
 //! outruns a 59.95 Hz display, and every frame handed over early queues).
 
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -34,6 +35,7 @@ use crate::screenshot::Screenshot;
 use crate::settings::Settings;
 use crate::sources;
 use crate::stats::Stats;
+use crate::wizard::{self, Wizard};
 
 /// A frame callback this late counts as lost: pacing stops waiting for it.
 const PACE_TIMEOUT: Duration = Duration::from_millis(100);
@@ -86,6 +88,9 @@ pub struct Options {
     pub source: String,
     /// The settings, for w (None: w cannot save).
     pub settings: Option<Settings>,
+    /// The setup wizard, when this window is its (#13): its page replaces
+    /// the overlay and it takes every key.
+    pub wizard: Option<Rc<RefCell<Wizard>>>,
 }
 
 /// The sound, as the audio keys and the panel see it.
@@ -145,6 +150,28 @@ fn audio_action(key: &Key, m: ModifiersState) -> Option<AudioAction> {
         ("0", 0) => AudioAction::Level(LevelChange::Volume(5)),
         _ => return None,
     })
+}
+
+/// A key as the wizard reads it: arrows, Enter, Esc, Backspace and plain
+/// characters; held down, only the arrows and Backspace repeat.
+fn wizard_key(key: &Key, m: ModifiersState, repeat: bool) -> Option<wizard::Key> {
+    let k = match key {
+        Key::Named(NamedKey::ArrowUp) => wizard::Key::Up,
+        Key::Named(NamedKey::ArrowDown) => wizard::Key::Down,
+        Key::Named(NamedKey::ArrowLeft) if m.shift_key() => wizard::Key::ShiftLeft,
+        Key::Named(NamedKey::ArrowRight) if m.shift_key() => wizard::Key::ShiftRight,
+        Key::Named(NamedKey::ArrowLeft) => wizard::Key::Left,
+        Key::Named(NamedKey::ArrowRight) => wizard::Key::Right,
+        Key::Named(NamedKey::Backspace) => wizard::Key::Backspace,
+        _ if repeat => return None,
+        Key::Named(NamedKey::Enter) => wizard::Key::Enter,
+        Key::Named(NamedKey::Escape) => wizard::Key::Escape,
+        Key::Character(c) if !m.intersects(ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SUPER) => {
+            wizard::Key::Char(c.to_string())
+        }
+        _ => return None,
+    };
+    Some(k)
 }
 
 /// The overlay's text for one frame (osd.rs draws it).
@@ -404,8 +431,8 @@ impl Quit {
 
 thread_local! {
     /// The event loop between runs: one per process (winit cannot build a
-    /// second on Linux), run once per window, so that a process can
-    /// open one window after another.
+    /// second on Linux), run once per window, as the wizard opens one
+    /// window for choosing the card and another for its feed (#13).
     static EVENT_LOOP: RefCell<Option<EventLoop<UserEvent>>> = const { RefCell::new(None) };
 }
 
@@ -1036,6 +1063,16 @@ impl App {
 
     /// The overlay's text for this frame, or None when nothing shows.
     fn scene_text(&self, now: Instant) -> Option<SceneText> {
+        // The wizard's page instead of the overlay: no key bar, and no
+        // banner (its signal check says what the feed does).
+        if let Some(w) = &self.opts.wizard {
+            return Some(SceneText {
+                page: Some(w.borrow().lines()),
+                key_bar: None,
+                no_signal: None,
+                message: self.overlay.current_message(now).map(str::to_string),
+            });
+        }
         if !self.overlay.visible(now) {
             return None;
         }
@@ -1165,6 +1202,10 @@ impl App {
                 wgpu::Extent3d { width: w / 2, height: h, depth_or_array_layers: 1 },
             );
             gfx.have_frame = true;
+            // The wizard's signal check looks at the picture.
+            if let Some(wiz) = &self.opts.wizard {
+                wiz.borrow_mut().picture(&gfx.upload, self.format);
+            }
         }
         // A new frame, or the last one again after a picture change.
         let convert = new_frame || (self.reconvert && gfx.have_frame);
@@ -1287,6 +1328,9 @@ impl ApplicationHandler<UserEvent> for App {
         let result = match event {
             UserEvent::Frame => {
                 self.overlay.signal.frame(Instant::now());
+                if let Some(w) = &self.opts.wizard {
+                    w.borrow_mut().frame(Instant::now());
+                }
                 self.render()
             }
             UserEvent::Notice => {
@@ -1312,6 +1356,18 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && self.opts.wizard.is_some() => {
+                // Every key is the wizard's, q included (it may be typed).
+                if let Some(k) = wizard_key(&event.logical_key, self.modifiers, event.repeat)
+                    && let Some(w) = &self.opts.wizard
+                {
+                    w.borrow_mut().key(&k);
+                    if w.borrow().wants_exit() {
+                        event_loop.exit();
+                    }
+                    self.repaint = true;
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let key = &event.logical_key;
                 let plain = !self.modifiers.intersects(ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SUPER);
@@ -1365,6 +1421,11 @@ impl ApplicationHandler<UserEvent> for App {
         if self.deadline.is_some_and(|d| d <= Instant::now()) {
             self.repaint = true;
         }
+        if let Some(w) = &self.opts.wizard
+            && w.borrow_mut().tick(Instant::now())
+        {
+            self.repaint = true;
+        }
         // Feedback may have freed the way for a frame that had to wait.
         if let Err(e) = self.drain().and_then(|()| self.render()) {
             self.error = Some(e);
@@ -1375,6 +1436,9 @@ impl ApplicationHandler<UserEvent> for App {
         // window has no area, which nothing is drawn into.
         let now = Instant::now();
         self.deadline = self.overlay.next_change(now);
+        if let Some(w) = self.opts.wizard.as_ref().and_then(|w| w.borrow().next_change(now)) {
+            self.deadline = Some(self.deadline.map_or(w, |d| d.min(w)));
+        }
         let hidden = self.gfx.as_ref().is_some_and(|g| g.hidden);
         // A card frame held back by pacing: if the card stops now, nothing
         // else would wake the loop for it.
@@ -1456,6 +1520,7 @@ mod tests {
                 desktop: Desktop::Generic,
                 source: "ps5".into(),
                 settings: Some(s),
+                wizard: None,
             },
         };
         app.baseline = app.values();

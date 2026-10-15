@@ -15,11 +15,14 @@ pub struct Profile {
     /// What wakes the source, if the profile says.
     pub wake: Option<String>,
     pub tips: Vec<String>,
+    /// The `Suggest:` line's KEY=value words (the wizard's mode stage).
+    pub suggest: Vec<String>,
 }
 
 /// The first line is the name; the rest until the first `## ` heading.
 fn parse(id: &str, text: &str) -> Profile {
-    let mut p = Profile { id: id.into(), name: id.into(), status: String::new(), wake: None, tips: Vec::new() };
+    let mut p = Profile { id: id.into(), name: id.into(), status: String::new(), wake: None, tips: Vec::new(), suggest: Vec::new() };
+    let mut suggested = false;
     for (i, line) in text.lines().enumerate() {
         if i == 0 {
             p.name = line.strip_prefix("# ").unwrap_or(line).to_string();
@@ -27,6 +30,10 @@ fn parse(id: &str, text: &str) -> Profile {
             break;
         } else if let Some(s) = line.strip_prefix("Status: ") {
             p.status = s.to_string();
+        } else if let Some(v) = line.strip_prefix("Suggest:").filter(|_| !suggested) {
+            // `source_suggest`: the first Suggest line, split into words.
+            suggested = true;
+            p.suggest = v.split_whitespace().map(str::to_string).collect();
         } else if let Some(w) = line.strip_prefix("Wake: ") {
             p.wake = Some(w.to_string());
         } else if let Some(t) = line.strip_prefix("- ") {
@@ -61,6 +68,8 @@ mod tests {
         assert!(ps5.tips.iter().any(|t| t.starts_with("HDCP: Off")));
         assert!(!ps5.tips.iter().any(|t| t.contains("playstation.com")), "the references are not tips");
         assert_eq!(get("nope"), None);
+        assert_eq!(ps5.suggest, ["RES=1920x1080", "FPS=60"]);
+        assert!(get("generic").unwrap().suggest.is_empty());
     }
 
     #[test]

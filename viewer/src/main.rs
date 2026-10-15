@@ -4,6 +4,7 @@
 mod app;
 mod audio;
 mod capture;
+mod capture_cards;
 mod card;
 mod dashboard;
 mod desktop;
@@ -20,13 +21,14 @@ mod session;
 mod settings;
 mod sources;
 mod stats;
+mod wizard;
 
 use std::env;
 use std::process::ExitCode;
 
 use settings::Settings;
 
-const USAGE: &str = "usage: protohdmicapture [--settings | --dashboard]
+const USAGE: &str = "usage: protohdmicapture [--setup | --settings | --dashboard]
        measurements: [--seconds N] [--monitor NAME] [--stats]";
 
 /// Called first thing in main, before any thread exists.
@@ -80,9 +82,108 @@ fn audio(s: &Settings, card: &card::Node) -> Result<Option<audio::Audio>, String
     Ok(Some(a))
 }
 
-fn view(args: &[String]) -> Result<(), String> {
-    // First: a signal from here on ends in the normal teardown.
-    let quit = app::Quit::install()?;
+/// The setup wizard (#13), in the viewer window: `--setup`, or a first run.
+/// Holds setup.lock as lib/setup.sh does (one wizard at a time) and leaves
+/// setup.done. True when the feed should start: saved and asked for, or
+/// the first run skipped.
+fn setup(first_run: bool, quit: &app::Quit) -> Result<bool, String> {
+    use std::cell::RefCell;
+    use std::os::fd::AsRawFd;
+    use std::rc::Rc;
+    use wizard::{Outcome, Phase, Wizard};
+
+    let dir = session::run_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let lock = std::fs::File::create(dir.join("setup.lock")).map_err(|e| format!("setup.lock: {e}"))?;
+    // Safety: flock on an fd this File owns.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err("another setup wizard is already running".into());
+    }
+    std::fs::write(dir.join("setup.pid"), format!("{}\n", std::process::id())).map_err(|e| format!("setup.pid: {e}"))?;
+
+    let s = Settings::resolve();
+    let desktop = desktop::detect()?;
+    let sys = wizard::Linux {
+        sink: s.get("SINK").to_string(),
+        buffer_ms: s.get("LAT_MS").parse().unwrap_or(10),
+        refresh: matches!(desktop, desktop::Desktop::Hyprland(_)),
+    };
+    let wiz = Rc::new(RefCell::new(Wizard::new(Box::new(sys), s.config_file.clone(), first_run, &|k| env::var_os(k).is_some())));
+    // The feed in the wizard's window: the saved picture settings, or the
+    // defaults where they are not valid; windowed, the display left alone.
+    let picture = picture::Picture::from_settings(s.get("LEVELS"), s.get("CONTRAST"), s.get("BRIGHTNESS"), s.get("GAMMA"), s.get("SATURATION"))
+        .unwrap_or(picture::Picture::DEFAULT);
+    let opts = || app::Options {
+        window: app::WindowMode::Windowed { width: 1280, height: 720 },
+        monitor: None,
+        seconds: None,
+        stats: false,
+        picture,
+        scaling: scale::Scaling::from_settings(s.get("SCALING")).unwrap_or(scale::Scaling::Balanced),
+        audio: app::AudioSetup::Off("the wizard's".into()),
+        window_size: (1280, 720),
+        desktop: desktop::Desktop::Generic,
+        source: String::new(),
+        settings: None,
+        wizard: Some(wiz.clone()),
+    };
+
+    let result = (|| -> Result<(), String> {
+        loop {
+            if quit.requested() {
+                wiz.borrow_mut().abandon();
+            }
+            if wiz.borrow().outcome().is_some() {
+                return Ok(());
+            }
+            let phase = wiz.borrow().phase();
+            wiz.borrow_mut().running = phase;
+            match phase {
+                Phase::Choose => app::run(Box::new(wizard::Idle), opts(), quit.clone())?,
+                Phase::Feed => {
+                    // One video window at a time, with view.sh too.
+                    let mut session = match session::Session::start(&dir, desktop.clone())? {
+                        Ok(s) => s,
+                        Err(running) => {
+                            let pid = running.pid.map_or(String::new(), |p| format!(" (pid {p})"));
+                            wiz.borrow_mut().feed_failed(format!("a feed is running{pid}. Close it first."));
+                            continue;
+                        }
+                    };
+                    let Some((node, format)) = wiz.borrow().feed() else {
+                        return Err("the wizard reached the feed without a card".into());
+                    };
+                    let source = match format.and_then(|f| capture::V4l2::open(&node.path, f)) {
+                        Ok(source) => source,
+                        Err(e) => {
+                            let e = if e.contains("busy") { format!("the card is busy: a feed is probably running. Close it first. ({e})") } else { e };
+                            wiz.borrow_mut().feed_failed(e);
+                            continue;
+                        }
+                    };
+                    session.announce()?;
+                    // The card gone mid-check is the wizard's to say, not the end.
+                    if let Err(e) = app::run(Box::new(source), opts(), quit.clone()) {
+                        wiz.borrow_mut().feed_failed(e);
+                        continue;
+                    }
+                }
+            }
+            // The window closed with the stage still wanting it: the window's
+            // close button, or a signal.
+            if !wiz.borrow().wants_exit() {
+                wiz.borrow_mut().abandon();
+            }
+        }
+    })();
+    let saved = wiz.borrow().saved();
+    let _ = std::fs::write(dir.join("setup.done"), if saved { "saved\n" } else { "cancelled\n" });
+    let _ = std::fs::remove_file(dir.join("setup.pid"));
+    result?;
+    Ok(wiz.borrow().outcome() == Some(Outcome::Play) && !quit.requested())
+}
+
+fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
     let mut opts = app::Options {
         window: app::WindowMode::Fullscreen,
         monitor: None,
@@ -95,6 +196,7 @@ fn view(args: &[String]) -> Result<(), String> {
         desktop: desktop::Desktop::Generic,
         source: String::new(),
         settings: None,
+        wizard: None,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -104,6 +206,18 @@ fn view(args: &[String]) -> Result<(), String> {
             "--stats" => opts.stats = true,
             _ => return Err(USAGE.into()),
         }
+    }
+
+    // First run: no settings file, so the wizard, as view.sh offers it
+    // (not for a measurement run, nor for the wizard's own children).
+    let unset = |k: &str| env::var_os(k).is_none_or(|v| v.is_empty());
+    if args.is_empty()
+        && !settings::config_file(&|k| env::var(k).ok()).exists()
+        && unset("PROTOHDMI_SETUP_CHILD")
+        && unset("NO_SETUP")
+        && !setup(true, &quit)?
+    {
+        return Ok(());
     }
 
     let s = Settings::resolve();
@@ -256,7 +370,24 @@ fn main() -> ExitCode {
             }
         };
     }
-    match view(&args) {
+    // First: a signal from here on ends in the normal teardown.
+    let quit = match app::Quit::install() {
+        Ok(q) => q,
+        Err(e) => {
+            eprintln!("protohdmicapture: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = if args.first().map(String::as_str) == Some("--setup") {
+        if args.len() > 1 {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+        setup(false, &quit).and_then(|play| if play { view(&[], quit) } else { Ok(()) })
+    } else {
+        view(&args, quit)
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("protohdmicapture: {e}");

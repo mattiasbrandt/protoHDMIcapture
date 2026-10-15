@@ -257,7 +257,7 @@ pub fn panel_lines(p: &Panel) -> Vec<String> {
 
 /// Words onto lines of at most `width` characters (a longer word stands
 /// alone).
-fn wrap(text: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {

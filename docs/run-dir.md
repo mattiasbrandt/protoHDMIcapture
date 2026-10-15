@@ -6,7 +6,7 @@ contract; change a writer or a reader, update the row.
 
 | File | Written by | Read by | Meaning |
 |---|---|---|---|
-| `video.lock` | `view.sh` (flock, held while a player runs); the Rust viewer (held for its whole run, `viewer/src/session.rs`) | `view.sh`, the Rust viewer, setup sync stage (probe only) | one video window at a time, across both viewers |
+| `video.lock` | `view.sh` (flock, held while a player runs); the Rust viewer (held for its whole run, `viewer/src/session.rs`; its wizard only while its window shows the feed) | `view.sh`, the Rust viewer, setup sync stage (probe only) | one video window at a time, across both viewers |
 | `video.pid` | `view.sh` `run_player`; removed in its EXIT trap (left by a killed session); the Rust viewer (its own PID, removed at its end) | `view.sh` and the Rust viewer (a second launch focuses it; with the video lock held, both stop the orphan player it names), `--place-window`, dashboard, setup sync readiness | PID of the **player** (mpv/gst/ffplay, or the Rust viewer, which is its own player), not of `view.sh` |
 | `audio.lock` | `view.sh` (flock, held while pw-loopback runs) | `view.sh`, setup sync stage (probe only) | one audio loopback at a time |
 | `audio.pid` / `audio.env` | `view.sh` `start_audio`: `audio.pid` at start, `audio.env` only once the loopback is linked (both removed by `stop_audio`) | dashboard, `debug_after_start`, mpv script (`audio.env`: confirms a sync change) | loopback PID; `DELAY`, `LAT_MS`, `SRC` |
@@ -22,9 +22,9 @@ contract; change a writer or a reader, update the row.
 | `dashboard.sock` | the Rust viewer (`viewer/src/dashboard.rs`), bound with the video lock held, replacing a killed viewer's; removed at its end if still its own | `protohdmicapture --dashboard` | Unix socket: one JSON line a second with the viewer's live numbers; a dashboard that stops reading is dropped, never waited for. view.sh's dashboard reads the files above instead |
 | `debug.log` | `view.sh` with `DEBUG≠off` (tee) | dashboard | the session's full output |
 | `mpv.sock` | mpv, when `DEBUG=window` and `IPC=""` | dashboard | private IPC socket for that session |
-| `setup.lock` | `lib/setup.sh` (flock, held while it runs) | `launch.sh` (blocks on it) | one wizard; "wizard ended" however it ended |
-| `setup.pid` | `lib/setup.sh` | `launch.sh` | the wizard started |
-| `setup.done` | `lib/setup.sh` EXIT trap | `launch.sh`, `view.sh` first run | `saved` or `cancelled` |
+| `setup.lock` | `lib/setup.sh` (flock, held while it runs); the Rust viewer's wizard likewise (`--setup` or a first run, `viewer/src/main.rs`) | `launch.sh` (blocks on it) | one wizard; "wizard ended" however it ended |
+| `setup.pid` | `lib/setup.sh`; the Rust viewer's wizard (its own PID) | `launch.sh` | the wizard started |
+| `setup.done` | `lib/setup.sh` EXIT trap; the Rust viewer's wizard when it ends | `launch.sh`, `view.sh` first run | `saved` or `cancelled` |
 | `setup-preview.config` | `lib/setup.sh` `run_child` | children of the wizard (`CONFIG_FILE`) | the config as it would be saved |
 | `tune.out` | `view.sh --tune` (`TUNE_OUT`) on q | setup sync stage | the kept `DELAY` |
 | `setup-video.log`, `setup-test.log` | wizard children | setup (shown on failure) | child output |

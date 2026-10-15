@@ -280,12 +280,25 @@ fn file_lines(text: &str) -> Vec<&str> {
 /// a temp file (mode 600, as mktemp makes it) and renamed, so a crash never
 /// leaves half a file.
 pub fn write(config_file: &Path, pairs: &[(&str, &str)]) -> Result<(), String> {
-    let rows = rows();
     for (k, v) in pairs {
         if v.contains('\'') {
             return Err(format!("{k}: values cannot contain a single quote"));
         }
     }
+    rewrite(config_file, pairs, false)
+}
+
+/// `config_unset`: removes the keys (every line of each) in the same one
+/// pass as `write`. With no file yet, it writes one holding only the
+/// header, as `config_unset` does.
+pub fn unset(config_file: &Path, keys: &[&str]) -> Result<(), String> {
+    let pairs: Vec<(&str, &str)> = keys.iter().map(|k| (*k, "")).collect();
+    rewrite(config_file, &pairs, true)
+}
+
+/// `_config_rewrite`: `set` (write) or `unset` mode.
+fn rewrite(config_file: &Path, pairs: &[(&str, &str)], unset: bool) -> Result<(), String> {
+    let rows = rows();
     let want = |k: &str| pairs.iter().rev().find(|(n, _)| *n == k).map(|(_, v)| *v);
     let dir = config_file.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
@@ -307,7 +320,9 @@ pub fn write(config_file: &Path, pairs: &[(&str, &str)]) -> Result<(), String> {
                 {
                     if !done.contains(&k) {
                         done.push(k);
-                        let _ = writeln!(out, "{k}={}", quote(v));
+                        if !unset {
+                            let _ = writeln!(out, "{k}={}", quote(v));
+                        }
                     }
                     continue;
                 }
@@ -320,10 +335,12 @@ pub fn write(config_file: &Path, pairs: &[(&str, &str)]) -> Result<(), String> {
             out.push_str("# One KEY=value per line; see config.example in the repo.\n");
         }
     }
-    for (k, _) in pairs {
-        if !done.contains(k) {
-            done.push(k);
-            let _ = writeln!(out, "{k}={}", quote(want(k).unwrap_or_default()));
+    if !unset {
+        for (k, _) in pairs {
+            if !done.contains(k) {
+                done.push(k);
+                let _ = writeln!(out, "{k}={}", quote(want(k).unwrap_or_default()));
+            }
         }
     }
 
@@ -344,6 +361,24 @@ pub fn write(config_file: &Path, pairs: &[(&str, &str)]) -> Result<(), String> {
         let _ = fs::remove_file(&tmp);
         format!("cannot replace {}: {e}", config_file.display())
     })
+}
+
+/// `config_read`: the file's own values (the last line of a key wins),
+/// without the environment or the defaults, so a caller can tell "set in
+/// the file" from "a default". No file: none.
+pub fn read_file(config_file: &Path) -> HashMap<String, String> {
+    let rows = rows();
+    let text = fs::read_to_string(config_file).unwrap_or_default();
+    file_lines(&text)
+        .into_iter()
+        .filter_map(|l| config_line(l, &rows).ok().flatten())
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+/// The names carrying `flag`, in lib/settings.sh's order (`settings_with`).
+pub fn with_flag(flag: &str) -> Vec<String> {
+    rows().into_iter().filter(|r| r.has_flag(flag)).map(|r| r.name).collect()
 }
 
 impl Settings {
@@ -506,6 +541,78 @@ mod tests {
             let r = rust_write(*start, args);
             assert_eq!(r, b, "start {start:?}, args {args:?}");
         }
+    }
+
+    /// A config file after `script` ran on it in bash with lib/card.sh
+    /// sourced (bash) or after `rust` ran (Rust), from the same start.
+    fn both(start: Option<&str>, script: &str, rust: &dyn Fn(&Path) -> Result<(), String>) -> (Option<String>, Option<String>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("phc-both-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        let run = |which: &str| {
+            let d = dir.join(which);
+            fs::create_dir_all(&d).unwrap();
+            let f = d.join("config");
+            if let Some(t) = start {
+                fs::write(&f, t).unwrap();
+            }
+            if which == "bash" {
+                let ok = std::process::Command::new("bash")
+                    .arg("-c")
+                    .arg(format!(r#". "$1/lib/card.sh"; {script}"#))
+                    .arg("bash")
+                    .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/.."))
+                    .env("CONFIG_FILE", &f)
+                    .status()
+                    .unwrap()
+                    .success();
+                assert!(ok, "bash: {script}");
+            } else {
+                rust(&f).unwrap();
+            }
+            fs::read_to_string(&f).ok()
+        };
+        let out = (run("bash"), run("rust"));
+        fs::remove_dir_all(&dir).unwrap();
+        out
+    }
+
+    #[test]
+    fn unsets_byte_for_byte_like_config_unset() {
+        let start = "# my settings\n  DELAY=0.05\nNOPE=1\n\nFULLSCREEN=yes\nLEVELS=full\nFULLSCREEN=no\r\nSOURCE='ps5'";
+        let cases: &[(Option<&str>, &[&str])] = &[
+            (None, &["DEV"]),
+            (Some(start), &["FULLSCREEN", "SOURCE"]),
+            (Some(start), &[]),
+            (Some(""), &["GAMMA"]),
+        ];
+        for (start, keys) in cases {
+            let (b, r) = both(*start, &format!("config_unset {}", keys.join(" ")), &|f| unset(f, keys));
+            assert_eq!(r, b, "start {start:?}, keys {keys:?}");
+        }
+    }
+
+    #[test]
+    fn read_file_and_with_flag_as_lib_settings_sh() {
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(r#". "$1/lib/settings.sh"; settings_with wizard"#)
+            .arg("bash")
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/.."))
+            .output()
+            .unwrap();
+        let bash: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(str::to_string).collect();
+        assert_eq!(with_flag("wizard"), bash);
+        let dir = std::env::temp_dir().join(format!("phc-read-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("config");
+        fs::write(&f, "# c\nDELAY=0.05\nNOPE=1\nDELAY='0.07'\nSOURCE=\n").unwrap();
+        let v = read_file(&f);
+        assert_eq!(v.get("DELAY").map(String::as_str), Some("0.07"), "the last line wins");
+        assert_eq!(v.get("SOURCE").map(String::as_str), Some(""));
+        assert_eq!(v.len(), 2);
+        assert!(read_file(&dir.join("none")).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
