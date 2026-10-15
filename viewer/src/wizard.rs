@@ -1257,7 +1257,8 @@ impl Wizard {
         let ask = choose("Scaling", &self.cur("SCALING"), items);
         let body = wrap(
             "How the picture is scaled to the window. view.sh's mpv reads it, and this viewer too (where \
-             \"Your mpv.conf\" reads as balanced).",
+             \"Your mpv.conf\" reads as balanced). The feed behind this page keeps the saved scaling; \
+             the choice shows from the next start.",
             WIDTH,
         );
         self.show(Step::PlayerScaling, body, ask);
