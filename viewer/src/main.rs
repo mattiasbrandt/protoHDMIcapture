@@ -272,6 +272,8 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
     eprintln!("video device: {} ({})", picked.node.path.display(), picked.node.card_type);
 
     let source = capture::V4l2::open(&picked.node.path, format)?;
+    // After --setup the wizard's feed windows ran in this process first.
+    dashboard::live().reset();
     let sound = match audio(&s, &picked.node) {
         Ok(a) => a,
         Err(e) => {

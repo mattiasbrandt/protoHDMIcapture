@@ -67,7 +67,8 @@ pub enum AudioLive {
 
 /// The viewer's numbers, written where they happen.
 pub struct Live {
-    started: Instant,
+    /// The feed's start: set again by `reset`.
+    started: Mutex<Instant>,
     frames: AtomicU64,
     gaps: AtomicU64,
     lost: AtomicU64,
@@ -92,7 +93,7 @@ pub fn live() -> &'static Live {
 impl Live {
     fn new() -> Self {
         Self {
-            started: Instant::now(),
+            started: Mutex::new(Instant::now()),
             frames: AtomicU64::new(0),
             gaps: AtomicU64::new(0),
             lost: AtomicU64::new(0),
@@ -131,6 +132,24 @@ impl Live {
         self.samples.lock().expect("the samples' lock is never poisoned").push((to_present, kernel_to_present));
     }
 
+    /// Back to a feed that has not started: the setup wizard's feed
+    /// windows (#13) run in the same process before the viewer's own, and
+    /// their frames, gaps and signal state are not the viewer's. The audio
+    /// is left to `set_audio`.
+    pub fn reset(&self) {
+        *self.started.lock().expect("the start's lock is never poisoned") = Instant::now();
+        for n in [&self.frames, &self.gaps, &self.lost, &self.presented, &self.repeated, &self.refresh_ns] {
+            n.store(0, Ordering::Relaxed);
+        }
+        self.no_signal.store(false, Ordering::Relaxed);
+        self.samples.lock().expect("the samples' lock is never poisoned").clear();
+        self.events.lock().expect("the events' lock is never poisoned").clear();
+    }
+
+    fn up(&self) -> Duration {
+        self.started.lock().expect("the start's lock is never poisoned").elapsed()
+    }
+
     pub fn set_audio(&self, audio: AudioLive) {
         *self.audio.lock().expect("the audio's lock is never poisoned") = audio;
     }
@@ -140,7 +159,7 @@ impl Live {
         if e.len() == EVENTS {
             e.pop_front();
         }
-        e.push_back(format!("{:7.1} s  {text}", self.started.elapsed().as_secs_f64()));
+        e.push_back(format!("{:7.1} s  {text}", self.up().as_secs_f64()));
     }
 }
 
@@ -202,7 +221,7 @@ impl Rolling {
         let snap = json!({
             "v": VERSION,
             "pid": std::process::id(),
-            "up_s": live.started.elapsed().as_secs_f64(),
+            "up_s": live.up().as_secs_f64(),
             "capture_fps": (frames - self.frames) as f64 / dt,
             "presented_fps": (presented - self.presented) as f64 / dt,
             "frames": frames,
@@ -729,6 +748,23 @@ mod tests {
 
     fn read_line(r: &mut Lines<transport::Stream>) -> Value {
         serde_json::from_slice(&r.next().unwrap().expect("a line")).unwrap()
+    }
+
+    #[test]
+    fn a_reset_forgets_an_earlier_feed() {
+        // The wizard's feed ended with no signal; the viewer's starts clean.
+        let live = leaked();
+        live.frame();
+        live.gap(1, 3, 1);
+        live.signal(false);
+        live.presented(Duration::from_millis(10), Duration::from_millis(30), 1, Some(Duration::from_micros(16_683)));
+        live.reset();
+        assert_eq!(
+            [&live.frames, &live.gaps, &live.lost, &live.presented, &live.repeated, &live.refresh_ns].map(|n| n.load(Ordering::Relaxed)),
+            [0; 6]
+        );
+        assert!(!live.no_signal.load(Ordering::Relaxed));
+        assert!(live.samples.lock().unwrap().is_empty() && live.events.lock().unwrap().is_empty());
     }
 
     #[test]
