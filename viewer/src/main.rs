@@ -99,27 +99,43 @@ fn setup(first_run: bool, quit: &app::Quit) -> Result<bool, String> {
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err("another setup wizard is already running".into());
     }
-    std::fs::write(dir.join("setup.pid"), format!("{}\n", std::process::id())).map_err(|e| format!("setup.pid: {e}"))?;
 
     let s = Settings::resolve();
     let desktop = desktop::detect()?;
+    // The wizard's feed and loopback start from the saved values; one that
+    // is not valid falls back to its default, and says so (view.sh's run
+    // refuses it; the wizard is where it gets fixed).
+    let fallback = |name: &str, default: &str| eprintln!("warning: {name}={} is not valid; the wizard uses {default}", s.get(name));
+    let buffer_ms = s.get("LAT_MS").parse().unwrap_or_else(|_| {
+        fallback("LAT_MS", "10");
+        10
+    });
     let sys = wizard::Linux {
         sink: s.get("SINK").to_string(),
-        buffer_ms: s.get("LAT_MS").parse().unwrap_or(10),
+        buffer_ms,
         refresh: matches!(desktop, desktop::Desktop::Hyprland(_)),
     };
-    let wiz = Rc::new(RefCell::new(Wizard::new(Box::new(sys), s.config_file.clone(), first_run, &|k| env::var_os(k).is_some())));
+    let wiz = Rc::new(RefCell::new(Wizard::new(Box::new(sys), s.config_file.clone(), first_run, &|k| env::var_os(k).is_some())?));
+    // After every early return above, so none leaves it behind.
+    std::fs::write(dir.join("setup.pid"), format!("{}\n", std::process::id())).map_err(|e| format!("setup.pid: {e}"))?;
     // The feed in the wizard's window: the saved picture settings, or the
     // defaults where they are not valid; windowed, the display left alone.
     let picture = picture::Picture::from_settings(s.get("LEVELS"), s.get("CONTRAST"), s.get("BRIGHTNESS"), s.get("GAMMA"), s.get("SATURATION"))
-        .unwrap_or(picture::Picture::DEFAULT);
+        .unwrap_or_else(|e| {
+            eprintln!("warning: {e}; the wizard's feed uses the default picture");
+            picture::Picture::DEFAULT
+        });
+    let scaling = scale::Scaling::from_settings(s.get("SCALING")).unwrap_or_else(|_| {
+        fallback("SCALING", "balanced");
+        scale::Scaling::Balanced
+    });
     let opts = || app::Options {
         window: app::WindowMode::Windowed { width: 1280, height: 720 },
         monitor: None,
         seconds: None,
         stats: false,
         picture,
-        scaling: scale::Scaling::from_settings(s.get("SCALING")).unwrap_or(scale::Scaling::Balanced),
+        scaling,
         audio: app::AudioSetup::Off("the wizard's".into()),
         window_size: (1280, 720),
         desktop: desktop::Desktop::Generic,
@@ -177,7 +193,10 @@ fn setup(first_run: bool, quit: &app::Quit) -> Result<bool, String> {
         }
     })();
     let saved = wiz.borrow().saved();
-    let _ = std::fs::write(dir.join("setup.done"), if saved { "saved\n" } else { "cancelled\n" });
+    // launch.sh reads a missing setup.done as "not saved".
+    if let Err(e) = std::fs::write(dir.join("setup.done"), if saved { "saved\n" } else { "cancelled\n" }) {
+        eprintln!("warning: setup.done: {e}; launch.sh will read the wizard as cancelled");
+    }
     let _ = std::fs::remove_file(dir.join("setup.pid"));
     result?;
     Ok(wiz.borrow().outcome() == Some(Outcome::Play) && !quit.requested())

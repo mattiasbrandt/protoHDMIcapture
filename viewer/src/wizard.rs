@@ -319,6 +319,8 @@ pub struct Wizard {
     signal_result: String,
     audio_inputs: AudioInputs,
     tuner: Option<Box<dyn Tuner>>,
+    /// The tuner started from 0.050 because DELAY was not valid: why.
+    sync_note: Option<String>,
     kept_delay: Option<String>,
     saved: bool,
     changed: usize,
@@ -454,11 +456,13 @@ fn choose_labelled(prompt: &str, default: &str, label: &'static str, items: Vec<
 
 impl Wizard {
     /// `first_run`: no settings file yet; the welcome offers to skip.
-    pub fn new(sys: Box<dyn System>, config_file: PathBuf, first_run: bool, env: &dyn Fn(&str) -> bool) -> Self {
+    /// Err: the settings file is there but cannot be read, so its values
+    /// cannot be the starting point (nor saved over at the end).
+    pub fn new(sys: Box<dyn System>, config_file: PathBuf, first_run: bool, env: &dyn Fn(&str) -> bool) -> Result<Self, String> {
         let rows = settings::rows();
         let managed = settings::with_flag("wizard");
         let defaults = rows.iter().map(|r| (r.name.clone(), r.default.clone())).collect();
-        let cur = settings::read_file(&config_file);
+        let cur = settings::read_file(&config_file)?;
         let mut new: HashMap<String, String> =
             managed.iter().map(|k| (k.clone(), cur.get(k).cloned().unwrap_or_default())).collect();
         // FULLSCREEN is the old spelling of WINDOW; the wizard always writes WINDOW.
@@ -517,12 +521,13 @@ impl Wizard {
             signal_result: String::new(),
             audio_inputs: AudioInputs::default(),
             tuner: None,
+            sync_note: None,
             kept_delay: None,
             saved: false,
             changed: 0,
         };
         w.enter(Stage::Welcome);
-        w
+        Ok(w)
     }
 
     /// The value the file will say, else the setting's default (`cur`).
@@ -1280,7 +1285,13 @@ impl Wizard {
             s if !s.is_empty() => Some(s.clone()),
             _ => self.audio_inputs.card.clone(),
         };
-        let delay_ms = (self.cur("DELAY").parse::<f64>().unwrap_or(0.05) * 1000.0).round() as u32;
+        // A DELAY lib/settings.sh refuses starts the tuner from the default.
+        let delay = self.cur("DELAY");
+        self.sync_note = settings::check_value("DELAY", &delay).err().map(|e| format!("{e}: starting from 0.050"));
+        let delay_ms = match self.sync_note {
+            None => (delay.parse::<f64>().unwrap_or(0.05) * 1000.0).round() as u32,
+            Some(_) => 50,
+        };
         // Audio::start: its PipeWire round trips give up after 2 s each.
         let started = match source {
             None => Err("the card has no PipeWire source; pick one in the audio stage".to_string()),
@@ -1312,6 +1323,9 @@ impl Wizard {
             String::new(),
             format!("DELAY = {:.3}", f64::from(ms) / 1000.0),
         ]
+        .into_iter()
+        .chain(self.sync_note.clone())
+        .collect()
     }
 
     fn sync_end(&mut self, keep: bool) {
@@ -2000,7 +2014,7 @@ mod tests {
     }
 
     fn wizard(sys: Fake, file: &std::path::Path, first_run: bool) -> Wizard {
-        Wizard::new(Box::new(sys), file.to_path_buf(), first_run, &|_| false)
+        Wizard::new(Box::new(sys), file.to_path_buf(), first_run, &|_| false).unwrap()
     }
 
     fn press(w: &mut Wizard, keys: &[&str]) {
@@ -2312,6 +2326,24 @@ mod tests {
         assert!(w.tick(t0 + SIGNAL_TIMEOUT));
         assert_eq!(w.step, Step::SignalRetry);
         assert!(w.signal_result.starts_with("failed: only 90 of 121 frames in 6 seconds (14.8 fps"), "{}", w.signal_result);
+        std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_saved_delay_that_is_not_valid_is_said_so_in_the_tuner() {
+        let file = scratch("baddelay", Some("SOURCE=ps5\nDELAY=abc\n"));
+        let sys = fake();
+        let delay = sys.delay.clone();
+        let mut w = wizard(sys, &file, false);
+        press(&mut w, &["Enter", "Enter", "y", "Enter", "Enter", "Enter", "Enter", "Enter"]);
+        w.running = Phase::Feed;
+        signal_ok(&mut w);
+        press(&mut w, &["Enter", "Enter", "Enter", "Enter", "Enter", "Enter"]);
+        assert_eq!(w.step, Step::SyncTune);
+        assert_eq!(delay.get(), 50);
+        assert!(w.lines().iter().any(|l| l.starts_with("DELAY=abc: ") && l.ends_with(": starting from 0.050")), "{:#?}", w.lines());
+        // An unreadable settings file stops the wizard before it starts.
+        assert!(Wizard::new(Box::new(fake()), file.parent().unwrap().to_path_buf(), false, &|_| false).is_err());
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 

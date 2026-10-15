@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 const SETTINGS_SH: &str = include_str!("../../lib/settings.sh");
@@ -143,7 +144,15 @@ impl Settings {
         }
 
         let mut saved: HashMap<&str, String> = HashMap::new();
-        let text = fs::read_to_string(&config_file).unwrap_or_default();
+        // No file: the defaults. A file that cannot be read says so.
+        let text = match fs::read_to_string(&config_file) {
+            Ok(t) => t,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                notes.push(format!("{}: cannot read it ({e}); the defaults are used", config_file.display()));
+                String::new()
+            }
+        };
         for line in text.lines() {
             match config_line(line, &rows) {
                 Err(()) => notes.push(format!("{}: ignoring unknown line: {line}", config_file.display())),
@@ -365,15 +374,27 @@ fn rewrite(config_file: &Path, pairs: &[(&str, &str)], unset: bool) -> Result<()
 
 /// `config_read`: the file's own values (the last line of a key wins),
 /// without the environment or the defaults, so a caller can tell "set in
-/// the file" from "a default". No file: none.
-pub fn read_file(config_file: &Path) -> HashMap<String, String> {
+/// the file" from "a default". No file: none. Err: it exists but cannot
+/// be read.
+pub fn read_file(config_file: &Path) -> Result<HashMap<String, String>, String> {
     let rows = rows();
-    let text = fs::read_to_string(config_file).unwrap_or_default();
-    file_lines(&text)
+    let text = match fs::read_to_string(config_file) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("cannot read {}: {e}", config_file.display())),
+    };
+    Ok(file_lines(&text)
         .into_iter()
         .filter_map(|l| config_line(l, &rows).ok().flatten())
         .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect()
+        .collect())
+}
+
+/// Is `v` a valid value for the setting `name` (lib/settings.sh's ranges)?
+pub fn check_value(name: &str, v: &str) -> Result<(), String> {
+    let rows = rows();
+    let r = rows.iter().find(|r| r.name == name).ok_or(format!("{name} is not a setting"))?;
+    check(r, v).map_err(|e| format!("{name}={v}: {e}"))
 }
 
 /// The names carrying `flag`, in lib/settings.sh's order (`settings_with`).
@@ -607,11 +628,14 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let f = dir.join("config");
         fs::write(&f, "# c\nDELAY=0.05\nNOPE=1\nDELAY='0.07'\nSOURCE=\n").unwrap();
-        let v = read_file(&f);
+        let v = read_file(&f).unwrap();
         assert_eq!(v.get("DELAY").map(String::as_str), Some("0.07"), "the last line wins");
         assert_eq!(v.get("SOURCE").map(String::as_str), Some(""));
         assert_eq!(v.len(), 2);
-        assert!(read_file(&dir.join("none")).is_empty());
+        assert!(read_file(&dir.join("none")).unwrap().is_empty());
+        // There but unreadable (a directory here): an error, not "empty".
+        assert!(read_file(&dir).unwrap_err().starts_with("cannot read"));
+        assert!(check_value("DELAY", "0.07").is_ok() && check_value("DELAY", "abc").is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
 
