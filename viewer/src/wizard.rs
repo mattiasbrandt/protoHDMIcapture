@@ -1021,8 +1021,7 @@ impl Wizard {
             None => m.first = Some(now),
             Some(_) => m.frames += 1,
         }
-        let want = self.cur("FPS").parse::<f64>().unwrap_or(60.0).round() as u32 * MEASURE_SECONDS;
-        if self.measure.frames >= want.max(1) {
+        if self.measure.frames >= self.frames_wanted() {
             self.measure.done_at = Some(now);
             self.signal_done();
         }
@@ -1075,6 +1074,12 @@ impl Wizard {
         (self.step == Step::SignalWait && self.running == Phase::Feed).then(|| self.measure.started.map_or(now, |s| s + SIGNAL_TIMEOUT))
     }
 
+    /// The frames the signal check waits for: `MEASURE_SECONDS` at FPS
+    /// (validated by the format stage), as lib/setup.sh's stream count.
+    fn frames_wanted(&self) -> u32 {
+        (self.cur("FPS").parse::<f64>().unwrap_or(60.0).round() as u32 * MEASURE_SECONDS).max(1)
+    }
+
     fn signal_done(&mut self) {
         let m = &self.measure;
         let mut body = self.signal_lines(false);
@@ -1097,6 +1102,20 @@ impl Wizard {
         let measured = if m.frames == 0 || secs <= 0.0 { 0.0 } else { f64::from(m.frames) / secs };
         let fps: f64 = self.cur("FPS").parse().unwrap_or(0.0);
         let got = format!("{measured:.1}");
+        // The timeout with frames short: lib/setup.sh's `timeout 6` fails
+        // the check then too, with Try again; only a full count is measured.
+        let want = self.frames_wanted();
+        if m.frames < want {
+            let failed = format!(
+                "only {} of {} frames in 6 seconds ({got} fps for {} requested): the mode is not what the card delivers, or the signal drops.",
+                m.frames + 1,
+                want + 1,
+                self.cur("FPS")
+            );
+            self.signal_result = format!("failed: {failed}");
+            body.extend(wrap(&format!("Failed: {}", capital(&failed)), WIDTH));
+            return self.show(Step::SignalRetry, body, yes_no("Try again?", true));
+        }
         self.signal_result = format!("{got} fps measured");
         if measured >= fps * 0.8 && measured <= fps * 1.2 {
             body.push(format!("OK: {got} fps measured ({})", self.cur("RES")));
@@ -2273,6 +2292,26 @@ mod tests {
             "{:#?}",
             w.lines()
         );
+        std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn too_few_frames_by_the_timeout_fail_the_signal_check() {
+        // 15 fps for 60 requested: lib/setup.sh's `timeout 6` fails, so here.
+        let file = scratch("slow", Some("SOURCE=ps5\n"));
+        let mut w = wizard(fake(), &file, false);
+        press(&mut w, &["Enter", "Enter", "y", "Enter", "Enter", "Enter", "Enter", "Enter"]);
+        assert_eq!(w.stage, Stage::Signal);
+        w.running = Phase::Feed;
+        let t0 = Instant::now();
+        w.tick(t0);
+        for i in 0..90u32 {
+            w.frame(t0 + Duration::from_micros(66_667 * u64::from(i)));
+        }
+        assert_eq!(w.step, Step::SignalWait);
+        assert!(w.tick(t0 + SIGNAL_TIMEOUT));
+        assert_eq!(w.step, Step::SignalRetry);
+        assert!(w.signal_result.starts_with("failed: only 90 of 121 frames in 6 seconds (14.8 fps"), "{}", w.signal_result);
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 
