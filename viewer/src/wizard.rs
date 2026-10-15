@@ -367,12 +367,18 @@ pub fn ignore_without(pattern: &str, name: &str) -> String {
     kept.join("|")
 }
 
+/// The FMT values the Rust viewer captures (`capture::Format`). lib/setup.sh
+/// also offers nv12, which mpv plays; offered here it would fail at the
+/// feed, and as uncompressed it could hide the card's yuyv422 at the same
+/// fps and size.
+const FORMATS: [&str; 2] = ["yuyv422", "mjpeg"];
+
 /// lib/setup.sh's `list_modes`: best first (highest fps, then the largest
 /// picture, then uncompressed over compressed), one per fps, size and
-/// compression, at most 12.
+/// compression, at most 12; only the formats in `FORMATS`.
 pub fn best_modes(modes: &[Mode]) -> Vec<Mode> {
     let raw = |m: &Mode| u8::from(m.fmt != "mjpeg");
-    let mut rows: Vec<Mode> = modes.iter().filter(|m| ["yuyv422", "mjpeg", "nv12"].contains(&m.fmt.as_str())).cloned().collect();
+    let mut rows: Vec<Mode> = modes.iter().filter(|m| FORMATS.contains(&m.fmt.as_str())).cloned().collect();
     let key = |m: &Mode| (m.fps, u64::from(m.width) * u64::from(m.height), raw(m));
     // Stable, so equal keys keep the card's order; `sort -u` keeps the first.
     rows.sort_by_key(|m| std::cmp::Reverse(key(m)));
@@ -405,7 +411,7 @@ fn is_whole(v: &str) -> bool {
 }
 
 fn is_fmt(v: &str) -> bool {
-    ["yuyv422", "mjpeg", "nv12"].contains(&v)
+    FORMATS.contains(&v)
 }
 
 /// The first letter in upper case (bash's `${v^}`).
@@ -956,7 +962,7 @@ impl Wizard {
         let (prompt, key, valid): (&str, &str, fn(&str) -> bool) = match step {
             Step::FormatRes => ("Resolution", "RES", is_size),
             Step::FormatFps => ("Frames per second", "FPS", is_whole),
-            _ => ("Format (yuyv422 | mjpeg | nv12)", "FMT", is_fmt),
+            _ => ("Format (yuyv422 | mjpeg)", "FMT", is_fmt),
         };
         let default = self.cur(key);
         let body = vec!["The card lists no modes: type the mode the source sends.".into()];
@@ -2273,6 +2279,8 @@ mod tests {
     fn modes_best_first_and_the_closest_to_a_suggestion() {
         let modes = vec![
             mode("mjpeg", 1280, 720, 60),
+            // Listed before its yuyv422 twin: must not hide it.
+            mode("nv12", 1280, 720, 60),
             mode("yuyv422", 1920, 1080, 5),
             mode("mjpeg", 1920, 1080, 30),
             mode("yuyv422", 1280, 720, 10),
@@ -2285,8 +2293,9 @@ mod tests {
         assert_eq!(
             keys,
             ["yuyv422 1280x720 60", "mjpeg 1280x720 60", "mjpeg 1920x1080 30", "yuyv422 1280x720 10", "yuyv422 1920x1080 5"],
-            "fps, size, uncompressed first; nv12 at the same fps and size as yuyv is dropped, as sort -u drops it"
+            "fps, size, uncompressed first; nv12 is not offered: the Rust viewer cannot capture it"
         );
+        assert!(is_fmt("yuyv422") && is_fmt("mjpeg") && !is_fmt("nv12"));
         assert_eq!(closest_mode(1920, 1080, 60, &best).unwrap().key(), "yuyv422 1280x720 60", "frame rate first");
         assert_eq!(closest_mode(1920, 1080, 30, &best).unwrap().key(), "mjpeg 1920x1080 30");
         assert_eq!(closest_mode(1920, 1080, 60, &[]), None);
