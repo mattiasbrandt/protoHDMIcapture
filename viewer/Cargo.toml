@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Low-latency HDMI capture card viewer"
+repository = "https://github.com/mattiasbrandt/protoHDMIcapture"
+homepage = "https://github.com/mattiasbrandt/protoHDMIcapture"
+readme = "../README.md"
+keywords = ["hdmi", "capture-card", "v4l2", "viewer", "low-latency"]
+categories = ["multimedia::video"]
 
 [dependencies]
 cpal = { version = "0.18", features = ["pipewire", "realtime-dbus"] }
