@@ -12,6 +12,7 @@ mod gputime;
 mod mjpeg;
 mod osd;
 mod overlay;
+mod pattern;
 mod picture;
 mod present;
 mod pw;
@@ -29,7 +30,7 @@ use std::process::ExitCode;
 use settings::Settings;
 
 const USAGE: &str = "usage: protohdmicapture [--setup | --settings | --dashboard]
-       measurements: [--seconds N] [--monitor NAME] [--stats]";
+       measurements: [--seconds N] [--monitor NAME] [--stats] [--test-pattern]";
 
 /// Called first thing in main, before any thread exists.
 /// - MANGOHUD=0, as view.sh does for mpv: MangoHud is an implicit Vulkan
@@ -55,7 +56,8 @@ fn environment() {
 /// The audio loopback the settings ask for: None for AUDIO=none, Err with
 /// why it could not start. A failed start is reported and the feed goes on
 /// without sound, as in view.sh.
-fn audio(s: &Settings, card: &card::Node) -> Result<Option<audio::Audio>, String> {
+/// `card`: None with `--test-pattern`, where only SRC can name an input.
+fn audio(s: &Settings, card: Option<&card::Node>) -> Result<Option<audio::Audio>, String> {
     match s.get("AUDIO") {
         "none" => return Ok(None),
         "mpv" => eprintln!("note: AUDIO=mpv means mpv's own audio in view.sh; the Rust viewer uses its loopback"),
@@ -63,6 +65,7 @@ fn audio(s: &Settings, card: &card::Node) -> Result<Option<audio::Audio>, String
     }
     let source = match s.get("SRC") {
         "" => {
+            let card = card.ok_or("no card to find the audio input of (--test-pattern); set SRC=<name from pactl list short sources>")?;
             let usb = card::usb_dir(&card.path).ok_or(
                 "the card is not on USB, so its audio input cannot be found; set SRC=<name from pactl list short sources>",
             )?;
@@ -217,12 +220,14 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
         settings: None,
         wizard: None,
     };
+    let mut test_pattern = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--seconds" => opts.seconds = Some(it.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?),
             "--monitor" => opts.monitor = Some(it.next().ok_or(USAGE)?.clone()),
             "--stats" => opts.stats = true,
+            "--test-pattern" => test_pattern = true,
             _ => return Err(USAGE.into()),
         }
     }
@@ -283,17 +288,21 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
     };
     opts.desktop = desktop;
 
-    let pins = card::Pins { dev: s.get("DEV"), serial: s.get("CARD_SERIAL"), port: s.get("CARD_PORT"), ignore: s.get("IGNORE_CARDS_RE") };
-    let picked = card::pick(&card::list(), &pins, card::describe_dev(pins.dev), &s.config_file.display().to_string())?;
-    if let Some(w) = &picked.warning {
-        eprintln!("warning: {w}");
-    }
-    eprintln!("video device: {} ({})", picked.node.path.display(), picked.node.card_type);
-
-    let source = capture::V4l2::open(&picked.node.path, format)?;
+    let (source, node): (Box<dyn capture::FrameSource>, _) = if test_pattern {
+        eprintln!("video: the test pattern at {}x{} {} fps", format.width, format.height, format.fps);
+        (Box::new(pattern::Pattern::new(format)), None)
+    } else {
+        let pins = card::Pins { dev: s.get("DEV"), serial: s.get("CARD_SERIAL"), port: s.get("CARD_PORT"), ignore: s.get("IGNORE_CARDS_RE") };
+        let picked = card::pick(&card::list(), &pins, card::describe_dev(pins.dev), &s.config_file.display().to_string())?;
+        if let Some(w) = &picked.warning {
+            eprintln!("warning: {w}");
+        }
+        eprintln!("video device: {} ({})", picked.node.path.display(), picked.node.card_type);
+        (Box::new(capture::V4l2::open(&picked.node.path, format)?), Some(picked.node))
+    };
     // After --setup the wizard's feed windows ran in this process first.
     dashboard::live().reset();
-    let sound = match audio(&s, &picked.node) {
+    let sound = match audio(&s, node.as_ref()) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("warning: no audio: {e}");
@@ -354,7 +363,7 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
             None
         }
     };
-    let result = app::run(Box::new(source), opts, quit);
+    let result = app::run(source, opts, quit);
     if let (true, Some(a)) = (stats, &sound) {
         eprintln!("summary: audio {}", a.granted());
         eprintln!("summary: audio {}", a.status());
