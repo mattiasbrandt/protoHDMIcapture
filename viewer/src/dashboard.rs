@@ -706,6 +706,21 @@ fn on_path(name: &str) -> bool {
     })
 }
 
+/// A terminal that exits within this of its start failed to show the
+/// dashboard; a later exit is the user closing it (Ctrl-C, the window's
+/// close button), whatever status the terminal passes on.
+const TERMINAL_START: Duration = Duration::from_secs(1);
+
+/// Why the dashboard's terminal failed, from how long it ran and how it
+/// ended; None for a terminal that ran and was closed.
+fn terminal_failed(ran: Duration, status: io::Result<std::process::ExitStatus>) -> Option<String> {
+    match status {
+        Ok(s) if s.success() || ran >= TERMINAL_START => None,
+        Ok(s) => Some(s.to_string()),
+        Err(e) => Some(e.to_string()),
+    }
+}
+
 /// The d key: `--dashboard` of this binary in a new terminal, in its own
 /// session (a Ctrl-C meant for the viewer's terminal does not reach it).
 /// Err: no terminal could be started. A terminal that fails later is
@@ -727,12 +742,12 @@ pub fn open(notify: Option<Notify>) -> Result<(), String> {
         });
     }
     let mut child = cmd.spawn().map_err(|e| format!("cannot start a terminal for the dashboard: {e}"))?;
+    let started = Instant::now();
     let name = cmd.get_program().to_string_lossy().into_owned();
-    // Reaped here; a terminal that fails says so on the window.
-    thread::spawn(move || match child.wait() {
-        Ok(s) if s.success() => {}
-        r => {
-            let why = r.map_or_else(|e| e.to_string(), |s| s.to_string());
+    // Reaped here; a terminal that fails to start says so on the window.
+    thread::spawn(move || {
+        let status = child.wait();
+        if let Some(why) = terminal_failed(started.elapsed(), status) {
             eprintln!("warning: the dashboard's terminal ({name}) failed: {why}");
             if let Some(n) = notify {
                 n(Some((format!("Dashboard: {name} failed ({why})"), Duration::from_secs(3))));
@@ -770,6 +785,19 @@ mod tests {
         }
         assert_eq!(live.samples.lock().unwrap().len(), SAMPLES);
         assert_eq!(live.presented.load(Ordering::Relaxed), (SAMPLES + 100) as u64, "every present still counted");
+    }
+
+    #[test]
+    fn only_a_terminal_that_ends_at_once_failed() {
+        use std::os::unix::process::ExitStatusExt;
+        let exit = |code: i32| Ok(std::process::ExitStatus::from_raw(code << 8));
+        let soon = Duration::from_millis(200);
+        let later = Duration::from_secs(30);
+        assert_eq!(terminal_failed(soon, exit(0)), None);
+        assert_eq!(terminal_failed(soon, exit(1)).as_deref(), Some("exit status: 1"));
+        // Ctrl-C in the dashboard, passed on by the terminal: closed, not failed.
+        assert_eq!(terminal_failed(later, exit(130)), None);
+        assert!(terminal_failed(later, Err(io::Error::other("wait"))).is_some());
     }
 
     #[test]
