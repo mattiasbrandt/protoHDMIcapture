@@ -89,6 +89,11 @@ pub enum Event<'a> {
     NoSignal,
     /// Frames again after `NoSignal`.
     SignalBack,
+    /// MJPEG frames arrive but do not decode: `count` since the last
+    /// report, at most one report per `DECODE_REPORT_EVERY`. Frames that
+    /// arrive keep `NoSignal` away, but none reach the window, so this is
+    /// what says why the window has no picture.
+    Undecodable { count: u64, why: String },
 }
 
 /// The platform seam for capture.
@@ -235,7 +240,7 @@ impl FrameSource for V4l2 {
                         Err(e) => {
                             undecodable += 1;
                             if reported.is_none_or(|t| dequeued - t >= DECODE_REPORT_EVERY) {
-                                eprintln!("warning: {undecodable} MJPEG frame(s) dropped, not decodable: {e}");
+                                on_event(Event::Undecodable { count: undecodable, why: e.to_string() });
                                 undecodable = 0;
                                 reported = Some(dequeued);
                             }

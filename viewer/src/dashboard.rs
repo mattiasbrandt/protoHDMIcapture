@@ -157,6 +157,11 @@ impl Live {
         self.started.lock().expect("the start's lock is never poisoned").elapsed()
     }
 
+    /// MJPEG frames that arrived but did not decode (`Event::Undecodable`).
+    pub fn undecodable(&self, count: u64, why: &str) {
+        self.event(format!("{count} MJPEG frame(s) did not decode: {why}"));
+    }
+
     pub fn set_audio(&self, audio: AudioLive) {
         *self.audio.lock().expect("the audio's lock is never poisoned") = audio;
     }

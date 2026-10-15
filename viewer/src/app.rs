@@ -191,6 +191,8 @@ enum UserEvent {
     /// window's number, so that one sent as an earlier window's loop ended
     /// cannot close the next window (#13).
     CaptureEnded(u64),
+    /// MJPEG frames arrive but do not decode (`Event::Undecodable`).
+    Undecodable(String),
 }
 
 /// Numbers each window `run` opens, for `UserEvent::CaptureEnded`.
@@ -517,6 +519,11 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Re
                 Event::SignalBack => {
                     live.signal(true);
                     eprintln!("signal back");
+                }
+                Event::Undecodable { count, why } => {
+                    live.undecodable(count, &why);
+                    eprintln!("warning: {count} MJPEG frame(s) dropped, not decodable: {why}");
+                    let _ = proxy.send_event(UserEvent::Undecodable(why));
                 }
             });
             // The window ends with its capture. Not sent when the window
@@ -1343,6 +1350,16 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(w) = &self.opts.wizard {
                     w.borrow_mut().frame(Instant::now());
                 }
+                self.render()
+            }
+            UserEvent::Undecodable(why) => {
+                // Frames arrive, so the banner would say only "no signal".
+                let now = Instant::now();
+                self.overlay.message(format!("The card's MJPEG frames do not decode: {why}"), Duration::from_secs(5), now);
+                if let Some(w) = &self.opts.wizard {
+                    w.borrow_mut().undecodable(why);
+                }
+                self.repaint = true;
                 self.render()
             }
             UserEvent::Notice => {

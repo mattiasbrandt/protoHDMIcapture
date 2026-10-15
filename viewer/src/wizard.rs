@@ -272,6 +272,8 @@ struct Measure {
     looked_at: usize,
     /// Why the picture could not be checked.
     unchecked: Option<String>,
+    /// Frames arrived but did not decode (MJPEG): the decoder's error.
+    undecodable: Option<String>,
 }
 
 /// The card stage's ignore questions: the pattern so far and what was said.
@@ -999,6 +1001,14 @@ impl Wizard {
         out
     }
 
+    /// MJPEG frames that arrived but did not decode: with none decoding,
+    /// the signal check says so rather than "no frames".
+    pub fn undecodable(&mut self, why: String) {
+        if self.step == Step::SignalWait && self.running == Phase::Feed {
+            self.measure.undecodable = Some(why);
+        }
+    }
+
     /// A frame from the card, as it arrives (`app.rs`, every capture
     /// frame, not only the ones drawn).
     pub fn frame(&mut self, now: Instant) {
@@ -1070,6 +1080,13 @@ impl Wizard {
         let mut body = self.signal_lines(false);
         body.push(String::new());
         let (Some(first), Some(end)) = (m.first, m.done_at) else {
+            if let Some(why) = &m.undecodable {
+                let failed = format!("frames arrive but none decode as MJPEG ({why}).");
+                self.signal_result = format!("failed: {failed}");
+                body.push(format!("Failed: {}", capital(&failed)));
+                body.push("The card's MJPEG may be broken: go back and pick a yuyv422 mode.".into());
+                return self.show(Step::SignalRetry, body, yes_no("Try again?", true));
+            }
             let failed = "no frames in 6 seconds: no signal, or HDCP is on at the source.";
             self.signal_result = format!("failed: {failed}");
             body.push(format!("Failed: {}", capital(failed)));
@@ -2235,6 +2252,27 @@ mod tests {
         }
         assert_eq!(w.step, Step::SignalRetry);
         assert!(w.lines().iter().any(|l| l == "Warning: the picture is uniformly black."), "{:#?}", w.lines());
+        std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn frames_that_do_not_decode_are_not_called_no_signal() {
+        // The MS2130 1e4e:7016's MJPEG: frames arrive, none decode.
+        let file = scratch("undecodable", Some("SOURCE=ps5\n"));
+        let mut w = wizard(fake(), &file, false);
+        press(&mut w, &["Enter", "Enter", "y", "Enter", "Enter", "Enter", "Enter", "Enter"]);
+        assert_eq!(w.stage, Stage::Signal);
+        w.running = Phase::Feed;
+        let t0 = Instant::now();
+        w.tick(t0);
+        w.undecodable("not a JPEG".into());
+        assert!(w.tick(t0 + SIGNAL_TIMEOUT));
+        assert_eq!(w.step, Step::SignalRetry);
+        assert!(
+            w.lines().iter().any(|l| l == "Failed: Frames arrive but none decode as MJPEG (not a JPEG)."),
+            "{:#?}",
+            w.lines()
+        );
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 
