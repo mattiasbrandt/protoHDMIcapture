@@ -45,6 +45,11 @@ const WIDTH: usize = 72;
 /// The USB stage's text at most, in lines, so its page fits a 720-line
 /// window at the overlay's font size (window height / 40).
 const MAX_USB_LINES: usize = 15;
+/// A whole page at most, in lines, for a 720-line window: osd.rs draws
+/// pages from 3.5 font sizes down, with a font size of padding above and
+/// below, at 1.3 font sizes a line, and the font is 720 / 40 = 18 px:
+/// (720 - 63 - 36) / 23 = 27, less one for rounding.
+const PAGE_LINES: usize = 26;
 
 /// Which window a stage needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -965,7 +970,21 @@ impl Wizard {
                 body.push(format!("Tip: set the {sname}'s output resolution to {}p, so the card is not scaling.", n.height));
             }
         }
-        self.show(Step::FormatPick, body, choose_labelled("Mode", &def, label, items));
+        // As many modes as the page holds, best first; the one the cursor
+        // starts on always stays.
+        let mut keep = items.len();
+        loop {
+            let shown: Vec<Item> = items.iter().enumerate().filter(|(i, it)| *i < keep || it.key == def).map(|(_, it)| it.clone()).collect();
+            let mut page = body.clone();
+            if shown.len() < items.len() {
+                page.push(format!("({} lower modes left out: the window is too small for them.)", items.len() - shown.len()));
+            }
+            self.show(Step::FormatPick, page, choose_labelled("Mode", &def, label, shown));
+            if self.lines().len() <= PAGE_LINES || keep <= 1 {
+                break;
+            }
+            keep -= 1;
+        }
     }
 
     fn format_input(&mut self, step: Step) {
@@ -2345,6 +2364,29 @@ mod tests {
         assert!(w.lines().iter().any(|l| l.starts_with("DELAY=abc: ") && l.ends_with(": starting from 0.050")), "{:#?}", w.lines());
         // An unreadable settings file stops the wizard before it starts.
         assert!(Wizard::new(Box::new(fake()), file.parent().unwrap().to_path_buf(), false, &|_| false).is_err());
+        std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn the_format_page_fits_a_720_line_window() {
+        // A long error, the suggestion's warning and tip, and 12 modes: the
+        // lowest go, the saved one (the lowest of all) stays.
+        let file = scratch("fit", Some("SOURCE=ps5\nFMT=yuyv422\nRES=640x480\nFPS=10\n"));
+        let mut sys = fake();
+        sys.modes = [(1280, 720), (640, 480)]
+            .into_iter()
+            .flat_map(|(w, h)| [60, 50, 30, 25, 20, 10].map(|f| mode("yuyv422", w, h, f)))
+            .collect();
+        let mut w = wizard(sys, &file, false);
+        press(&mut w, &["Enter", "Enter", "y", "Enter", "Enter", "Enter", "Enter", "Enter"]);
+        assert_eq!(w.stage, Stage::Signal);
+        w.feed_failed("capture: /dev/video2: the card gives 1280x720 YUYV at 59.940 fps, not 60 (FPS), and something else went wrong too".into());
+        assert_eq!(w.step, Step::FormatPick);
+        let lines = w.lines();
+        assert!(lines.len() <= PAGE_LINES, "{} lines: {lines:#?}", lines.len());
+        assert!(lines.iter().any(|l| l.contains("lower modes left out")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("640x480 @ 10 fps") && l.contains("◂ current")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.starts_with("Warning: ") && l.contains("suggests 1920x1080 @ 60")), "{lines:#?}");
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 
