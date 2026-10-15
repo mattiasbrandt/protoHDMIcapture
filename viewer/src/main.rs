@@ -243,8 +243,9 @@ fn setup(_: bool, _: &app::Quit) -> Result<bool, String> {
     ))
 }
 
-/// The card the settings pin, opened at `format`.
-#[cfg(target_os = "linux")]
+/// The card the settings pin, opened at `format`: V4L2 on Linux, Media
+/// Foundation on Windows (#18), where DEV may hold the device's friendly
+/// name or its symbolic link.
 fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::FrameSource>, card::Node), String> {
     let pins = card::Pins { dev: s.get("DEV"), serial: s.get("CARD_SERIAL"), port: s.get("CARD_PORT"), ignore: s.get("IGNORE_CARDS_RE") };
     let picked = card::pick(&card::list(), &pins, card::describe_dev(pins.dev), &s.config_file.display().to_string())?;
@@ -252,20 +253,11 @@ fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::
         eprintln!("warning: {w}");
     }
     eprintln!("video device: {} ({})", picked.node.path.display(), picked.node.card_type);
-    Ok((Box::new(capture::V4l2::open(&picked.node.path, format)?), picked.node))
-}
-
-/// The card the settings pin, opened at `format` through Media Foundation
-/// (#18). DEV may hold the device's friendly name or its symbolic link.
-#[cfg(windows)]
-fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::FrameSource>, card::Node), String> {
-    let pins = card::Pins { dev: s.get("DEV"), serial: s.get("CARD_SERIAL"), port: s.get("CARD_PORT"), ignore: s.get("IGNORE_CARDS_RE") };
-    let picked = card::pick(&card::list(), &pins, card::describe_dev(pins.dev), &s.config_file.display().to_string())?;
-    if let Some(w) = &picked.warning {
-        eprintln!("warning: {w}");
-    }
-    eprintln!("video device: {} ({})", picked.node.path.display(), picked.node.card_type);
-    Ok((Box::new(capture::MediaFoundation::open(&picked.node.path, format)?), picked.node))
+    #[cfg(target_os = "linux")]
+    let source = capture::V4l2::open(&picked.node.path, format)?;
+    #[cfg(windows)]
+    let source = capture::MediaFoundation::open(&picked.node.path, format)?;
+    Ok((Box::new(source), picked.node))
 }
 
 fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
