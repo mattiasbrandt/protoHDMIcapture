@@ -1012,12 +1012,13 @@ impl Wizard {
     /// A drawn frame's bytes, for the picture check: flat (luma spread
     /// within 8 levels) and dark (mean at most 40 of 255) across the frames
     /// looked at is "black", as lib/setup.sh reads ffmpeg's signalstats.
-    /// YUYV only: MJPEG frames (#17) arrive in another layout.
+    /// MJPEG frames (#17) arrive here decoded to YUYV, so both are read;
+    /// a full-range black (luma 0) passes the same test as limited (16).
     pub fn picture(&mut self, data: &[u8], format: Format) {
         if self.step != Step::SignalWait || self.running != Phase::Feed || self.measure.looked_at >= PICTURE_FRAMES {
             return;
         }
-        if self.cur("FMT") != "yuyv422" || data.len() != format.frame_size() {
+        if !["yuyv422", "mjpeg"].contains(&self.cur("FMT").as_str()) || data.len() != format.frame_size() {
             self.measure.unchecked = Some(format!("FMT={} frames are not read here", self.cur("FMT")));
             return;
         }
@@ -2203,6 +2204,28 @@ mod tests {
         assert_eq!(w.stage, Stage::Signal);
         press(&mut w, &["BS", "BS"]);
         assert_eq!((w.stage, w.phase()), (Stage::Source, Phase::Choose));
+        std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn an_mjpeg_card_streaming_full_range_black_is_caught() {
+        // The MS2109 streams black with nothing plugged in; its MJPEG frames
+        // reach the wizard decoded to YUYV (#17), full-range black is luma 0.
+        let file = scratch("mjpeg-black", Some("SOURCE=ps5\n"));
+        let mut w = wizard(fake(), &file, false);
+        press(&mut w, &["Enter", "Enter", "y", "Enter", "Enter", "Enter", "Enter", "Enter"]);
+        assert_eq!(w.stage, Stage::Signal);
+        w.new.insert("FMT".into(), "mjpeg".into());
+        w.running = Phase::Feed;
+        let t0 = Instant::now();
+        w.tick(t0);
+        let black = vec![0u8; Idle::FORMAT.frame_size()];
+        for i in 0..=120u32 {
+            w.picture(&black, Idle::FORMAT);
+            w.frame(t0 + Duration::from_micros(16_667 * u64::from(i)));
+        }
+        assert_eq!(w.step, Step::SignalRetry);
+        assert!(w.lines().iter().any(|l| l == "Warning: the picture is uniformly black."), "{:#?}", w.lines());
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 
