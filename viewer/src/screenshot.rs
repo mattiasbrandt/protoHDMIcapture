@@ -205,9 +205,17 @@ fn unpad_rgba(data: &[u8], width: u32, height: u32, row: u32) -> Vec<u8> {
 }
 
 /// `~/Pictures/protoHDMIcapture`.
+#[cfg(not(windows))]
 fn folder() -> Result<PathBuf, String> {
     let home = std::env::var_os("HOME").filter(|h| !h.is_empty()).ok_or("HOME is not set")?;
     Ok(PathBuf::from(home).join("Pictures/protoHDMIcapture"))
+}
+
+/// `%USERPROFILE%\Pictures\protoHDMIcapture` (#18).
+#[cfg(windows)]
+fn folder() -> Result<PathBuf, String> {
+    let home = std::env::var_os("USERPROFILE").filter(|h| !h.is_empty()).ok_or("USERPROFILE is not set")?;
+    Ok(PathBuf::from(home).join("Pictures").join("protoHDMIcapture"))
 }
 
 /// Local time as `2026-10-14_22-31-05`.
@@ -215,7 +223,15 @@ fn stamp() -> String {
     let now = unsafe { libc::time(std::ptr::null_mut()) };
     // Safety: localtime_r fills `tm` from `now` and touches nothing else.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&now, &mut tm) };
+    #[cfg(unix)]
+    unsafe {
+        libc::localtime_r(&now, &mut tm)
+    };
+    // Safety: as localtime_r, the CRT's thread-safe form on Windows.
+    #[cfg(windows)]
+    unsafe {
+        libc::localtime_s(&mut tm, &now)
+    };
     format!(
         "{:04}-{:02}-{:02}_{:02}-{:02}-{:02}",
         tm.tm_year + 1900,

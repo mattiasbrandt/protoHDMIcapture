@@ -1858,6 +1858,7 @@ impl FrameSource for Idle {
     }
 }
 
+#[cfg(target_os = "linux")]
 /// The machine as the wizard sees it on Linux: V4L2, sysfs, PipeWire.
 pub struct Linux {
     /// SINK and LAT_MS, for the sync stage's loopback.
@@ -1866,11 +1867,13 @@ pub struct Linux {
     pub refresh: bool,
 }
 
+#[cfg(target_os = "linux")]
 struct Loopback {
     _audio: crate::audio::Audio,
     controls: crate::audio::Controls,
 }
 
+#[cfg(target_os = "linux")]
 impl Tuner for Loopback {
     fn delay_ms(&self) -> u32 {
         self.controls.delay_ms()
@@ -1881,6 +1884,7 @@ impl Tuner for Loopback {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl System for Linux {
     fn cards(&self) -> Vec<Node> {
         crate::card::list()

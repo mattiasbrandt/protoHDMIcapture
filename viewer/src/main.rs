@@ -9,12 +9,14 @@ mod card;
 mod dashboard;
 mod desktop;
 mod gputime;
+mod level;
 mod mjpeg;
 mod osd;
 mod overlay;
 mod pattern;
 mod picture;
 mod present;
+#[cfg(target_os = "linux")]
 mod pw;
 mod scale;
 mod screenshot;
@@ -43,6 +45,7 @@ const USAGE: &str = "usage: protohdmicapture [--setup | --settings | --dashboard
 fn environment() {
     // Safety: no other thread exists yet.
     unsafe { env::set_var("MANGOHUD", "0") };
+    #[cfg(target_os = "linux")]
     match env::var("PIPEWIRE_PROPS") {
         Ok(v) if !v.contains("node.dont-fallback") => {
             eprintln!("warning: PIPEWIRE_PROPS is set without node.dont-fallback; the audio may fall back to the default source");
@@ -64,16 +67,7 @@ fn audio(s: &Settings, card: Option<&card::Node>) -> Result<Option<audio::Audio>
         _ => {}
     }
     let source = match s.get("SRC") {
-        "" => {
-            let card = card.ok_or("no card to find the audio input of (--test-pattern); set SRC=<name from pactl list short sources>")?;
-            let usb = card::usb_dir(&card.path).ok_or(
-                "the card is not on USB, so its audio input cannot be found; set SRC=<name from pactl list short sources>",
-            )?;
-            let usb = usb.to_string_lossy();
-            pw::snapshot()?
-                .card_source(usb.strip_prefix("/sys").unwrap_or(&usb))
-                .ok_or("the card has no PipeWire source; set SRC=<name from pactl list short sources>")?
-        }
+        "" => card_audio_input(card)?,
         src => src.to_string(),
     };
     let sink = Some(s.get("SINK")).filter(|v| !v.is_empty());
@@ -85,10 +79,41 @@ fn audio(s: &Settings, card: Option<&card::Node>) -> Result<Option<audio::Audio>
     Ok(Some(a))
 }
 
+/// The card's own audio input, found as view.sh finds it: the PipeWire
+/// source on the card's USB device.
+#[cfg(target_os = "linux")]
+fn card_audio_input(card: Option<&card::Node>) -> Result<String, String> {
+    let card = card.ok_or("no card to find the audio input of (--test-pattern); set SRC=<name from pactl list short sources>")?;
+    let usb = card::usb_dir(&card.path).ok_or(
+        "the card is not on USB, so its audio input cannot be found; set SRC=<name from pactl list short sources>",
+    )?;
+    let usb = usb.to_string_lossy();
+    pw::snapshot()?
+        .card_source(usb.strip_prefix("/sys").unwrap_or(&usb))
+        .ok_or_else(|| "the card has no PipeWire source; set SRC=<name from pactl list short sources>".to_string())
+}
+
+/// The card's own audio input on Windows (#18): the one input whose name
+/// holds the card's (a UVC card's audio endpoint is "Digital Audio
+/// Interface (<card>)"-like); else SRC must name it.
+#[cfg(windows)]
+fn card_audio_input(card: Option<&card::Node>) -> Result<String, String> {
+    let inputs = audio::input_names()?;
+    let set_src = || format!("set SRC to one of: {}", inputs.join(" | "));
+    let card = card.ok_or_else(|| format!("no card to find the audio input of (--test-pattern); {}", set_src()))?;
+    let matching: Vec<&String> = inputs.iter().filter(|n| n.contains(card.card_type.as_str())).collect();
+    match matching.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err(format!("no audio input is named after the card ({}); {}", card.card_type, set_src())),
+        _ => Err(format!("more than one audio input is named after the card ({}); {}", card.card_type, set_src())),
+    }
+}
+
 /// The setup wizard (#13), in the viewer window: `--setup`, or a first run.
 /// Holds setup.lock as lib/setup.sh does (one wizard at a time) and leaves
 /// setup.done. True when the feed should start: saved and asked for, or
 /// the first run skipped.
+#[cfg(target_os = "linux")]
 fn setup(first_run: bool, quit: &app::Quit) -> Result<bool, String> {
     use std::cell::RefCell;
     use std::os::fd::AsRawFd;
@@ -205,6 +230,33 @@ fn setup(first_run: bool, quit: &app::Quit) -> Result<bool, String> {
     Ok(wiz.borrow().outcome() == Some(Outcome::Play) && !quit.requested())
 }
 
+/// No setup wizard on Windows yet (#18): it reads V4L2, sysfs and PipeWire.
+#[cfg(windows)]
+fn setup(_: bool, _: &app::Quit) -> Result<bool, String> {
+    Err(format!(
+        "the setup wizard is not on Windows yet; write the settings by hand in {}",
+        settings::config_file(&|k| env::var(k).ok()).display()
+    ))
+}
+
+/// The card the settings pin, opened at `format`.
+#[cfg(target_os = "linux")]
+fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::FrameSource>, card::Node), String> {
+    let pins = card::Pins { dev: s.get("DEV"), serial: s.get("CARD_SERIAL"), port: s.get("CARD_PORT"), ignore: s.get("IGNORE_CARDS_RE") };
+    let picked = card::pick(&card::list(), &pins, card::describe_dev(pins.dev), &s.config_file.display().to_string())?;
+    if let Some(w) = &picked.warning {
+        eprintln!("warning: {w}");
+    }
+    eprintln!("video device: {} ({})", picked.node.path.display(), picked.node.card_type);
+    Ok((Box::new(capture::V4l2::open(&picked.node.path, format)?), picked.node))
+}
+
+/// The card on Windows: Media Foundation capture comes next (#18).
+#[cfg(windows)]
+fn open_card(_: &Settings, _: capture::Format) -> Result<(Box<dyn capture::FrameSource>, card::Node), String> {
+    Err("capturing a card is not on Windows yet; --test-pattern shows the display path".into())
+}
+
 fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
     let mut opts = app::Options {
         window: app::WindowMode::Fullscreen,
@@ -233,8 +285,15 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
     }
 
     // First run: no settings file, so the wizard, as view.sh offers it
-    // (not for a measurement run, nor for the wizard's own children).
+    // (not for a measurement run, nor for the wizard's own children). On
+    // Windows there is no wizard yet: the defaults, said once.
+    #[cfg(target_os = "linux")]
     let unset = |k: &str| env::var_os(k).is_none_or(|v| v.is_empty());
+    #[cfg(windows)]
+    if !settings::config_file(&|k| env::var(k).ok()).exists() {
+        eprintln!("note: no settings file yet, so the defaults; the setup wizard is not on Windows yet");
+    }
+    #[cfg(target_os = "linux")]
     if args.is_empty()
         && !settings::config_file(&|k| env::var(k).ok()).exists()
         && unset("PROTOHDMI_SETUP_CHILD")
@@ -267,8 +326,11 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
     opts.scaling = scale::Scaling::from_settings(s.get("SCALING"))?;
     let format = capture::Format::from_settings(s.get("RES"), s.get("FPS"), s.get("FMT"))?;
 
-    // One video window at a time, with view.sh too (docs/run-dir.md).
+    // One video window at a time, with view.sh too (docs/run-dir.md); on
+    // Windows there is no view.sh to share the card with, and no session
+    // files yet (#18).
     let desktop = desktop::detect()?;
+    #[cfg(target_os = "linux")]
     let mut session = match session::Session::start(&session::run_dir(), desktop.clone())? {
         Ok(s) => s,
         Err(running) => {
@@ -278,8 +340,7 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
             } else {
                 eprintln!("already running (pid {pid})");
                 // Started from a launcher: say so on the desktop, as view.sh.
-                // Safety: isatty only reads the fd's state.
-                if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 0 {
+                if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
                     desktop::notify("normal", "protoHDMIcapture is already running");
                 }
             }
@@ -292,13 +353,8 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
         eprintln!("video: the test pattern at {}x{} {} fps", format.width, format.height, format.fps);
         (Box::new(pattern::Pattern::new(format)), None)
     } else {
-        let pins = card::Pins { dev: s.get("DEV"), serial: s.get("CARD_SERIAL"), port: s.get("CARD_PORT"), ignore: s.get("IGNORE_CARDS_RE") };
-        let picked = card::pick(&card::list(), &pins, card::describe_dev(pins.dev), &s.config_file.display().to_string())?;
-        if let Some(w) = &picked.warning {
-            eprintln!("warning: {w}");
-        }
-        eprintln!("video device: {} ({})", picked.node.path.display(), picked.node.card_type);
-        (Box::new(capture::V4l2::open(&picked.node.path, format)?), Some(picked.node))
+        let (source, node) = open_card(&s, format)?;
+        (source, Some(node))
     };
     // After --setup the wizard's feed windows ran in this process first.
     dashboard::live().reset();
@@ -337,8 +393,13 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
         opts.source.clear();
     }
     // As view.sh: after the audio, before the window.
+    #[cfg(target_os = "linux")]
     if s.get("REFRESH") == "match" {
         session.match_refresh(format.fps);
+    }
+    #[cfg(windows)]
+    if s.get("REFRESH") == "match" {
+        eprintln!("note: REFRESH=match is not on Windows yet; the display's refresh rate is left as it is");
     }
     // DEBUG=window opens the dashboard with the feed, as in view.sh.
     let debug_window = s.get("DEBUG") == "window";
@@ -348,6 +409,7 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
         return Ok(());
     }
     // As view.sh writes it once its player is started.
+    #[cfg(target_os = "linux")]
     session.announce()?;
     // The dashboard's socket, with the video lock held; a failure costs
     // only the dashboard.

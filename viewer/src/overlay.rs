@@ -202,7 +202,7 @@ pub enum Audio {
     Failed(String),
     /// Running: the level (None until first read, or why it could not be
     /// read) and the sync.
-    Running { level: Option<Result<crate::pw::Level, String>>, delay_ms: u32 },
+    Running { level: Option<Result<crate::level::Level, String>>, delay_ms: u32 },
 }
 
 /// What the panel shows.
@@ -318,7 +318,7 @@ pub fn changes(saveable: &[&str], baseline: &Values, now: &Values, loopback: boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pw::Level;
+    use crate::level::Level;
 
     fn panel(audio: Audio, changes: &[String]) -> Vec<String> {
         panel_lines(&Panel {

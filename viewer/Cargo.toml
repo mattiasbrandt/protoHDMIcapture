@@ -11,24 +11,37 @@ keywords = ["hdmi", "capture-card", "v4l2", "viewer", "low-latency"]
 categories = ["multimedia::video"]
 
 [dependencies]
-cpal = { version = "0.18", features = ["pipewire", "realtime-dbus"] }
+cpal = "0.18"
 ctrlc = { version = "3.5.2", features = ["termination"] }
 egui = "0.36.2"
 egui-wgpu = { version = "0.36.2", default-features = false }
 libc = "0.2.190"
-linuxvideo = "=0.3.5"
-pipewire = "0.10"
 png = "0.18.1"
 pollster = "1.0.1"
 raw-window-handle = "0.6"
 regex = "1.13.1"
 serde_json = "1.0.154"
-wayland-backend = { version = "0.3", features = ["client_system"] }
-wayland-client = "0.31"
-wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 wgpu = "30"
 winit = "0.30"
 zune-jpeg = "0.5.15"
+
+# The platform parts (#18): V4L2, PipeWire and Wayland on Linux; Media
+# Foundation on Windows (WASAPI comes through cpal, DX12 through wgpu).
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.18", features = ["pipewire", "realtime-dbus"] }
+linuxvideo = "=0.3.5"
+pipewire = "0.10"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Performance",
+] }
 
 [profile.release]
 debug = 1

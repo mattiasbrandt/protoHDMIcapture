@@ -19,21 +19,38 @@
 //! files only view.sh's dashboard reads are not written: the Rust
 //! viewer's dashboard reads `dashboard.sock` (dashboard.rs).
 
+#[cfg(target_os = "linux")]
 use std::fs::{self, File, OpenOptions};
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::thread;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use crate::desktop::Desktop;
 
 /// `${XDG_RUNTIME_DIR:-/tmp}/protohdmicapture`, as view.sh names it.
+#[cfg(not(windows))]
 pub fn run_dir() -> PathBuf {
     let base = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()).unwrap_or_else(|| "/tmp".into());
     PathBuf::from(base).join("protohdmicapture")
 }
 
+/// `%LOCALAPPDATA%\protohdmicapture` (else the temporary directory's), on
+/// Windows (#18).
+#[cfg(windows)]
+pub fn run_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()).map_or_else(std::env::temp_dir, PathBuf::from).join("protohdmicapture")
+}
+
+#[cfg(target_os = "linux")]
 pub struct Session {
     dir: PathBuf,
     /// Holds `video.lock` until dropped.
@@ -45,6 +62,7 @@ pub struct Session {
     announced: bool,
 }
 
+#[cfg(target_os = "linux")]
 /// Another session has the video window.
 #[derive(Debug, PartialEq)]
 pub struct AlreadyRunning {
@@ -52,6 +70,7 @@ pub struct AlreadyRunning {
     pub focused: bool,
 }
 
+#[cfg(target_os = "linux")]
 fn say(r: crate::desktop::Report) {
     match r {
         Ok(m) if !m.is_empty() => eprintln!("{m}"),
@@ -60,6 +79,7 @@ fn say(r: crate::desktop::Report) {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Session {
     /// Takes the video lock and recovers a killed session's refresh switch.
     pub fn start(dir: &Path, desktop: Desktop) -> Result<Result<Self, AlreadyRunning>, String> {
@@ -116,6 +136,7 @@ impl Session {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for Session {
     /// The display back, then the files; the lock goes with the fd. A
     /// failed restore keeps the record for the next run of either viewer.
@@ -138,12 +159,14 @@ impl Drop for Session {
     }
 }
 
+#[cfg(target_os = "linux")]
 /// view.sh's players, as its kill_orphan matches them.
 static PLAYER_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     regex::Regex::new(r"^(mpv .*--title=protoHDMIcapture|ffplay .*-window_title protoHDMIcapture|gst-launch-1\.0 .*v4l2src device=)")
         .expect("a valid pattern")
 });
 
+#[cfg(target_os = "linux")]
 /// view.sh's `kill_orphan`: the process in `pidfile`, if it is still there,
 /// the user's own, and its command line matches `re` (the PID may be
 /// anyone's by now), is stopped: TERM, up to 2 s, then KILL. Says what it
@@ -174,7 +197,7 @@ fn kill_orphan(pidfile: &Path, re: &regex::Regex, what: &str) -> Option<String> 
     Some(format!("stopped the {what} (pid {pid}) that a killed session left running"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

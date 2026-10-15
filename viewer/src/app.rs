@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
@@ -18,6 +19,7 @@ use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
+#[cfg(target_os = "linux")]
 use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Fullscreen, Window, WindowId};
 
@@ -25,11 +27,13 @@ use crate::audio::Controls;
 use crate::capture::{Event, Format, FrameSource, now_monotonic};
 use crate::desktop::Desktop;
 use crate::gputime::GpuTimer;
+use crate::level::LevelChange;
 use crate::osd::{Osd, Scene};
 use crate::overlay::{self, Notify, Overlay, Page};
 use crate::picture::{self, Colour, Picture};
-use crate::present::{Feedback, Outcome, Presentation, Tag};
-use crate::pw::LevelChange;
+#[cfg(target_os = "linux")]
+use crate::present::Presentation;
+use crate::present::{Feedback, Outcome, Tag};
 use crate::scale::{self, Filter, Scaling};
 use crate::screenshot::Screenshot;
 use crate::settings::Settings;
@@ -591,12 +595,54 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Re
     captured.map(|_| ())
 }
 
+/// The presentation feedback for the window: Wayland's (present.rs), so
+/// presents are paced and timed by the compositor; None sends frames out
+/// unpaced.
+#[cfg(target_os = "linux")]
+fn feedback(window: &Window) -> Result<Option<Box<dyn Feedback>>, String> {
+    let feedback: Option<Box<dyn Feedback>> = match (
+        window.display_handle().map_err(|e| e.to_string())?.as_raw(),
+        window.window_handle().map_err(|e| e.to_string())?.as_raw(),
+    ) {
+        (RawDisplayHandle::Wayland(dh), RawWindowHandle::Wayland(wh)) => {
+            // Safety: winit's display and the window's surface live until
+            // `exiting`, where `Gfx` (and this) is dropped first.
+            match unsafe { Presentation::new(dh.display.as_ptr(), wh.surface.as_ptr()) } {
+                Ok(p) if p.clock_id() == Some(libc::CLOCK_MONOTONIC as u32) => Some(Box::new(p)),
+                Ok(_) => {
+                    eprintln!("note: the presentation clock is not CLOCK_MONOTONIC; frames go out unpaced");
+                    None
+                }
+                Err(e) => {
+                    eprintln!("note: {e}; frames go out unpaced");
+                    None
+                }
+            }
+        }
+        _ => {
+            eprintln!("note: not on Wayland; frames go out unpaced");
+            None
+        }
+    };
+    Ok(feedback)
+}
+
+/// No presentation feedback off Linux yet (present.rs): DX12's waitable
+/// swapchain bounds the queue instead.
+#[cfg(not(target_os = "linux"))]
+fn feedback(_: &Window) -> Result<Option<Box<dyn Feedback>>, String> {
+    eprintln!("note: no presentation feedback on this platform; frames are paced by the swapchain only");
+    Ok(None)
+}
+
 impl App {
     fn init(&mut self, event_loop: &ActiveEventLoop) -> Result<Gfx, String> {
         let (w, h) = (self.format.width, self.format.height);
-        let mut attrs = Window::default_attributes()
-            .with_title("protoHDMIcapture")
-            .with_name("protohdmicapture", "protohdmicapture");
+        let mut attrs = Window::default_attributes().with_title("protoHDMIcapture");
+        #[cfg(target_os = "linux")]
+        {
+            attrs = attrs.with_name("protohdmicapture", "protohdmicapture");
+        }
         attrs = match self.opts.window {
             WindowMode::Fullscreen => {
                 let monitor = match &self.opts.monitor {
@@ -615,30 +661,7 @@ impl App {
         };
         let window = Arc::new(event_loop.create_window(attrs).map_err(|e| format!("window: {e}"))?);
 
-        let feedback: Option<Box<dyn Feedback>> = match (
-            window.display_handle().map_err(|e| e.to_string())?.as_raw(),
-            window.window_handle().map_err(|e| e.to_string())?.as_raw(),
-        ) {
-            (RawDisplayHandle::Wayland(dh), RawWindowHandle::Wayland(wh)) => {
-                // Safety: winit's display and the window's surface live until
-                // `exiting`, where `Gfx` (and this) is dropped first.
-                match unsafe { Presentation::new(dh.display.as_ptr(), wh.surface.as_ptr()) } {
-                    Ok(p) if p.clock_id() == Some(libc::CLOCK_MONOTONIC as u32) => Some(Box::new(p)),
-                    Ok(_) => {
-                        eprintln!("note: the presentation clock is not CLOCK_MONOTONIC; frames go out unpaced");
-                        None
-                    }
-                    Err(e) => {
-                        eprintln!("note: {e}; frames go out unpaced");
-                        None
-                    }
-                }
-            }
-            _ => {
-                eprintln!("note: not on Wayland; frames go out unpaced");
-                None
-            }
-        };
+        let feedback = feedback(&window)?;
 
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = wgpu::Backends::PRIMARY;

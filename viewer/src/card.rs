@@ -2,10 +2,16 @@
 //! (lib/card.sh). The first video capture node that is not an ignored
 //! device, narrowed by the pins (`CARD_SERIAL`, else `CARD_PORT`); a `DEV`
 //! that is gone, not a capture node, or ignored is set aside for the pins.
+//! Listing the nodes is the platform part: V4L2 and sysfs here, Media
+//! Foundation on Windows (capture/mf.rs, #18).
 
+#[cfg(target_os = "linux")]
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
 
+#[cfg(target_os = "linux")]
 use linuxvideo::{CapabilityFlags, Device};
 use regex::Regex;
 
@@ -35,6 +41,7 @@ pub struct Picked {
     pub warning: Option<String>,
 }
 
+#[cfg(target_os = "linux")]
 /// The node's USB device directory in sysfs, if it is on USB.
 pub fn usb_dir(node: &Path) -> Option<PathBuf> {
     let name = node.file_name()?;
@@ -43,6 +50,7 @@ pub fn usb_dir(node: &Path) -> Option<PathBuf> {
     dev.join("idVendor").exists().then_some(dev)
 }
 
+#[cfg(target_os = "linux")]
 fn serial(node: &Path) -> String {
     usb_dir(node)
         .and_then(|d| fs::read_to_string(d.join("serial")).ok())
@@ -50,6 +58,7 @@ fn serial(node: &Path) -> String {
         .unwrap_or_default()
 }
 
+#[cfg(target_os = "linux")]
 /// udev's ID_PATH, from its database: /run/udev/data/c<major>:<minor>.
 fn port(node: &Path) -> String {
     let Some(name) = node.file_name() else { return String::new() };
@@ -62,6 +71,7 @@ fn port(node: &Path) -> String {
         .to_string()
 }
 
+#[cfg(target_os = "linux")]
 /// The card type, and whether the node itself captures video (a UVC device
 /// also has a metadata node).
 fn probe(node: &Path) -> Option<(String, bool)> {
@@ -69,6 +79,7 @@ fn probe(node: &Path) -> Option<(String, bool)> {
     Some((caps.card().to_string(), caps.device_capabilities().contains(CapabilityFlags::VIDEO_CAPTURE)))
 }
 
+#[cfg(target_os = "linux")]
 /// `card_list`: every video capture node, in /dev order.
 pub fn list() -> Vec<Node> {
     let mut paths: Vec<PathBuf> = fs::read_dir("/dev")
@@ -158,6 +169,7 @@ pub fn pick(nodes: &[Node], pins: &Pins, dev_node: Option<Option<(String, bool)>
     })
 }
 
+#[cfg(target_os = "linux")]
 /// DEV as `pick` wants it: None when unset, Some(None) when it does not exist.
 pub fn describe_dev(dev: &str) -> Option<Option<(String, bool)>> {
     (!dev.is_empty()).then(|| if Path::new(dev).exists() { probe(Path::new(dev)) } else { None })

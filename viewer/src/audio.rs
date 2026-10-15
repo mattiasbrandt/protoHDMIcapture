@@ -2,7 +2,9 @@
 //! PipeWire host, as view.sh's `pw-loopback` does: SRC (else the card's own
 //! source, `pw::Snapshot::card_source`), SINK (else the default), LAT_MS
 //! buffers, DELAY. cpal is the seam for now; a native PipeWire path can
-//! replace it without touching the rest (decided in #10).
+//! replace it without touching the rest (decided in #10). On Windows (#18)
+//! the host is WASAPI and SRC/SINK name endpoints; the output's level keys
+//! are not there yet.
 //!
 //! The delay is the ring's fill. Changing it live never inserts silence or
 //! drops a block: the output plays faster or slower (linear interpolation),
@@ -19,7 +21,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, ErrorKind, HostId, StreamConfig};
 
 use crate::overlay::Notify;
-use crate::pw::{Level, LevelChange};
+use crate::level::{Level, LevelChange};
 
 pub const RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 2;
@@ -111,10 +113,12 @@ fn on_error(counters: &Arc<Counters>, side: &'static str) -> impl FnMut(cpal::Er
 }
 
 /// How long the session manager gets to link the input.
+#[cfg(target_os = "linux")]
 const LINK_WAIT: Duration = Duration::from_secs(2);
 
 /// Fails unless the source linked into our capture stream is `want`, and
 /// only it, within LINK_WAIT.
+#[cfg(target_os = "linux")]
 fn verify_linked(want: &str) -> Result<(), String> {
     let deadline = std::time::Instant::now() + LINK_WAIT;
     loop {
@@ -132,6 +136,52 @@ fn verify_linked(want: &str) -> Result<(), String> {
     }
 }
 
+/// The audio host: PipeWire, as view.sh's pw-loopback; WASAPI on Windows.
+#[cfg(target_os = "linux")]
+const HOST: HostId = HostId::PipeWire;
+#[cfg(windows)]
+const HOST: HostId = HostId::Wasapi;
+
+/// What SRC or SINK may say to name `d`: on PipeWire its node name (the
+/// device id displays as "<host>:<node name>").
+#[cfg(target_os = "linux")]
+fn names(d: &cpal::Device) -> Result<Vec<String>, String> {
+    let id = d.id().map_err(|e| e.to_string())?.to_string();
+    Ok(id.split_once(':').map(|(_, n)| n.to_string()).into_iter().collect())
+}
+
+/// On WASAPI: the endpoint's friendly name, as Windows' sound settings
+/// show it, or its endpoint id.
+#[cfg(windows)]
+fn names(d: &cpal::Device) -> Result<Vec<String>, String> {
+    let id = d.id().map_err(|e| e.to_string())?;
+    let name = d.description().map_err(|e| e.to_string())?.name().to_string();
+    Ok(vec![name, id.id().to_string()])
+}
+
+/// The audio inputs' names, for a message that lists what SRC may say.
+#[cfg(windows)]
+pub fn input_names() -> Result<Vec<String>, String> {
+    let host = cpal::host_from_id(HOST).map_err(|e| format!("{HOST} host: {e}"))?;
+    let mut out = Vec::new();
+    for d in host.input_devices().map_err(|e| format!("audio inputs: {e}"))? {
+        out.extend(names(&d)?.into_iter().take(1));
+    }
+    Ok(out)
+}
+
+/// The output stream's level: read (None) or changed, on PipeWire.
+#[cfg(target_os = "linux")]
+fn output_level(change: Option<LevelChange>) -> Result<Level, String> {
+    crate::pw::level(change)
+}
+
+/// No level keys on Windows yet (#18).
+#[cfg(windows)]
+fn output_level(_: Option<LevelChange>) -> Result<Level, String> {
+    Err("volume and mute are not on Windows yet".into())
+}
+
 impl Drop for Audio {
     fn drop(&mut self) {
         self.counters.closing.store(true, Ordering::Relaxed);
@@ -140,24 +190,23 @@ impl Drop for Audio {
 
 impl Audio {
     /// `source` and `sink` are PipeWire node names (no sink: the default);
-    /// `buffer_ms` is LAT_MS.
+    /// on Windows, endpoint names or ids (`input_names`). `buffer_ms` is
+    /// LAT_MS.
     pub fn start(source: &str, sink: Option<&str>, delay_ms: u32, buffer_ms: u32) -> Result<Self, String> {
         let delay_ms = check_delay(delay_ms)?;
-        let host = cpal::host_from_id(HostId::PipeWire).map_err(|e| format!("PipeWire host: {e}"))?;
-        // DeviceId displays as "<host>:<node name>".
+        let host = cpal::host_from_id(HOST).map_err(|e| format!("{HOST} host: {e}"))?;
         let by_name = |want: &str| -> Result<Option<cpal::Device>, String> {
             for d in host.devices().map_err(|e| format!("audio devices: {e}"))? {
-                let id = d.id().map_err(|e| e.to_string())?.to_string();
-                if id.split_once(':').is_some_and(|(_, n)| n == want) {
+                if names(&d)?.iter().any(|n| n == want) {
                     return Ok(Some(d));
                 }
             }
             Ok(None)
         };
-        let in_dev = by_name(source)?.ok_or_else(|| format!("no PipeWire source {source} (SRC)"))?;
+        let in_dev = by_name(source)?.ok_or_else(|| format!("no {HOST} source {source} (SRC)"))?;
         let in_name = source.to_string();
         let (out_dev, out_name) = match sink {
-            Some(sink) => (by_name(sink)?.ok_or_else(|| format!("no PipeWire sink {sink} (SINK)"))?, sink.to_string()),
+            Some(sink) => (by_name(sink)?.ok_or_else(|| format!("no {HOST} sink {sink} (SINK)"))?, sink.to_string()),
             None => (host.default_output_device().ok_or("no default output device")?, "the default output".to_string()),
         };
 
@@ -250,7 +299,9 @@ impl Audio {
         };
         input.play().map_err(|e| format!("input play: {e}"))?;
         // The output starts only once the input is proven linked to the
-        // card, so a fallback source never reaches the speakers.
+        // card, so a fallback source never reaches the speakers. WASAPI
+        // opens the endpoint named, with no session manager to relink it.
+        #[cfg(target_os = "linux")]
         verify_linked(source)?;
         output.play().map_err(|e| format!("output play: {e}"))?;
         Ok(Self { _input: input, _output: output, input: in_name, output: out_name, buffer_frames, counters })
@@ -309,13 +360,13 @@ impl Audio {
             for change in rx {
                 // The first read can come before PipeWire lists the new
                 // stream: a second's worth of retries.
-                let mut r = crate::pw::level(change);
+                let mut r = output_level(change);
                 for _ in 0..10 {
                     if change.is_some() || r.is_ok() {
                         break;
                     }
                     thread::sleep(Duration::from_millis(100));
-                    r = crate::pw::level(change);
+                    r = output_level(change);
                 }
                 // The messages the mpv script shows for m, 9 and 0.
                 let message = match &r {
@@ -410,6 +461,7 @@ mod tests {
     /// lib/audio.sh reads them: `cargo test -- --ignored level_on_pipewire`.
     /// Plays silence on the default output for a moment.
     #[test]
+    #[cfg(target_os = "linux")]
     #[ignore = "needs a PipeWire session"]
     fn level_on_pipewire() {
         use crate::pw::{level, LevelChange};

@@ -16,6 +16,8 @@ use std::rc::Rc;
 use pipewire as pw;
 use pw::types::ObjectType;
 
+pub use crate::level::{Level, LevelChange};
+
 struct NodeInfo {
     client: Option<u32>,
     device: Option<u32>,
@@ -191,24 +193,6 @@ impl Snapshot {
     }
 }
 
-/// The volume and mute of this process's audio output stream, as mixers
-/// and `pactl` show them: volume in percent on PulseAudio's cubic scale
-/// (linear = (percent / 100)^3), as view.sh's lib/audio.sh reads them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Level {
-    pub volume: u32,
-    pub mute: bool,
-}
-
-/// What the overlay's m, 9 and 0 ask for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LevelChange {
-    Mute,
-    /// Percent points, the result clamped to 0..100 as lib/audio.sh does
-    /// (past 100 % the loopback only clips).
-    Volume(i32),
-}
-
 /// Percent on the cubic scale from a linear channel volume, and back.
 pub fn percent(linear: f32) -> u32 {
     (f64::from(linear.max(0.0)).cbrt() * 100.0).round() as u32
@@ -219,14 +203,6 @@ pub fn linear(percent: u32) -> f32 {
 }
 
 
-impl Level {
-    pub fn changed(self, change: LevelChange) -> Self {
-        match change {
-            LevelChange::Mute => Self { mute: !self.mute, ..self },
-            LevelChange::Volume(by) => Self { volume: (self.volume as i32 + by).clamp(0, 100) as u32, ..self },
-        }
-    }
-}
 
 /// Reads the output stream's level and, with a change, sets it on the
 /// stream (Props: channelVolumes and mute), where WirePlumber remembers it

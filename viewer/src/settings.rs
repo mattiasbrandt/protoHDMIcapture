@@ -87,10 +87,15 @@ pub struct Settings {
 }
 
 /// `CONFIG_FILE`, else `$XDG_CONFIG_HOME/protohdmicapture/config`, else
-/// `~/.config/protohdmicapture/config` (lib/card.sh).
+/// `~/.config/protohdmicapture/config` (lib/card.sh); on Windows,
+/// `%APPDATA%\protohdmicapture\config` (#18).
 pub fn config_file(env: &dyn Fn(&str) -> Option<String>) -> PathBuf {
     if let Some(f) = env("CONFIG_FILE").filter(|f| !f.is_empty()) {
         return f.into();
+    }
+    #[cfg(windows)]
+    if let Some(d) = env("APPDATA").filter(|d| !d.is_empty()) {
+        return PathBuf::from(d).join("protohdmicapture").join("config");
     }
     let base = env("XDG_CONFIG_HOME")
         .filter(|d| !d.is_empty())
@@ -360,8 +365,13 @@ fn rewrite(config_file: &Path, pairs: &[(&str, &str)], unset: bool) -> Result<()
     ));
     let written = (|| {
         use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        let mut open = fs::OpenOptions::new();
+        open.write(true).create_new(true);
+        // Mode 600, as mktemp makes it; on Windows the profile's own ACL
+        // keeps the file the user's.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
+        let mut f = open.open(&tmp)?;
         f.write_all(out.as_bytes())?;
         f.sync_all()?;
         fs::rename(&tmp, config_file)
@@ -640,6 +650,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn save_writes_only_save_flagged_settings_mode_600() {
         use std::os::unix::fs::PermissionsExt;
         let s = with("# mine\nLEVELS=auto\n", &[]);

@@ -212,7 +212,7 @@ impl Rolling {
         let cpu = cpu_ticks();
         let cpu_pct = match (self.cpu_ticks, cpu) {
             // Safety: sysconf has no preconditions.
-            (Some(a), Some(b)) => Some((b.saturating_sub(a)) as f64 / unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64 / dt * 100.0),
+            (Some(a), Some(b)) => Some((b.saturating_sub(a)) as f64 / clock_ticks_per_s() / dt * 100.0),
             _ => None,
         };
 
@@ -298,6 +298,7 @@ fn audio_json(a: &AudioLive) -> Value {
 }
 
 /// This process's user and system CPU time, in clock ticks.
+#[cfg(target_os = "linux")]
 fn cpu_ticks() -> Option<u64> {
     let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
     // After the command name, which may hold spaces: fields 3 onwards.
@@ -306,6 +307,13 @@ fn cpu_ticks() -> Option<u64> {
     Some(f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?)
 }
 
+#[cfg(target_os = "linux")]
+fn clock_ticks_per_s() -> f64 {
+    // Safety: sysconf has no preconditions.
+    unsafe { libc::sysconf(libc::_SC_CLK_TCK) as f64 }
+}
+
+#[cfg(target_os = "linux")]
 fn rss_mb() -> Option<f64> {
     let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
     let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
@@ -313,7 +321,28 @@ fn rss_mb() -> Option<f64> {
     Some(pages as f64 * unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as f64 / 1048576.0)
 }
 
-/// The Unix socket; a named pipe on Windows (#9) would replace this module.
+/// No CPU and memory figures off Linux yet (they read /proc).
+#[cfg(not(target_os = "linux"))]
+fn cpu_ticks() -> Option<u64> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn clock_ticks_per_s() -> f64 {
+    1.0
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rss_mb() -> Option<f64> {
+    None
+}
+
+/// Why the dashboard does not run on Windows yet (#18).
+#[cfg(windows)]
+const NOT_ON_WINDOWS: &str = "the dashboard is not on Windows yet: its named pipe is still to come (#18)";
+
+/// The Unix socket.
+#[cfg(unix)]
 mod transport {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::os::unix::net::{UnixListener, UnixStream};
@@ -342,6 +371,34 @@ mod transport {
 
     pub fn connect(path: &Path) -> std::io::Result<Stream> {
         UnixStream::connect(path)
+    }
+}
+
+/// Windows: the named pipe is still to come (#18), so listening and
+/// connecting fail and nothing else here runs. The stream types only give
+/// the server and client code the same shape on both platforms; no TCP
+/// socket is ever opened.
+#[cfg(windows)]
+mod transport {
+    use std::path::Path;
+
+    pub type Listener = std::net::TcpListener;
+    pub type Stream = std::net::TcpStream;
+
+    fn not_yet() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::Unsupported, super::NOT_ON_WINDOWS)
+    }
+
+    pub fn listen(_: &Path) -> std::io::Result<(Listener, u64)> {
+        Err(not_yet())
+    }
+
+    pub fn inode(_: &Path) -> Option<u64> {
+        None
+    }
+
+    pub fn connect(_: &Path) -> std::io::Result<Stream> {
+        Err(not_yet())
     }
 }
 
@@ -595,14 +652,15 @@ fn render(s: &Value, p: &Paint) -> String {
 /// `--dashboard`: draws the running viewer's numbers until it ends. Waits
 /// a few seconds for a viewer that is still starting, as view.sh's does.
 pub fn client(run_dir: &Path) -> Result<(), String> {
-    // Safety: isatty only reads the fd's state.
-    let tty = unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1;
+    let tty = io::IsTerminal::is_terminal(&io::stdout());
     let paint = Paint { on: tty };
     let path = socket_path(run_dir);
     let deadline = Instant::now() + CONNECT_WAIT;
     let stream = loop {
         match transport::connect(&path) {
             Ok(s) => break s,
+            // No transport on this platform (Windows, #18): no use waiting.
+            Err(e) if e.kind() == io::ErrorKind::Unsupported => return Err(e.to_string()),
             Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
             Err(e) => {
                 println!("No Rust viewer is running ({}: {e}).", path.display());
@@ -681,6 +739,7 @@ impl<R: Read> Lines<R> {
 
 /// A terminal to run `args` in, as lib/desktop.sh's desktop_open_terminal
 /// picks one: xdg-terminal-exec, then $TERMINAL, then x-terminal-emulator.
+#[cfg(unix)]
 fn terminal_command(args: &[String], terminal: Option<&str>, have: impl Fn(&str) -> bool) -> Option<std::process::Command> {
     let (app, title) = ("protohdmicapture.debug", "protoHDMIcapture debug");
     if have("xdg-terminal-exec") {
@@ -699,6 +758,7 @@ fn terminal_command(args: &[String], terminal: Option<&str>, have: impl Fn(&str)
 }
 
 /// An executable of that name on PATH.
+#[cfg(unix)]
 fn on_path(name: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::env::var_os("PATH").is_some_and(|p| {
@@ -709,10 +769,12 @@ fn on_path(name: &str) -> bool {
 /// A terminal that exits within this of its start failed to show the
 /// dashboard; a later exit is the user closing it (Ctrl-C, the window's
 /// close button), whatever status the terminal passes on.
+#[cfg(unix)]
 const TERMINAL_START: Duration = Duration::from_secs(1);
 
 /// Why the dashboard's terminal failed, from how long it ran and how it
 /// ended; None for a terminal that ran and was closed.
+#[cfg(unix)]
 fn terminal_failed(ran: Duration, status: io::Result<std::process::ExitStatus>) -> Option<String> {
     match status {
         Ok(s) if s.success() || ran >= TERMINAL_START => None,
@@ -721,10 +783,17 @@ fn terminal_failed(ran: Duration, status: io::Result<std::process::ExitStatus>) 
     }
 }
 
+/// The d key on Windows: not yet (#18).
+#[cfg(windows)]
+pub fn open(_: Option<Notify>) -> Result<(), String> {
+    Err(NOT_ON_WINDOWS.into())
+}
+
 /// The d key: `--dashboard` of this binary in a new terminal, in its own
 /// session (a Ctrl-C meant for the viewer's terminal does not reach it).
 /// Err: no terminal could be started. A terminal that fails later is
 /// reported through `notify`.
+#[cfg(unix)]
 pub fn open(notify: Option<Notify>) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;
     let args = [exe.to_string_lossy().into_owned(), "--dashboard".into()];
@@ -788,6 +857,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn only_a_terminal_that_ends_at_once_failed() {
         use std::os::unix::process::ExitStatusExt;
         let exit = |code: i32| Ok(std::process::ExitStatus::from_raw(code << 8));
@@ -818,6 +888,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_dashboard_gets_the_live_numbers() {
         let dir = tmp("numbers");
         let live = leaked();
@@ -880,6 +951,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_dashboard_that_stops_reading_never_holds_the_viewer() {
         let dir = tmp("slow");
         let live = leaked();
@@ -908,6 +980,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_dead_viewers_socket_is_replaced_and_only_ours_removed() {
         let dir = tmp("stale");
         let path = socket_path(&dir);
@@ -926,6 +999,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn lines_survive_a_timeout_mid_line() {
         let (mut a, b) = std::os::unix::net::UnixStream::pair().unwrap();
         b.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
@@ -996,6 +1070,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn the_terminal_as_view_sh_picks_it() {
         let args = ["/x/protohdmicapture".to_string(), "--dashboard".into()];
         let argv = |c: std::process::Command| {
