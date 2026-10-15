@@ -13,6 +13,7 @@ mod card;
 mod dashboard;
 mod desktop;
 mod gputime;
+mod keys;
 mod level;
 mod mjpeg;
 mod osd;

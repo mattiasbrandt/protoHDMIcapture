@@ -17,7 +17,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::ModifiersState;
 use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
 #[cfg(target_os = "linux")]
 use winit::platform::wayland::WindowAttributesExtWayland;
@@ -27,7 +27,7 @@ use crate::audio::Controls;
 use crate::capture::{Event, Format, FrameSource, now_monotonic};
 use crate::desktop::Desktop;
 use crate::gputime::GpuTimer;
-use crate::level::LevelChange;
+use crate::keys::{self, Action};
 use crate::osd::{Osd, Scene};
 use crate::overlay::{self, Notify, Overlay, Page};
 use crate::picture::{self, Colour, Picture};
@@ -36,10 +36,10 @@ use crate::present::Presentation;
 use crate::present::{Feedback, Outcome, Tag};
 use crate::scale::{self, Filter, Scaling};
 use crate::screenshot::Screenshot;
-use crate::settings::Settings;
+use crate::settings::{Row, Settings};
 use crate::sources;
 use crate::stats::Stats;
-use crate::wizard::{self, Wizard};
+use crate::wizard::Wizard;
 
 /// A frame callback this late counts as lost: pacing stops waiting for it.
 const PACE_TIMEOUT: Duration = Duration::from_millis(100);
@@ -128,56 +128,19 @@ impl WindowMode {
     }
 }
 
-#[derive(Debug, PartialEq)]
-enum AudioAction {
-    /// Move the sync by this many ms.
-    Sync(i32),
-    Level(LevelChange),
-}
-
-/// The audio keys as the mpv script binds them: ctrl -/+ (or =) 10 ms,
-/// alt -/+ 50 ms, and m, 9, 0 plain (no ctrl, alt or super).
-fn audio_action(key: &Key, m: ModifiersState) -> Option<AudioAction> {
-    let Key::Character(c) = key else { return None };
-    if m.super_key() {
-        return None;
-    }
-    let step = match (m.control_key(), m.alt_key()) {
-        (true, false) => 10,
-        (false, true) => 50,
-        (false, false) => 0,
-        (true, true) => return None,
-    };
-    Some(match (c.as_str(), step) {
-        ("-", s) if s > 0 => AudioAction::Sync(-s),
-        ("+" | "=", s) if s > 0 => AudioAction::Sync(s),
-        ("m", 0) => AudioAction::Level(LevelChange::Mute),
-        ("9", 0) => AudioAction::Level(LevelChange::Volume(-5)),
-        ("0", 0) => AudioAction::Level(LevelChange::Volume(5)),
-        _ => return None,
-    })
-}
-
-/// A key as the wizard reads it: arrows, Enter, Esc, Backspace and plain
-/// characters; held down, only the arrows and Backspace repeat.
-fn wizard_key(key: &Key, m: ModifiersState, repeat: bool) -> Option<wizard::Key> {
-    let k = match key {
-        Key::Named(NamedKey::ArrowUp) => wizard::Key::Up,
-        Key::Named(NamedKey::ArrowDown) => wizard::Key::Down,
-        Key::Named(NamedKey::ArrowLeft) if m.shift_key() => wizard::Key::ShiftLeft,
-        Key::Named(NamedKey::ArrowRight) if m.shift_key() => wizard::Key::ShiftRight,
-        Key::Named(NamedKey::ArrowLeft) => wizard::Key::Left,
-        Key::Named(NamedKey::ArrowRight) => wizard::Key::Right,
-        Key::Named(NamedKey::Backspace) => wizard::Key::Backspace,
-        _ if repeat => return None,
-        Key::Named(NamedKey::Enter) => wizard::Key::Enter,
-        Key::Named(NamedKey::Escape) => wizard::Key::Escape,
-        Key::Character(c) if !m.intersects(ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SUPER) => {
-            wizard::Key::Char(c.to_string())
-        }
-        _ => return None,
-    };
-    Some(k)
+/// The settings the overlay's w saves (flagged `save` in lib/settings.sh),
+/// in that file's order, as the static names `now` holds. Each has a live
+/// value, DELAY only while the loopback runs: a flagged name with none is a
+/// defect here, and it fails loudly instead of never being saved.
+fn saveable(rows: &[Row], now: &overlay::Values, loopback: bool) -> Vec<&'static str> {
+    rows.iter()
+        .filter(|r| r.has_flag("save"))
+        .filter_map(|r| match now.keys().find(|k| **k == r.name) {
+            Some(k) => Some(*k),
+            None if r.name == "DELAY" && !loopback => None,
+            None => panic!("{} is flagged save in lib/settings.sh but has no live value in App::values", r.name),
+        })
+        .collect()
 }
 
 /// The overlay's text for one frame (osd.rs draws it).
@@ -879,47 +842,8 @@ impl App {
         }
     }
 
-    /// The audio keys, as view.sh binds them with AUDIO=loopback: sync with
-    /// ctrl -/+ (10 ms) and alt -/+ (50 ms), m mute, 9/0 volume -5/+5.
-    /// True when the key was one of them.
-    fn audio_key(&mut self, key: &Key) -> bool {
-        let AudioSetup::Running(audio) = &self.opts.audio else { return false };
-        let Some(action) = audio_action(key, self.modifiers) else { return false };
-        let synced = match action {
-            AudioAction::Sync(ms) => Some(audio.nudge_delay(ms)),
-            // Their messages come from the controls' thread (Notify).
-            AudioAction::Level(change) => {
-                audio.change_level(change);
-                None
-            }
-        };
-        if let Some(ms) = synced {
-            self.overlay.message(format!("Audio sync {ms} ms"), Duration::from_millis(1500), Instant::now());
-        }
-        self.repaint = true;
-        true
-    }
-
-    /// The picture keys (mpv's 1..8; the overlay's r and l). The next frame
-    /// shows the change.
-    fn picture_key(&mut self, key: &Key) {
-        let Key::Character(c) = key else { return };
-        // A plain key only: ctrl/alt/super with a digit belong to the
-        // desktop, or to other controls.
-        if self.modifiers.intersects(ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SUPER) {
-            return;
-        }
-        let (colour, by) = match c.as_str() {
-            "1" => (Colour::Contrast, -1),
-            "2" => (Colour::Contrast, 1),
-            "3" => (Colour::Brightness, -1),
-            "4" => (Colour::Brightness, 1),
-            "5" => (Colour::Gamma, -1),
-            "6" => (Colour::Gamma, 1),
-            "7" => (Colour::Saturation, -1),
-            "8" => (Colour::Saturation, 1),
-            _ => return,
-        };
+    /// A colour key (mpv's 1..8): the next frame shows the change.
+    fn adjust_colour(&mut self, colour: Colour, by: i32) {
         self.picture.adjust(colour, by);
         let p = self.picture;
         // mpv's message for its colour keys.
@@ -942,37 +866,64 @@ impl App {
         self.reconvert = true;
     }
 
-    /// Tab, and the keys that only mean something while the overlay is
-    /// open, as the mpv script binds them. True when the key was taken.
-    fn overlay_key(&mut self, key: &Key) -> bool {
-        let open = self.overlay.page.is_some();
-        match key {
-            Key::Named(NamedKey::Tab) => self.overlay.toggle(),
-            _ if !open => return false,
-            Key::Named(NamedKey::Escape) => self.overlay.page = None,
-            Key::Named(NamedKey::ArrowLeft) if self.overlay.page == Some(Page::Tips) => self.overlay.cycle_source(-1),
-            Key::Named(NamedKey::ArrowRight) if self.overlay.page == Some(Page::Tips) => self.overlay.cycle_source(1),
-            Key::Character(c) => match c.as_str() {
-                "l" => {
-                    self.picture.cycle_levels();
-                    self.picture_changed();
+    /// What the keys see of this window (keys.rs).
+    fn key_mode(&self) -> keys::Mode {
+        if self.opts.wizard.is_some() { keys::Mode::Wizard } else { keys::Mode::Viewer(self.overlay.page) }
+    }
+
+    /// A key's action (keys.rs), applied. True when the window closes.
+    fn apply(&mut self, action: Action) -> bool {
+        match action {
+            Action::Quit => return true,
+            Action::Wizard(k) => {
+                let Some(w) = &self.opts.wizard else { return false };
+                w.borrow_mut().key(&k);
+                if w.borrow().wants_exit() {
+                    return true;
                 }
-                "c" => {
-                    self.scaling = self.scaling.next();
-                    self.relayout();
+            }
+            Action::ToggleOverlay => self.overlay.toggle(),
+            Action::CloseOverlay => self.overlay.page = None,
+            Action::CycleTips(by) => self.overlay.cycle_source(by),
+            Action::CycleLevels => {
+                self.picture.cycle_levels();
+                self.picture_changed();
+            }
+            Action::CycleScaling => {
+                self.scaling = self.scaling.next();
+                self.relayout();
+            }
+            Action::ResetColour => {
+                self.picture.reset_colour();
+                self.picture_changed();
+            }
+            Action::Save => self.save(),
+            Action::ToggleTips => self.overlay.toggle_tips(),
+            Action::CycleDisplay => self.cycle_display(),
+            Action::Dashboard => self.open_dashboard(),
+            // Without frames from the card, the repaint below takes the shot.
+            Action::Screenshot => {
+                if let Some(gfx) = self.gfx.as_mut()
+                    && !gfx.screenshot.request()
+                {
+                    eprintln!("screenshot: the last one is still being saved");
                 }
-                "r" => {
-                    self.picture.reset_colour();
-                    self.picture_changed();
-                }
-                "w" => self.save(),
-                "t" => self.overlay.toggle_tips(),
-                _ => return false,
-            },
-            _ => return false,
+            }
+            // The audio keys act only with AUDIO=loopback running.
+            Action::Sync(by) => {
+                let AudioSetup::Running(audio) = &self.opts.audio else { return false };
+                let ms = audio.nudge_delay(by);
+                self.overlay.message(format!("Audio sync {ms} ms"), Duration::from_millis(1500), Instant::now());
+            }
+            // Its message comes from the controls' thread (Notify).
+            Action::Level(change) => {
+                let AudioSetup::Running(audio) = &self.opts.audio else { return false };
+                audio.change_level(change);
+            }
+            Action::Picture(colour, by) => self.adjust_colour(colour, by),
         }
         self.repaint = true;
-        true
+        false
     }
 
     /// d: the dashboard in a terminal of its own (#16).
@@ -1049,6 +1000,15 @@ impl App {
     /// The saveable settings' live values, spelled as the settings file
     /// spells them (DELAY in seconds, as the mpv script writes it).
     fn values(&self) -> overlay::Values {
+        let delay = match &self.opts.audio {
+            AudioSetup::Running(a) => Some(a.delay_ms()),
+            _ => None,
+        };
+        self.values_with(delay)
+    }
+
+    /// `values`, with the loopback's delay in ms while it runs.
+    fn values_with(&self, delay_ms: Option<u32>) -> overlay::Values {
         let p = &self.picture;
         let mut v: overlay::Values = [
             ("WINDOW", self.opts.window.names().0.to_string()),
@@ -1060,17 +1020,15 @@ impl App {
             ("GAMMA", p.gamma.to_string()),
         ]
         .into();
-        if let AudioSetup::Running(a) = &self.opts.audio {
-            v.insert("DELAY", format!("{:.3}", f64::from(a.delay_ms()) / 1000.0));
+        if let Some(ms) = delay_ms {
+            v.insert("DELAY", format!("{:.3}", f64::from(ms) / 1000.0));
         }
         v
     }
 
     fn saveable(&self) -> Vec<&'static str> {
         let Some(s) = &self.opts.settings else { return Vec::new() };
-        let now = self.values();
-        // Static names: the keys of `values`, in lib/settings.sh's order.
-        s.rows.iter().filter(|r| r.has_flag("save")).filter_map(|r| now.keys().find(|k| **k == r.name).copied()).collect()
+        saveable(&s.rows, &self.values(), matches!(self.opts.audio, AudioSetup::Running(_)))
     }
 
     /// w: what changed since the start (or the last save), as `view.sh
@@ -1084,14 +1042,12 @@ impl App {
             self.overlay.message("Nothing changed since the feed started", Duration::from_secs(2), now);
             return;
         }
-        // The wizard's test feed reads a preview config the wizard deletes.
-        let result = if std::env::var_os("PROTOHDMI_SETUP_CHILD").is_some_and(|v| !v.is_empty()) {
-            Err("this is the wizard's test feed; change settings in the wizard".to_string())
-        } else if let Some(s) = &self.opts.settings {
-            let pairs: Vec<(&str, &str)> = changed.iter().filter_map(|kv| kv.split_once('=')).collect();
-            s.save(&pairs)
-        } else {
-            Err("no settings to save to".to_string())
+        let result = match &self.opts.settings {
+            Some(s) => {
+                let pairs: Vec<(&str, &str)> = changed.iter().filter_map(|kv| kv.split_once('=')).collect();
+                s.save(&pairs)
+            }
+            None => Err("no settings to save to".to_string()),
         };
         match result {
             Ok(()) => {
@@ -1416,45 +1372,11 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && self.opts.wizard.is_some() => {
-                // Every key is the wizard's, q included (it may be typed).
-                if let Some(k) = wizard_key(&event.logical_key, self.modifiers, event.repeat)
-                    && let Some(w) = &self.opts.wizard
-                {
-                    w.borrow_mut().key(&k);
-                    if w.borrow().wants_exit() {
-                        event_loop.exit();
-                    }
-                    self.repaint = true;
-                }
-            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                let key = &event.logical_key;
-                let plain = !self.modifiers.intersects(ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SUPER);
-                let is = |k: &str| matches!(key, Key::Character(c) if c == k);
-                // Held down, these act once (the mpv script binds Tab, f
-                // and m without repeat; s is a shot per press); the rest
-                // repeat, the overlay's keys included, as there.
-                let once = matches!(key, Key::Named(NamedKey::Tab)) || ["f", "m", "s", "d"].into_iter().any(is);
-                // q quits, as in view.sh.
-                if is("q") {
+                if let Some(action) = keys::action(&event.logical_key, self.modifiers, event.repeat, self.key_mode())
+                    && self.apply(action)
+                {
                     event_loop.exit();
-                } else if (event.repeat && once) || (plain && self.overlay_key(key)) {
-                    // Ignored, or taken by the overlay.
-                } else if plain && is("f") {
-                    self.cycle_display();
-                } else if plain && is("d") {
-                    self.open_dashboard();
-                } else if plain && is("s") {
-                    if let Some(gfx) = self.gfx.as_mut()
-                        && !gfx.screenshot.request()
-                    {
-                        eprintln!("screenshot: the last one is still being saved");
-                    }
-                    // Without frames from the card, a repaint takes the shot.
-                    self.repaint = true;
-                } else if !self.audio_key(key) {
-                    self.picture_key(key);
                 }
             }
             WindowEvent::Resized(size) => {
@@ -1535,6 +1457,7 @@ impl ApplicationHandler<UserEvent> for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use winit::keyboard::{Key, NamedKey};
 
     /// An app with no window, its settings in a temp file.
     fn app_with(config: &str) -> (App, std::path::PathBuf) {
@@ -1589,13 +1512,16 @@ mod tests {
         (app, file)
     }
 
+    /// A plain key pressed: true when it asked for something.
     fn press(app: &mut App, k: &str) -> bool {
         let key = match k {
             "Tab" => Key::Named(NamedKey::Tab),
             "Esc" => Key::Named(NamedKey::Escape),
             c => Key::Character(c.into()),
         };
-        app.overlay_key(&key)
+        let Some(action) = keys::action(&key, ModifiersState::empty(), false, app.key_mode()) else { return false };
+        assert!(!app.apply(action), "{k} closes no window here");
+        true
     }
 
     fn panel(app: &App) -> Vec<String> {
@@ -1642,20 +1568,20 @@ mod tests {
         assert!(app.repaint, "every change draws again");
         app.repaint = false;
         app.reconvert = false;
-        app.picture_key(&Key::Character("2".into()));
+        assert!(press(&mut app, "2"));
         assert!(app.repaint && app.reconvert, "a colour key redraws a frozen frame converted again");
 
         // f: the panel's Display line and w's WINDOW follow it.
         press(&mut app, "Tab");
-        app.cycle_display();
+        press(&mut app, "f");
         assert_eq!(panel(&app)[2], "f     Display      Borderless");
         assert!(panel(&app)[9].contains("WINDOW=borderless"));
-        app.cycle_display();
+        press(&mut app, "f");
         assert_eq!(app.opts.window, WindowMode::Windowed { width: 1280, height: 720 });
-        app.cycle_display();
+        press(&mut app, "f");
         assert_eq!(app.opts.window, WindowMode::Fullscreen);
         press(&mut app, "Esc");
-        app.cycle_display();
+        press(&mut app, "f");
         assert_eq!(app.overlay.current_message(Instant::now()), Some("Display: Borderless"));
 
         // w with nothing changed says so and writes nothing.
@@ -1670,19 +1596,35 @@ mod tests {
     }
 
     #[test]
-    fn audio_keys_as_the_mpv_script_binds_them() {
-        let k = |c: &str| Key::Character(c.into());
-        let (ctrl, alt, none) = (ModifiersState::CONTROL, ModifiersState::ALT, ModifiersState::empty());
-        assert_eq!(audio_action(&k("-"), ctrl), Some(AudioAction::Sync(-10)));
-        assert_eq!(audio_action(&k("="), ctrl), Some(AudioAction::Sync(10)));
-        assert_eq!(audio_action(&k("+"), alt | ModifiersState::SHIFT), Some(AudioAction::Sync(50)));
-        assert_eq!(audio_action(&k("m"), none), Some(AudioAction::Level(LevelChange::Mute)));
-        assert_eq!(audio_action(&k("0"), none), Some(AudioAction::Level(LevelChange::Volume(5))));
-        // Plain keys only, as the review found ctrl+alt+m muting.
-        assert_eq!(audio_action(&k("m"), ctrl | alt), None);
-        assert_eq!(audio_action(&k("9"), ctrl), None);
-        assert_eq!(audio_action(&k("-"), none), None);
-        assert_eq!(audio_action(&k("-"), ctrl | ModifiersState::SUPER), None);
+    fn every_saveable_setting_has_a_live_value() {
+        let (app, file) = app_with("");
+        let rows = crate::settings::rows();
+        let flagged: Vec<&str> = rows.iter().filter(|r| r.has_flag("save")).map(|r| r.name.as_str()).collect();
+        assert!(flagged.contains(&"DELAY") && flagged.contains(&"WINDOW"), "{flagged:?}");
+        let without_delay: Vec<&str> = flagged.iter().copied().filter(|n| *n != "DELAY").collect();
+        assert_eq!(saveable(&rows, &app.values_with(None), false), without_delay);
+        assert_eq!(saveable(&rows, &app.values_with(Some(50)), true), flagged);
+        assert_eq!(app.values_with(Some(50))["DELAY"], "0.050", "in seconds, as the mpv script writes it");
+        std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    }
+
+    /// Live values for these names, all empty.
+    fn live(names: &[&'static str]) -> overlay::Values {
+        names.iter().map(|n| (*n, String::new())).collect()
+    }
+
+    const LIVE: [&str; 7] = ["WINDOW", "SCALING", "LEVELS", "BRIGHTNESS", "CONTRAST", "SATURATION", "GAMMA"];
+
+    #[test]
+    #[should_panic(expected = "GAMMA is flagged save in lib/settings.sh but has no live value")]
+    fn a_saveable_setting_without_a_live_value_fails_loudly() {
+        saveable(&crate::settings::rows(), &live(&LIVE[..6]), false);
+    }
+
+    #[test]
+    #[should_panic(expected = "DELAY is flagged save")]
+    fn the_delay_has_a_live_value_while_the_loopback_runs() {
+        saveable(&crate::settings::rows(), &live(&LIVE), true);
     }
 
     #[test]
