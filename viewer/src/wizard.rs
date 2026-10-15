@@ -564,6 +564,9 @@ impl Wizard {
     /// The feed could not start (the card busy, the mode refused): back to
     /// the format stage, saying why.
     pub fn feed_failed(&mut self, why: String) {
+        // The sync stage's loopback, if the card went mid-tuning: not
+        // left playing behind the format page.
+        self.tuner = None;
         self.feed_error = Some(why);
         self.enter(Stage::Format);
     }
@@ -2272,6 +2275,18 @@ mod tests {
         assert!(w.tuner.is_none());
         assert_eq!(w.outcome(), Some(Outcome::Close));
         assert!(!w.saved());
+
+        // The card gone while tuning: the loopback stops with the feed.
+        let mut w = wizard(fake(), &file, false);
+        press(&mut w, &["Enter", "Enter", "y", "Enter", "Enter", "Enter", "Enter", "Enter"]);
+        w.running = Phase::Feed;
+        signal_ok(&mut w);
+        press(&mut w, &["Enter", "Enter", "Enter", "Enter", "Enter", "Enter"]);
+        assert_eq!(w.step, Step::SyncTune);
+        assert!(w.tuner.is_some());
+        w.feed_failed("capture: the card is gone".into());
+        assert_eq!(w.stage, Stage::Format);
+        assert!(w.tuner.is_none(), "the loopback stops when the feed fails");
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 
