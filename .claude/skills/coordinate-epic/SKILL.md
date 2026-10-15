@@ -83,7 +83,9 @@ A worker's report is a claim. In its worktree, yourself:
 6. **Clean up:** move anything the user needs out of the worktree first (a
    built `.exe`, an archive), then `git worktree remove <path>` and
    `git branch -d <branch>`. `-d` refuses an unmerged branch, which is the
-   check you want.
+   check you want. An abandoned slice's branch is unmerged by definition, and
+   the guard hook blocks the forced delete: leave the branch, and give the
+   user the delete command to run.
 7. **Recommend a review** of the wave's range to the user (`/codex:adversarial-review --base <sha> <focus>`,
    or a reviewer subagent when asked). Findings are claims: verify each against
    the code, then ask the user which to fix before touching a file.
