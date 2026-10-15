@@ -23,6 +23,7 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 wgpu = "30"
 winit = "0.30"
+zune-jpeg = "0.5.15"
 
 [profile.release]
 debug = 1
@@ -31,3 +32,6 @@ debug = 1
 # the diff is vendor/linuxvideo-timestamp-sequence.patch (to offer upstream).
 [patch.crates-io]
 linuxvideo = { path = "vendor/linuxvideo" }
+
+[dev-dependencies]
+jpeg-encoder = "0.7.1"

@@ -13,10 +13,21 @@ use linuxvideo::format::{PixFormat, PixelFormat};
 use linuxvideo::stream::ReadStream;
 use linuxvideo::{Device, Fract};
 
+use crate::mjpeg;
+use crate::picture::Coding;
+
 /// How long one `poll()` waits: the longest quit can take with no frames.
 const POLL_SLICE: Duration = Duration::from_millis(100);
 /// No frame for this long is "no signal" (GLOSSARY).
 pub const NO_SIGNAL_AFTER: Duration = Duration::from_secs(1);
+
+/// What the card sends, from FMT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pixels {
+    Yuyv,
+    /// JPEG frames, decoded to YUYV in the capture loop (#17).
+    Mjpeg,
+}
 
 /// What the card is asked for, from RES, FPS and FMT.
 #[derive(Debug, Clone, Copy)]
@@ -24,27 +35,37 @@ pub struct Format {
     pub width: u32,
     pub height: u32,
     pub fps: f64,
+    pub pixels: Pixels,
 }
 
 impl Format {
     /// RES, FPS and FMT as the settings hold them (already validated).
     pub fn from_settings(res: &str, fps: &str, fmt: &str) -> Result<Self, String> {
-        match fmt {
-            "yuyv422" => {}
-            "mjpeg" => return Err("FMT=mjpeg: MJPEG cards are not in the Rust viewer yet (#17); use view.sh".into()),
-            other => return Err(format!("FMT={other}: the Rust viewer captures yuyv422 only for now")),
-        }
+        let pixels = match fmt {
+            "yuyv422" => Pixels::Yuyv,
+            "mjpeg" => Pixels::Mjpeg,
+            other => return Err(format!("FMT={other}: the Rust viewer captures yuyv422 and mjpeg only for now")),
+        };
         let (w, h) = res.split_once('x').ok_or(format!("RES={res} is not WIDTHxHEIGHT"))?;
         let width: u32 = w.parse().map_err(|_| format!("RES={res}: bad width"))?;
         let height: u32 = h.parse().map_err(|_| format!("RES={res}: bad height"))?;
         if !width.is_multiple_of(2) {
+            // MJPEG too: its frames are decoded to YUYV.
             return Err(format!("RES={res}: YUYV needs an even width"));
         }
         let fps: f64 = fps.parse().map_err(|_| format!("FPS={fps} is not a number"))?;
-        Ok(Self { width, height, fps })
+        Ok(Self { width, height, fps, pixels })
     }
 
-    /// Bytes in one YUYV frame.
+    /// How the frames' colour is to be read (picture.rs).
+    pub fn coding(&self) -> Coding {
+        match self.pixels {
+            Pixels::Yuyv => Coding::Raw,
+            Pixels::Mjpeg => Coding::Jpeg,
+        }
+    }
+
+    /// Bytes in one YUYV frame (an MJPEG frame once decoded).
     pub fn frame_size(&self) -> usize {
         (self.width * self.height * 2) as usize
     }
@@ -89,28 +110,39 @@ pub fn now_monotonic() -> Duration {
 pub struct V4l2 {
     stream: ReadStream,
     format: Format,
+    /// MJPEG: the decoder, and the frame it decodes into.
+    mjpeg: Option<(mjpeg::Decoder, Vec<u8>)>,
 }
+
+/// How often a run of undecodable MJPEG frames is reported.
+const DECODE_REPORT_EVERY: Duration = Duration::from_secs(5);
 
 impl V4l2 {
     pub fn open(node: &Path, want: Format) -> Result<Self, String> {
         let at = |e: io::Error| format!("{}: {e}", node.display());
         let device = Device::open(node).map_err(at)?;
+        let pixel_format = match want.pixels {
+            Pixels::Yuyv => PixelFormat::YUYV,
+            Pixels::Mjpeg => PixelFormat::MJPG,
+        };
         let capture = device
-            .video_capture(PixFormat::new(want.width, want.height, PixelFormat::YUYV))
+            .video_capture(PixFormat::new(want.width, want.height, pixel_format))
             .map_err(at)?;
         let fmt = capture.format();
-        if (fmt.width(), fmt.height(), fmt.pixel_format()) != (want.width, want.height, PixelFormat::YUYV) {
+        if (fmt.width(), fmt.height(), fmt.pixel_format()) != (want.width, want.height, pixel_format) {
             return Err(format!(
-                "{}: the card gives {}x{} {}, not {}x{} YUYV (RES/FMT)",
+                "{}: the card gives {}x{} {}, not {}x{} {} (RES/FMT)",
                 node.display(),
                 fmt.width(),
                 fmt.height(),
                 fmt.pixel_format(),
                 want.width,
-                want.height
+                want.height,
+                pixel_format
             ));
         }
-        if fmt.bytes_per_line() != want.width * 2 {
+        // A JPEG has no stride.
+        if want.pixels == Pixels::Yuyv && fmt.bytes_per_line() != want.width * 2 {
             return Err(format!("{}: stride {} bytes, expected {}", node.display(), fmt.bytes_per_line(), want.width * 2));
         }
         // FPS may be fractional (59.94 = 60000/1001).
@@ -122,7 +154,9 @@ impl V4l2 {
             return Err(format!("{}: the card gives {got:.3} fps, not {} (FPS)", node.display(), want.fps));
         }
         let stream = capture.into_stream().map_err(at)?;
-        Ok(Self { stream, format: want })
+        let mjpeg = (want.pixels == Pixels::Mjpeg)
+            .then(|| (mjpeg::Decoder::new(want.width, want.height), vec![0; want.frame_size()]));
+        Ok(Self { stream, format: want, mjpeg })
     }
 }
 
@@ -138,6 +172,10 @@ impl FrameSource for V4l2 {
         let mut last_frame = now_monotonic();
         let mut no_signal = false;
         let mut warned_clock = false;
+        let mjpeg = &mut self.mjpeg;
+        // Undecodable MJPEG frames since the last report, and when that was.
+        let mut undecodable = 0u64;
+        let mut reported: Option<Duration> = None;
 
         while !quit.load(Ordering::Relaxed) {
             let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
@@ -183,10 +221,29 @@ impl FrameSource for V4l2 {
                 last_seq = Some(sequence);
                 // The card's first buffers after stream-on come short and
                 // flagged (#5): dropped here.
-                if buf.is_error() || buf.len() != frame_size {
+                if buf.is_error() {
                     return Ok(());
                 }
-                on_event(Event::Frame(Frame { data: &buf[..], captured: buf.timestamp(), dequeued }));
+                let data = match mjpeg {
+                    None if buf.len() != frame_size => return Ok(()),
+                    None => &buf[..],
+                    // Decoded here, on the capture thread, so the frame
+                    // reaches the window as YUYV; a frame that does not
+                    // decode is dropped, as a short one is.
+                    Some((decoder, yuyv)) => match decoder.decode(&buf, yuyv) {
+                        Ok(()) => &yuyv[..],
+                        Err(e) => {
+                            undecodable += 1;
+                            if reported.is_none_or(|t| dequeued - t >= DECODE_REPORT_EVERY) {
+                                eprintln!("warning: {undecodable} MJPEG frame(s) dropped, not decodable: {e}");
+                                undecodable = 0;
+                                reported = Some(dequeued);
+                            }
+                            return Ok(());
+                        }
+                    },
+                };
+                on_event(Event::Frame(Frame { data, captured: buf.timestamp(), dequeued }));
                 Ok(())
             })?;
         }
@@ -201,9 +258,13 @@ mod tests {
     #[test]
     fn formats_from_the_settings() {
         let f = Format::from_settings("1920x1080", "59.94", "yuyv422").unwrap();
-        assert_eq!((f.width, f.height, f.frame_size()), (1920, 1080, 1920 * 1080 * 2));
+        assert_eq!((f.width, f.height, f.frame_size(), f.pixels), (1920, 1080, 1920 * 1080 * 2, Pixels::Yuyv));
         assert!((f.fps - 59.94).abs() < 1e-9);
-        assert!(Format::from_settings("1920x1080", "60", "mjpeg").unwrap_err().contains("#17"));
+        assert_eq!(f.coding(), Coding::Raw);
+        // An MJPEG frame is passed on decoded, so as big as a YUYV one.
+        let f = Format::from_settings("1280x720", "60", "mjpeg").unwrap();
+        assert_eq!((f.pixels, f.frame_size(), f.coding()), (Pixels::Mjpeg, 1280 * 720 * 2, Coding::Jpeg));
+        assert!(Format::from_settings("1920x1080", "60", "nv12").unwrap_err().contains("yuyv422 and mjpeg"));
         assert!(Format::from_settings("1281x720", "60", "yuyv422").is_err());
     }
 }

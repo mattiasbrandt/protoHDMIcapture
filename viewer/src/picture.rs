@@ -7,13 +7,31 @@
 //!   `pl_color_repr_decode` (src/colorspace.c);
 //! - gamma, after the matrix in non-linear light: libplacebo
 //!   `pl_shader_decode_color` (src/shaders/colorspace.c).
+//!
+//! What LEVELS=auto means and which matrix applies depend on how mpv gets
+//! the frames (`Coding`).
+
+/// How the frames' colour is to be read, as ffmpeg tags them for mpv.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coding {
+    /// Raw YUYV from V4L2: untagged, so mpv guesses the matrix from the size
+    /// and libplacebo takes limited range.
+    Raw,
+    /// MJPEG (#17): ffmpeg's mjpeg decoder tags every frame BT.601 (BT470BG)
+    /// and full range (yuvj, JFIF), unless a comment says "CS=ITU601"
+    /// (FFmpeg libavcodec/mjpegdec.c). Whether a card's encoder really puts
+    /// full-range values in is not known (the MS2109's is unverified), so
+    /// LEVELS still overrides the range.
+    Jpeg,
+}
 
 /// LEVELS, in the order the overlay's l cycles them (lib/settings.sh).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Levels {
     /// What mpv makes of the card's frames: ffmpeg's V4L2 input tags no
-    /// range, so libplacebo guesses limited for YCbCr (measured on the
-    /// MS2130 at 1080p: mpv's video-out-params say bt.709 limited).
+    /// range on raw frames, so libplacebo guesses limited for YCbCr
+    /// (measured on the MS2130 at 1080p: mpv's video-out-params say bt.709
+    /// limited); JPEG frames are tagged full (`Coding::Jpeg`).
     Auto,
     Limited,
     Full,
@@ -108,15 +126,16 @@ impl Picture {
 
     /// The convert pass's uniform: three rows `[m0, m1, m2, offset]` taking
     /// the texture's (Y, Cb, Cr) to RGB, then `[1/gamma, 0, 0, 0]`.
-    pub fn uniform(&self, width: u32, height: u32) -> [[f32; 4]; 4] {
+    pub fn uniform(&self, width: u32, height: u32, coding: Coding) -> [[f32; 4]; 4] {
         // mp_csp_copy_equalizer_values (gamma-factor stays at its default, 1).
         let brightness = f64::from(self.brightness) / 100.0;
         let contrast = (f64::from(self.contrast) + 100.0) / 100.0;
         let saturation = (f64::from(self.saturation) + 100.0) / 100.0;
         let gamma = (8f64.ln() * f64::from(self.gamma) / 100.0).exp();
 
-        // mp_csp_guess_colorspace: the frames carry no matrix either.
-        let (lr, lg, lb) = if width >= 1280 || height > 576 { (0.2126, 0.7152, 0.0722) } else { (0.2990, 0.5870, 0.1140) };
+        // mp_csp_guess_colorspace for raw frames, which carry no matrix.
+        let bt709 = coding == Coding::Raw && (width >= 1280 || height > 576);
+        let (lr, lg, lb) = if bt709 { (0.2126, 0.7152, 0.0722) } else { (0.2990, 0.5870, 0.1140) };
         // luma_coeffs, then apply_hue_sat with hue 0: saturation scales the
         // Cb and Cr columns.
         let mut m = [
@@ -130,7 +149,12 @@ impl Picture {
         }
 
         // 8-bit levels; libplacebo's x/256 * 256/255 is x/255.
-        let (ymin, ymul, cmid, cmul) = match self.levels {
+        let levels = match (self.levels, coding) {
+            (Levels::Auto, Coding::Raw) => Levels::Limited,
+            (Levels::Auto, Coding::Jpeg) => Levels::Full,
+            (l, _) => l,
+        };
+        let (ymin, ymul, cmid, cmul) = match levels {
             Levels::Auto | Levels::Limited => (16.0 / 255.0, 255.0 / 219.0, 128.0 / 255.0, 0.5 / (112.0 / 255.0)),
             // Chroma's middle is 128/255, not 0.5, as libplacebo has it.
             Levels::Full => (0.0, 1.0, 128.0 / 255.0, 0.5 / (1.0 - 128.0 / 255.0)),
@@ -184,7 +208,11 @@ mod tests {
 
     /// The shader's arithmetic on 8-bit (Y, Cb, Cr), unclamped.
     fn rgb(p: &Picture, w: u32, h: u32, yuv: [f32; 3]) -> [f32; 3] {
-        let u = p.uniform(w, h);
+        rgb_coded(p, w, h, Coding::Raw, yuv)
+    }
+
+    fn rgb_coded(p: &Picture, w: u32, h: u32, coding: Coding, yuv: [f32; 3]) -> [f32; 3] {
+        let u = p.uniform(w, h, coding);
         let yuv = yuv.map(|v| v / 255.0);
         let mut out = [0.0; 3];
         for i in 0..3 {
@@ -201,11 +229,11 @@ mod tests {
     #[test]
     fn neutral_limited_709_is_the_feed_before_the_controls() {
         let p = neutral(Levels::Auto);
-        assert_eq!(p.uniform(1920, 1080), neutral(Levels::Limited).uniform(1920, 1080));
+        assert_eq!(p.uniform(1920, 1080, Coding::Raw), neutral(Levels::Limited).uniform(1920, 1080, Coding::Raw));
         assert!(close(rgb(&p, 1920, 1080, [16.0, 128.0, 128.0]), [0.0; 3]));
         assert!(close(rgb(&p, 1920, 1080, [235.0, 128.0, 128.0]), [1.0; 3]));
         // The constants the shader had before #12: Cr's weight in R.
-        let u = p.uniform(1920, 1080);
+        let u = p.uniform(1920, 1080, Coding::Raw);
         assert!((u[0][2] - 1.5748 * 255.0 / 224.0).abs() < 1e-5);
         assert!((u[2][1] - 1.8556 * 255.0 / 224.0).abs() < 1e-5);
     }
@@ -222,7 +250,7 @@ mod tests {
     #[test]
     fn the_matrix_is_guessed_from_the_size_as_mpv_does() {
         let p = neutral(Levels::Limited);
-        let r_from_cr = |w, h| p.uniform(w, h)[0][2];
+        let r_from_cr = |w, h| p.uniform(w, h, Coding::Raw)[0][2];
         let bt709 = 2.0 * (1.0 - 0.2126) * 255.0 / 224.0;
         let bt601 = 2.0 * (1.0 - 0.2990) * 255.0 / 224.0;
         assert!((r_from_cr(1920, 1080) - bt709).abs() < 1e-5);
@@ -230,6 +258,23 @@ mod tests {
         assert!((r_from_cr(720, 577) - bt709).abs() < 1e-5);
         assert!((r_from_cr(720, 576) - bt601).abs() < 1e-5);
         assert!((r_from_cr(640, 480) - bt601).abs() < 1e-5);
+    }
+
+    #[test]
+    fn jpeg_frames_are_bt601_full_range_on_auto() {
+        let auto = neutral(Levels::Auto);
+        // Full range: 0 and 255 are black and white, at any size.
+        for (w, h) in [(1920, 1080), (1280, 720), (640, 480)] {
+            assert!(close(rgb_coded(&auto, w, h, Coding::Jpeg, [0.0, 128.0, 128.0]), [0.0; 3]));
+            assert!(close(rgb_coded(&auto, w, h, Coding::Jpeg, [255.0, 128.0, 128.0]), [1.0; 3]));
+            let bt601 = 2.0 * (1.0 - 0.2990) * 255.0 / 254.0;
+            assert!((auto.uniform(w, h, Coding::Jpeg)[0][2] - bt601).abs() < 1e-5, "{w}x{h}: BT.601");
+        }
+        // LEVELS still decides the range when set; the matrix stays BT.601.
+        let limited = neutral(Levels::Limited);
+        assert!(close(rgb_coded(&limited, 1280, 720, Coding::Jpeg, [16.0, 128.0, 128.0]), [0.0; 3]));
+        assert!((limited.uniform(1280, 720, Coding::Jpeg)[0][2] - 2.0 * (1.0 - 0.2990) * 255.0 / 224.0).abs() < 1e-5);
+        assert_eq!(neutral(Levels::Full).uniform(1280, 720, Coding::Jpeg), auto.uniform(1280, 720, Coding::Jpeg));
     }
 
     #[test]
@@ -247,9 +292,9 @@ mod tests {
         assert!((grey[0] - grey[1]).abs() < 1e-5 && (grey[1] - grey[2]).abs() < 1e-5, "saturation -100 is grey");
         p = neutral(Levels::Limited);
         p.gamma = 100;
-        assert!((p.uniform(1920, 1080)[3][0] - 1.0 / 8.0).abs() < 1e-6, "gamma 100 is 8");
+        assert!((p.uniform(1920, 1080, Coding::Raw)[3][0] - 1.0 / 8.0).abs() < 1e-6, "gamma 100 is 8");
         p.gamma = -50;
-        assert!((p.uniform(1920, 1080)[3][0] - 8f32.sqrt()).abs() < 1e-5);
+        assert!((p.uniform(1920, 1080, Coding::Raw)[3][0] - 8f32.sqrt()).abs() < 1e-5);
         // Contrast scales chroma too: a colour's distance from grey grows.
         p = neutral(Levels::Limited);
         p.contrast = 100;

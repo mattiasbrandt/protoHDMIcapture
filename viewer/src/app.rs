@@ -666,7 +666,7 @@ impl App {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&picture_buffer, 0, &picture::bytes(&self.picture.uniform(w, h)));
+        queue.write_buffer(&picture_buffer, 0, &picture::bytes(&self.picture.uniform(w, h, self.format.coding())));
         let convert_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("convert"),
             layout: &convert_layout,
@@ -839,7 +839,7 @@ impl App {
 
     fn picture_changed(&mut self) {
         if let Some(gfx) = &self.gfx {
-            let u = self.picture.uniform(self.format.width, self.format.height);
+            let u = self.picture.uniform(self.format.width, self.format.height, self.format.coding());
             gfx.queue.write_buffer(&gfx.picture_buffer, 0, &picture::bytes(&u));
         }
         self.repaint = true;
@@ -1384,7 +1384,7 @@ mod tests {
             Picture::from_settings(s.get("LEVELS"), s.get("CONTRAST"), s.get("BRIGHTNESS"), s.get("GAMMA"), s.get("SATURATION"))
                 .unwrap();
         let scaling = Scaling::from_settings(s.get("SCALING")).unwrap();
-        let format = Format { width: 1920, height: 1080, fps: 60.0 };
+        let format = Format { width: 1920, height: 1080, fps: 60.0, pixels: crate::capture::Pixels::Yuyv };
         let mut app = App {
             format,
             slot: Arc::new(Mutex::new(Slot { data: Vec::new(), tag: None, superseded: 0 })),

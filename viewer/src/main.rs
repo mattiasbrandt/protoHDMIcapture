@@ -7,6 +7,7 @@ mod capture;
 mod card;
 mod desktop;
 mod gputime;
+mod mjpeg;
 mod osd;
 mod overlay;
 mod picture;
