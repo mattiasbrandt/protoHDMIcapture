@@ -14,6 +14,16 @@ use linuxvideo::{Device, Fract};
 use super::{DECODE_REPORT_EVERY, Event, Format, Frame, FrameSource, NO_SIGNAL_AFTER, POLL_SLICE, Pixels, now_monotonic};
 use crate::mjpeg;
 
+impl Pixels {
+    /// Its V4L2 fourcc.
+    pub fn fourcc(self) -> PixelFormat {
+        match self {
+            Pixels::Yuyv => PixelFormat::YUYV,
+            Pixels::Mjpeg => PixelFormat::MJPG,
+        }
+    }
+}
+
 /// V4L2 (Linux).
 pub struct V4l2 {
     stream: ReadStream,
@@ -26,10 +36,7 @@ impl V4l2 {
     pub fn open(node: &Path, want: Format) -> Result<Self, String> {
         let at = |e: io::Error| format!("{}: {e}", node.display());
         let device = Device::open(node).map_err(at)?;
-        let pixel_format = match want.pixels {
-            Pixels::Yuyv => PixelFormat::YUYV,
-            Pixels::Mjpeg => PixelFormat::MJPG,
-        };
+        let pixel_format = want.pixels.fourcc();
         let capture = device
             .video_capture(PixFormat::new(want.width, want.height, pixel_format))
             .map_err(at)?;

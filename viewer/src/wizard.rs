@@ -376,18 +376,15 @@ pub fn ignore_without(pattern: &str, name: &str) -> String {
     kept.join("|")
 }
 
-/// The FMT values the Rust viewer captures (`capture::Format`). lib/setup.sh
-/// also offers nv12, which mpv plays; offered here it would fail at the
-/// feed, and as uncompressed it could hide the card's yuyv422 at the same
-/// fps and size.
-const FORMATS: [&str; 2] = ["yuyv422", "mjpeg"];
-
 /// lib/setup.sh's `list_modes`: best first (highest fps, then the largest
 /// picture, then uncompressed over compressed), one per fps, size and
-/// compression, at most 12; only the formats in `FORMATS`.
+/// compression, at most 12; only the formats the Rust viewer captures
+/// (`Pixels`). lib/setup.sh also offers nv12, which mpv plays; offered
+/// here it would fail at the feed, and as uncompressed it could hide the
+/// card's yuyv422 at the same fps and size.
 pub fn best_modes(modes: &[Mode]) -> Vec<Mode> {
-    let raw = |m: &Mode| u8::from(m.fmt != "mjpeg");
-    let mut rows: Vec<Mode> = modes.iter().filter(|m| FORMATS.contains(&m.fmt.as_str())).cloned().collect();
+    let raw = |m: &Mode| u8::from(m.fmt != Pixels::Mjpeg.setting());
+    let mut rows: Vec<Mode> = modes.iter().filter(|m| is_fmt(&m.fmt)).cloned().collect();
     let key = |m: &Mode| (m.fps, u64::from(m.width) * u64::from(m.height), raw(m));
     // Stable, so equal keys keep the card's order; `sort -u` keeps the first.
     rows.sort_by_key(|m| std::cmp::Reverse(key(m)));
@@ -420,7 +417,7 @@ fn is_whole(v: &str) -> bool {
 }
 
 fn is_fmt(v: &str) -> bool {
-    FORMATS.contains(&v)
+    Pixels::from_setting(v).is_ok()
 }
 
 /// The first letter in upper case (bash's `${v^}`).
@@ -932,10 +929,10 @@ impl Wizard {
         let cur_key = format!("{} {} {}", self.cur("FMT"), self.cur("RES"), self.cur("FPS"));
         let mut items = Vec::new();
         for (i, m) in self.modes.iter().enumerate() {
-            let desc = match m.fmt.as_str() {
-                "yuyv422" => "uncompressed YUYV".to_string(),
-                "mjpeg" => "MJPEG (compressed, needs decoding)".to_string(),
-                f => f.to_string(),
+            let desc = match Pixels::from_setting(&m.fmt) {
+                Ok(Pixels::Yuyv) => "uncompressed YUYV".to_string(),
+                Ok(Pixels::Mjpeg) => "MJPEG (compressed, needs decoding)".to_string(),
+                Err(_) => m.fmt.clone(),
             };
             let mut tag = if i == 0 { Some("recommended".to_string()) } else { None };
             if near.as_ref() == Some(m) {
@@ -988,14 +985,14 @@ impl Wizard {
     }
 
     fn format_input(&mut self, step: Step) {
-        let (prompt, key, valid): (&str, &str, fn(&str) -> bool) = match step {
-            Step::FormatRes => ("Resolution", "RES", is_size),
-            Step::FormatFps => ("Frames per second", "FPS", is_whole),
-            _ => ("Format (yuyv422 | mjpeg)", "FMT", is_fmt),
+        let (prompt, key, valid): (String, &str, fn(&str) -> bool) = match step {
+            Step::FormatRes => ("Resolution".into(), "RES", is_size),
+            Step::FormatFps => ("Frames per second".into(), "FPS", is_whole),
+            _ => (format!("Format ({})", Pixels::settings().join(" | ")), "FMT", is_fmt),
         };
         let default = self.cur(key);
         let body = vec!["The card lists no modes: type the mode the source sends.".into()];
-        self.show(step, body, Ask::Input { prompt: prompt.into(), value: String::new(), default, valid, invalid: None });
+        self.show(step, body, Ask::Input { prompt, value: String::new(), default, valid, invalid: None });
     }
 
     fn signal_stage(&mut self) {
@@ -1060,7 +1057,7 @@ impl Wizard {
         if self.step != Step::SignalWait || self.running != Phase::Feed || self.measure.looked_at >= PICTURE_FRAMES {
             return;
         }
-        if !["yuyv422", "mjpeg"].contains(&self.cur("FMT").as_str()) || data.len() != format.frame_size() {
+        if !is_fmt(&self.cur("FMT")) || data.len() != format.frame_size() {
             self.measure.unchecked = Some(format!("FMT={} frames are not read here", self.cur("FMT")));
             return;
         }
@@ -1902,17 +1899,14 @@ impl System for Linux {
     }
 
     fn modes(&self, node: &Node) -> Vec<Mode> {
-        use linuxvideo::format::{FrameIntervals, FrameSizes, PixelFormat};
+        use linuxvideo::format::{FrameIntervals, FrameSizes};
         let Ok(dev) = linuxvideo::Device::open(&node.path) else { return Vec::new() };
         let mut out = Vec::new();
         for desc in dev.formats(linuxvideo::BufType::VIDEO_CAPTURE).flatten() {
             let pf = desc.pixel_format();
-            let fmt = match pf {
-                PixelFormat::YUYV => "yuyv422",
-                PixelFormat::MJPG => "mjpeg",
-                p if p == PixelFormat::from_fourcc(*b"NV12") => "nv12",
-                _ => continue,
-            };
+            // Only what the Rust viewer captures: `best_modes` drops the
+            // rest anyway.
+            let Some(fmt) = Pixels::ALL.into_iter().find(|p| p.fourcc() == pf).map(Pixels::setting) else { continue };
             // Discrete sizes and intervals only, as lib/setup.sh reads
             // v4l2-ctl's list.
             let Ok(FrameSizes::Discrete(sizes)) = dev.frame_sizes(pf) else { continue };

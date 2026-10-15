@@ -26,12 +26,50 @@ const DECODE_REPORT_EVERY: Duration = Duration::from_secs(5);
 /// No frame for this long is "no signal" (GLOSSARY).
 pub const NO_SIGNAL_AFTER: Duration = Duration::from_secs(1);
 
-/// What the card sends, from FMT.
+/// What the card sends, from FMT: the one list of the formats the Rust
+/// viewer captures. The settings parse, the wizard's mode list and each
+/// platform's format names come from it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pixels {
     Yuyv,
     /// JPEG frames, decoded to YUYV in the capture loop (#17).
     Mjpeg,
+}
+
+/// The FMT values lib/settings.sh accepts that the Rust viewer does not
+/// capture, each with the reason. view.sh plays them.
+pub const NOT_CAPTURED: [(&str, &str); 3] = [
+    ("nv12", "not captured by the Rust viewer yet"),
+    ("rawvideo", "lets the player pick the uncompressed format, and the Rust viewer has to know which"),
+    ("", "leaves the card on the format it was last set to, and the Rust viewer has to know which"),
+];
+
+impl Pixels {
+    /// Every captured format, uncompressed first.
+    pub const ALL: [Pixels; 2] = [Pixels::Yuyv, Pixels::Mjpeg];
+
+    /// Its FMT spelling.
+    pub fn setting(self) -> &'static str {
+        match self {
+            Pixels::Yuyv => "yuyv422",
+            Pixels::Mjpeg => "mjpeg",
+        }
+    }
+
+    /// From its FMT spelling; a value that is not captured is refused with
+    /// the reason.
+    pub fn from_setting(fmt: &str) -> Result<Self, String> {
+        if let Some(p) = Self::ALL.into_iter().find(|p| p.setting() == fmt) {
+            return Ok(p);
+        }
+        let why = NOT_CAPTURED.iter().find(|(v, _)| *v == fmt).map_or("not an FMT value", |(_, why)| why);
+        Err(format!("FMT={fmt}: {why}; use {}, or view.sh", Self::settings().join(" or ")))
+    }
+
+    /// Every captured format's FMT spelling, uncompressed first.
+    pub fn settings() -> Vec<&'static str> {
+        Self::ALL.iter().map(|p| p.setting()).collect()
+    }
 }
 
 /// What the card is asked for, from RES, FPS and FMT.
@@ -46,11 +84,7 @@ pub struct Format {
 impl Format {
     /// RES, FPS and FMT as the settings hold them (already validated).
     pub fn from_settings(res: &str, fps: &str, fmt: &str) -> Result<Self, String> {
-        let pixels = match fmt {
-            "yuyv422" => Pixels::Yuyv,
-            "mjpeg" => Pixels::Mjpeg,
-            other => return Err(format!("FMT={other}: the Rust viewer captures yuyv422 and mjpeg only for now")),
-        };
+        let pixels = Pixels::from_setting(fmt)?;
         let (w, h) = res.split_once('x').ok_or(format!("RES={res} is not WIDTHxHEIGHT"))?;
         let width: u32 = w.parse().map_err(|_| format!("RES={res}: bad width"))?;
         let height: u32 = h.parse().map_err(|_| format!("RES={res}: bad height"))?;
@@ -166,7 +200,39 @@ mod tests {
         // An MJPEG frame is passed on decoded, so as big as a YUYV one.
         let f = Format::from_settings("1280x720", "60", "mjpeg").unwrap();
         assert_eq!((f.pixels, f.frame_size(), f.coding()), (Pixels::Mjpeg, 1280 * 720 * 2, Coding::Jpeg));
-        assert!(Format::from_settings("1920x1080", "60", "nv12").unwrap_err().contains("yuyv422 and mjpeg"));
         assert!(Format::from_settings("1281x720", "60", "yuyv422").is_err());
+    }
+
+    #[test]
+    fn a_format_not_captured_is_refused_with_the_reason() {
+        assert_eq!(
+            Format::from_settings("1920x1080", "60", "nv12").unwrap_err(),
+            "FMT=nv12: not captured by the Rust viewer yet; use yuyv422 or mjpeg, or view.sh"
+        );
+        assert!(Format::from_settings("1920x1080", "60", "").unwrap_err().starts_with("FMT=: leaves the card on the format"));
+        assert!(Format::from_settings("1920x1080", "60", "rawvideo").unwrap_err().starts_with("FMT=rawvideo: lets the player pick"));
+        for p in Pixels::ALL {
+            assert_eq!(Pixels::from_setting(p.setting()), Ok(p));
+        }
+    }
+
+    /// Every FMT value lib/settings.sh accepts is captured or refused on
+    /// purpose: a new one fails here until it is one or the other.
+    #[test]
+    fn every_fmt_value_is_captured_or_refused_on_purpose() {
+        let row = crate::settings::rows().into_iter().find(|r| r.name == "FMT").expect("lib/settings.sh has FMT");
+        let mut values: Vec<&str> = row.values.strip_prefix("enum:").expect("FMT is an enum").split(',').collect();
+        if row.has_flag("empty") {
+            values.push("");
+        }
+        for v in &values {
+            let captured = Pixels::ALL.iter().any(|p| p.setting() == *v);
+            let refused = NOT_CAPTURED.iter().any(|(n, _)| n == v);
+            assert!(captured != refused, "FMT={v}: captured ({captured}) or on NOT_CAPTURED ({refused}), exactly one");
+        }
+        // And nothing is decided for a value the settings do not have.
+        for v in Pixels::ALL.iter().map(|p| p.setting()).chain(NOT_CAPTURED.iter().map(|(n, _)| *n)) {
+            assert!(values.contains(&v), "FMT={v} is not in lib/settings.sh");
+        }
     }
 }

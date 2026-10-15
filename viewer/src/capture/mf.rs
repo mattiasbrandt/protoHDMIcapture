@@ -198,7 +198,7 @@ fn reader(link: &str, want: Format, callback: Option<&IMFSourceReaderCallback>) 
         };
         let (w, h) = ((size >> 32) as u32, size as u32);
         let fps = (rate >> 32) as f64 / (rate as u32).max(1) as f64;
-        let name = if sub == MFVideoFormat_YUY2 { "YUY2" } else if sub == MFVideoFormat_MJPG { "MJPG" } else { "other" };
+        let name = Pixels::ALL.into_iter().map(subtype).find(|(g, _)| *g == sub).map_or("other", |(_, name)| name);
         offered.push(format!("{w}x{h} {name} {fps:.3}"));
         // FPS may be fractional (59.94 = 60000/1001), as on V4L2.
         if sub == want_sub && (w, h) == (want.width, want.height) && (fps - want.fps).abs() <= want.fps * 0.005 {
