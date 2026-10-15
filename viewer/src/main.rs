@@ -12,6 +12,7 @@ mod capture_cards;
 mod card;
 mod dashboard;
 mod desktop;
+mod feed;
 mod gputime;
 mod keys;
 mod level;
@@ -23,6 +24,7 @@ mod picture;
 mod present;
 #[cfg(target_os = "linux")]
 mod pw;
+mod run;
 mod scale;
 mod screenshot;
 mod session;
@@ -120,7 +122,7 @@ fn card_audio_input(card: Option<&card::Node>) -> Result<String, String> {
 /// setup.done. True when the feed should start: saved and asked for, or
 /// the first run skipped.
 #[cfg(target_os = "linux")]
-fn setup(first_run: bool, quit: &app::Quit) -> Result<bool, String> {
+fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
     use std::cell::RefCell;
     use std::os::fd::AsRawFd;
     use std::rc::Rc;
@@ -190,11 +192,11 @@ fn setup(first_run: bool, quit: &app::Quit) -> Result<bool, String> {
             }
             let phase = wiz.borrow().phase();
             wiz.borrow_mut().running = phase;
-            match phase {
-                Phase::Choose => app::run(Box::new(wizard::Idle), opts(), quit.clone())?,
+            let outcome = match phase {
+                Phase::Choose => app::run(Box::new(wizard::Idle), opts(), quit),
                 Phase::Feed => {
                     // One video window at a time, with view.sh too.
-                    let mut session = match session::Session::start(&dir, desktop.clone())? {
+                    let session = match session::Session::start(&dir, desktop.clone())? {
                         Ok(s) => s,
                         Err(running) => {
                             let pid = running.pid.map_or(String::new(), |p| format!(" (pid {p})"));
@@ -202,6 +204,9 @@ fn setup(first_run: bool, quit: &app::Quit) -> Result<bool, String> {
                             continue;
                         }
                     };
+                    // The feed owner with the session only: the audio-sync
+                    // loopback is the wizard's.
+                    let mut feed: feed::Feed = feed::Feed::new(Some(session));
                     let Some((node, format)) = wiz.borrow().feed() else {
                         return Err("the wizard reached the feed without a card".into());
                     };
@@ -213,18 +218,25 @@ fn setup(first_run: bool, quit: &app::Quit) -> Result<bool, String> {
                             continue;
                         }
                     };
-                    session.announce()?;
-                    // The card gone mid-check is the wizard's to say, not the end.
-                    if let Err(e) = app::run(Box::new(source), opts(), quit.clone()) {
-                        wiz.borrow_mut().feed_failed(e);
-                        continue;
+                    if let Some(s) = feed.session() {
+                        s.announce()?;
                     }
+                    let outcome = app::run(Box::new(source), opts(), quit);
+                    feed.finish();
+                    outcome
                 }
-            }
-            // The window closed with the stage still wanting it: the window's
-            // close button, or a signal.
-            if !wiz.borrow().wants_exit() {
-                wiz.borrow_mut().abandon();
+            };
+            match outcome {
+                // The wizard moved on, or ended (its window's close button
+                // ends it unsaved): its state says what comes next.
+                run::Outcome::Closed | run::Outcome::TimeUp => {}
+                run::Outcome::Signal => wiz.borrow_mut().abandon(),
+                // The card gone mid-check, or the feed's window failing,
+                // is the wizard's to say, not the end.
+                run::Outcome::CaptureEnded(e) if phase == Phase::Feed => wiz.borrow_mut().feed_failed(format!("capture: {e}")),
+                run::Outcome::Failed(e) if phase == Phase::Feed => wiz.borrow_mut().feed_failed(e),
+                run::Outcome::CaptureEnded(e) => return Err(format!("capture: {e}")),
+                run::Outcome::Failed(e) => return Err(e),
             }
         }
     })();
@@ -240,7 +252,7 @@ fn setup(first_run: bool, quit: &app::Quit) -> Result<bool, String> {
 
 /// No setup wizard on Windows yet (#18): it reads V4L2, sysfs and PipeWire.
 #[cfg(windows)]
-fn setup(_: bool, _: &app::Quit) -> Result<bool, String> {
+fn setup(_: bool, _: &run::Quit) -> Result<bool, String> {
     Err(format!(
         "the setup wizard is not on Windows yet; write the settings by hand in {}",
         settings::config_file(&|k| env::var(k).ok()).display()
@@ -264,7 +276,7 @@ fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::
     Ok((Box::new(source), picked.node))
 }
 
-fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
+fn view(args: &[String], quit: &run::Quit) -> Result<(), String> {
     // First run: no settings file, so the wizard, as view.sh offers it
     // (not for a measurement run, nor for the wizard's own children). On
     // Windows there is no wizard yet: the defaults, said once.
@@ -279,7 +291,7 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
         && !settings::config_file(&|k| env::var(k).ok()).exists()
         && unset("PROTOHDMI_SETUP_CHILD")
         && unset("NO_SETUP")
-        && !setup(true, &quit)?
+        && !setup(true, quit)?
     {
         return Ok(());
     }
@@ -342,8 +354,8 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
     // files yet (#18).
     let desktop = desktop::detect()?;
     #[cfg(target_os = "linux")]
-    let mut session = match session::Session::start(&session::run_dir(), desktop.clone())? {
-        Ok(s) => s,
+    let session = match session::Session::start(&session::run_dir(), desktop.clone())? {
+        Ok(s) => Some(s),
         Err(running) => {
             let pid = running.pid.map_or("unknown".to_string(), |p| p.to_string());
             if running.focused {
@@ -358,6 +370,10 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
             return Ok(());
         }
     };
+    #[cfg(not(target_os = "linux"))]
+    let session = None;
+    // From here on, an early return ends what the feed holds in its order.
+    let mut feed: feed::Feed = feed::Feed::new(session);
     opts.desktop = desktop;
 
     let (source, node): (Box<dyn capture::FrameSource>, _) = if test_pattern {
@@ -367,17 +383,9 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
         let (source, node) = open_card(&s, format)?;
         (source, Some(node))
     };
-    let sound = match audio(&s, node.as_ref()) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("warning: no audio: {e}");
-            live.set_audio(dashboard::AudioLive::Failed(e.clone()));
-            opts.audio = app::AudioSetup::Failed(e);
-            None
-        }
-    };
-    match &sound {
-        Some(a) => {
+    match audio(&s, node.as_ref()) {
+        Ok(Some(a)) => {
+            let a = feed.set_audio(a);
             opts.audio = app::AudioSetup::Running(a.controls());
             let (source, sink, buffer_ms) = a.link();
             live.set_audio(dashboard::AudioLive::Running {
@@ -387,11 +395,15 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
                 counters: a.counters.clone(),
             });
         }
-        None if s.get("AUDIO") == "none" => {
+        Ok(None) => {
             opts.audio = app::AudioSetup::Off("none".into());
             live.set_audio(dashboard::AudioLive::Off("AUDIO=none".into()));
         }
-        None => {}
+        Err(e) => {
+            eprintln!("warning: no audio: {e}");
+            live.set_audio(dashboard::AudioLive::Failed(e.clone()));
+            opts.audio = app::AudioSetup::Failed(e);
+        }
     }
     opts.source = s.get("SOURCE").to_string();
     if !opts.source.is_empty() && sources::get(&opts.source).is_none() {
@@ -403,7 +415,9 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
     }
     // As view.sh: after the audio, before the window.
     #[cfg(target_os = "linux")]
-    if s.get("REFRESH") == "match" {
+    if s.get("REFRESH") == "match"
+        && let Some(session) = feed.session()
+    {
         session.match_refresh(format.fps);
     }
     #[cfg(windows)]
@@ -419,27 +433,32 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
     }
     // As view.sh writes it once its player is started.
     #[cfg(target_os = "linux")]
-    session.announce()?;
+    if let Some(session) = feed.session() {
+        session.announce()?;
+    }
     // The dashboard's socket, with the video lock held; a failure costs
     // only the dashboard.
-    let _dashboard = match dashboard::Server::start(&dashboard::socket_path(&session::run_dir()), live, dashboard::TICK) {
+    match dashboard::Server::start(&dashboard::socket_path(&session::run_dir()), live, dashboard::TICK) {
         Ok(server) => {
+            feed.set_dashboard(server);
             if debug_window && let Err(e) = dashboard::open(None) {
                 eprintln!("warning: DEBUG=window: {e}");
             }
-            Some(server)
         }
-        Err(e) => {
-            eprintln!("warning: no dashboard: {e}");
-            None
-        }
-    };
-    let result = app::run(source, opts, quit);
-    if let (true, Some(a)) = (stats, &sound) {
+        Err(e) => eprintln!("warning: no dashboard: {e}"),
+    }
+    let outcome = app::run(source, opts, quit);
+    if let (true, Some(a)) = (stats, feed.audio()) {
         eprintln!("summary: audio {}", a.granted());
         eprintln!("summary: audio {}", a.status());
     }
-    result
+    feed.finish();
+    // Every way the viewer's window ends is the end of the viewer.
+    match outcome {
+        run::Outcome::Closed | run::Outcome::Signal | run::Outcome::TimeUp => Ok(()),
+        run::Outcome::CaptureEnded(e) => Err(format!("capture: {e}")),
+        run::Outcome::Failed(e) => Err(e),
+    }
 }
 
 fn main() -> ExitCode {
@@ -472,7 +491,7 @@ fn main() -> ExitCode {
         };
     }
     // First: a signal from here on ends in the normal teardown.
-    let quit = match app::Quit::install() {
+    let quit = match run::Quit::install() {
         Ok(q) => q,
         Err(e) => {
             eprintln!("protohdmicapture: {e}");
@@ -484,9 +503,9 @@ fn main() -> ExitCode {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
         }
-        setup(false, &quit).and_then(|play| if play { view(&[], quit) } else { Ok(()) })
+        setup(false, &quit).and_then(|play| if play { view(&[], &quit) } else { Ok(()) })
     } else {
-        view(&args, quit)
+        view(&args, &quit)
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,7 +24,7 @@ use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::audio::Controls;
-use crate::capture::{self, Event, Format, FrameSource, Signal, now_monotonic};
+use crate::capture::{Format, FrameSource, now_monotonic};
 use crate::desktop::Desktop;
 use crate::gputime::GpuTimer;
 use crate::keys::{self, Action};
@@ -33,7 +33,8 @@ use crate::overlay::{self, Notify, Overlay, Page};
 use crate::picture::{self, Colour, Picture};
 #[cfg(target_os = "linux")]
 use crate::present::Presentation;
-use crate::present::{Feedback, Outcome, Tag};
+use crate::present::{self, Feedback, Tag};
+use crate::run::{End, Host, Outcome, Plan, Quit, Slot, Wake, Waker};
 use crate::scale::{self, Filter, Scaling};
 use crate::screenshot::Screenshot;
 use crate::settings::{Row, Settings};
@@ -75,7 +76,7 @@ pub struct Options {
     pub window: WindowMode,
     /// Fullscreen on this output instead of the focused one (measurements).
     pub monitor: Option<String>,
-    /// Quit after this long (measurements).
+    /// End this window after this long (measurements): `Outcome::TimeUp`.
     pub seconds: Option<u64>,
     /// Print timing every 10 s and a summary (measurements).
     pub stats: bool,
@@ -151,29 +152,23 @@ struct SceneText {
     message: Option<String>,
 }
 
-enum UserEvent {
-    Frame,
+/// What reaches the window's loop from other threads, with the number of
+/// the window it is for: winit has one event loop per process, so an event
+/// sent as one window ended reaches the next, which ignores it.
+struct UserEvent {
+    window: u64,
+    what: What,
+}
+
+enum What {
+    /// From the window run (run.rs).
+    Run(Wake),
     /// A thread has something to show (`Notify`).
     Notice,
-    Quit,
-    /// This window's capture ended on its own (the card gone): the
-    /// window's number, so that one sent as an earlier window's loop ended
-    /// cannot close the next window (#13).
-    CaptureEnded(u64),
-    /// The frame policy's signal state changed (`Event::Signal`).
-    Signal(Signal),
 }
 
-/// Numbers each window `run` opens, for `UserEvent::CaptureEnded`.
+/// Numbers each window opens, for `UserEvent`.
 static WINDOWS: AtomicU64 = AtomicU64::new(0);
-
-/// The newest captured frame, waiting for the display; one replaced before
-/// the display took it is skipped (not a capture gap).
-struct Slot {
-    data: Vec<u8>,
-    tag: Option<Tag>,
-    superseded: u64,
-}
 
 struct Gfx {
     window: Arc<Window>,
@@ -241,7 +236,8 @@ struct App {
     stats: Stats,
     in_flight: u32,
     last_submit: Duration,
-    error: Option<String>,
+    /// The run's end (run.rs): set here when the window closes or fails.
+    end: End,
 }
 
 // One triangle covering the viewport.
@@ -372,188 +368,114 @@ pub(crate) fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-/// Ctrl-C, SIGTERM and SIGHUP (ctrlc's termination feature), installed by
-/// main before anything is switched, so a signal at any point ends in the
-/// normal teardown (the display switched back, the run dir cleaned) rather
-/// than leaving it to the next run's recovery.
-type Wake = Box<dyn Fn() + Send>;
-
-#[derive(Clone)]
-pub struct Quit {
-    flag: Arc<AtomicBool>,
-    /// Wakes the window's loop, once it runs.
-    wake: Arc<Mutex<Option<Wake>>>,
-}
-
-impl Quit {
-    pub fn install() -> Result<Self, String> {
-        let q = Self { flag: Arc::default(), wake: Arc::default() };
-        let handler = q.clone();
-        ctrlc::set_handler(move || handler.request()).map_err(|e| format!("signal handler: {e}"))?;
-        Ok(q)
-    }
-
-    pub fn request(&self) {
-        self.flag.store(true, Ordering::Relaxed);
-        if let Some(wake) = self.wake.lock().expect("the quit lock is never poisoned").as_ref() {
-            wake();
-        }
-    }
-
-    pub fn requested(&self) -> bool {
-        self.flag.load(Ordering::Relaxed)
-    }
-
-    fn on_request(&self, wake: Wake) {
-        *self.wake.lock().expect("the quit lock is never poisoned") = Some(wake);
-    }
-}
-
 thread_local! {
-    /// The event loop between runs: one per process (winit cannot build a
-    /// second on Linux), run once per window, as the wizard opens one
+    /// The event loop between windows: one per process (winit cannot build
+    /// a second on Linux), run once per window, as the wizard opens one
     /// window for choosing the card and another for its feed (#13).
     static EVENT_LOOP: RefCell<Option<EventLoop<UserEvent>>> = const { RefCell::new(None) };
 }
 
-/// Runs the window until quit; the capture thread feeds it. Returns the
-/// capture's error, if it failed. May be called again for another window.
-pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Result<(), String> {
-    let format = source.format();
-    let mut event_loop = match EVENT_LOOP.with(|l| l.borrow_mut().take()) {
-        Some(l) => l,
-        None => EventLoop::<UserEvent>::with_user_event().build().map_err(|e| format!("event loop: {e}"))?,
+/// One window over `source` (run.rs), on winit: until it ends, and why.
+pub fn run(source: Box<dyn FrameSource>, opts: Options, quit: &Quit) -> Outcome {
+    let plan = Plan {
+        seconds: opts.seconds.map(Duration::from_secs),
+        live: opts.live.clone(),
+        // The wizard's page says what its feed does (its signal check).
+        log_signal: opts.wizard.is_none(),
+        stats: opts.stats,
     };
-    let proxy = event_loop.create_proxy();
-    // Stops this window's capture: set once its loop ends, which a quit
-    // request (q, a signal, --seconds) or the capture's own end brings.
-    let quit = Arc::new(AtomicBool::new(false));
-    {
-        let p = proxy.clone();
-        quitter.on_request(Box::new(move || {
-            let _ = p.send_event(UserEvent::Quit);
-        }));
-    }
-    // A signal before the loop's wake was set.
-    if quitter.requested() {
-        let _ = proxy.send_event(UserEvent::Quit);
-    }
-    let stopper = || {
-        let q = quitter.clone();
-        move || q.request()
-    };
-    if let Some(s) = opts.seconds {
-        let stop = stopper();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_secs(s));
-            stop();
-        });
+    let mut host = Winit { opts: Some(opts), event_loop: None, window_no: 0 };
+    crate::run::run(&mut host, source, plan, quit)
+}
+
+/// The window run's host on winit (the host seam, run.rs): the window,
+/// its rendering, keys and overlay, and the screenshot finished before it
+/// closes. Holds the process's event loop from `open` until it is dropped.
+struct Winit {
+    /// Taken by `show`.
+    opts: Option<Options>,
+    event_loop: Option<EventLoop<UserEvent>>,
+    window_no: u64,
+}
+
+impl Host for Winit {
+    fn open(&mut self) -> Result<Waker, String> {
+        let event_loop = match EVENT_LOOP.with(|l| l.borrow_mut().take()) {
+            Some(l) => l,
+            None => EventLoop::<UserEvent>::with_user_event().build().map_err(|e| format!("event loop: {e}"))?,
+        };
+        let proxy = event_loop.create_proxy();
+        self.event_loop = Some(event_loop);
+        let window = WINDOWS.fetch_add(1, Ordering::Relaxed);
+        self.window_no = window;
+        Ok(Arc::new(move |w| {
+            let _ = proxy.send_event(UserEvent { window, what: What::Run(w) });
+        }))
     }
 
-    let slot = Arc::new(Mutex::new(Slot { data: vec![0; format.frame_size()], tag: None, superseded: 0 }));
-    let start = now_monotonic();
-    let window_no = WINDOWS.fetch_add(1, Ordering::Relaxed);
-    let capture_thread = {
-        let slot = slot.clone();
-        let quit = quit.clone();
-        let live = opts.live.clone();
-        // The wizard's page says what its feed does (its signal check), so
-        // its windows log no signal changes; Idle, before a card is picked,
-        // has none to report.
-        let log_signal = opts.wizard.is_none();
-        thread::spawn(move || -> Result<(u64, u64), String> {
-            let mut frames = 0u64;
-            let mut gaps = 0u64;
-            let result = capture::run(&mut *source, &capture::Monotonic, &quit, &live.dropped, &mut |e| match e {
-                Event::Frame(f) => {
-                    frames += 1;
-                    live.frame();
-                    {
-                        let mut s = slot.lock().expect("the slot's lock is never poisoned");
-                        if s.tag.is_some() {
-                            s.superseded += 1;
-                        }
-                        s.data.copy_from_slice(f.data);
-                        s.tag = Some(Tag { captured: f.captured, dequeued: f.dequeued, repaint: false });
-                    }
-                    let _ = proxy.send_event(UserEvent::Frame);
+    fn show(&mut self, format: Format, slot: &Arc<Mutex<Slot>>, end: &End) {
+        let (Some(event_loop), Some(opts)) = (self.event_loop.as_mut(), self.opts.take()) else {
+            end.set_or_warn(Outcome::Failed("the window was shown without being opened".into()));
+            return;
+        };
+        let window_no = self.window_no;
+        let notices: Arc<Mutex<Vec<(String, Duration)>>> = Arc::default();
+        let notify: Notify = {
+            let (n, p) = (notices.clone(), event_loop.create_proxy());
+            Arc::new(move |message| {
+                if let Some(m) = message {
+                    n.lock().expect("the notices' lock is never poisoned").push(m);
                 }
-                Event::Gap { from, to, lost } => {
-                    gaps += 1;
-                    live.gap(from, to, lost);
-                    eprintln!("capture gap: sequence {from} -> {to}, {lost} lost");
-                }
-                Event::Signal(s) => {
-                    live.signal(&s);
-                    if log_signal {
-                        eprintln!("{s}");
-                    }
-                    let _ = proxy.send_event(UserEvent::Signal(s));
-                }
-            });
-            // The window ends with its capture. Not sent when the window
-            // ended first; and one sent just as it ended, which the next
-            // window's loop would get, carries this window's number.
-            if !quit.load(Ordering::Relaxed) {
-                let _ = proxy.send_event(UserEvent::CaptureEnded(window_no));
-            }
-            result.map(|()| (frames, gaps)).map_err(|e| format!("capture: {e}"))
-        })
-    };
-
-    let notices: Arc<Mutex<Vec<(String, Duration)>>> = Arc::default();
-    let notify: Notify = {
-        let (n, p) = (notices.clone(), event_loop.create_proxy());
-        Arc::new(move |message| {
-            if let Some(m) = message {
-                n.lock().expect("the notices' lock is never poisoned").push(m);
-            }
-            let _ = p.send_event(UserEvent::Notice);
-        })
-    };
-    if let AudioSetup::Running(c) = &opts.audio {
-        c.set_notify(notify.clone());
-    }
-    let mut app = App {
-        window_no,
-        format,
-        stats: Stats::new(start, opts.stats, opts.live.clone()),
-        picture: opts.picture,
-        scaling: opts.scaling,
-        overlay: Overlay::new(&opts.source, Instant::now()),
-        baseline: overlay::Values::new(),
-        notices,
-        notify,
-        repaint: false,
-        reconvert: false,
-        deadline: None,
-        placer: None,
-        modifiers: ModifiersState::empty(),
-        opts,
-        slot: slot.clone(),
-        gfx: None,
-        in_flight: 0,
-        last_submit: start,
-        error: None,
-    };
-    app.baseline = app.values();
-    let loop_result = event_loop.run_app_on_demand(&mut app);
-    EVENT_LOOP.with(|l| *l.borrow_mut() = Some(event_loop));
-    quit.store(true, Ordering::Relaxed);
-    let captured = capture_thread.join().map_err(|_| "the capture thread panicked".to_string())?;
-
-    if app.opts.stats {
-        let superseded = slot.lock().expect("the slot's lock is never poisoned").superseded;
-        app.stats.summary(superseded);
-        if let Ok((frames, gaps)) = &captured {
-            eprintln!("summary: captured {frames} frames, {gaps} capture gaps");
+                let _ = p.send_event(UserEvent { window: window_no, what: What::Notice });
+            })
+        };
+        if let AudioSetup::Running(c) = &opts.audio {
+            c.set_notify(notify.clone());
+        }
+        let start = now_monotonic();
+        let mut app = App {
+            window_no,
+            format,
+            stats: Stats::new(start, opts.stats, opts.live.clone()),
+            picture: opts.picture,
+            scaling: opts.scaling,
+            overlay: Overlay::new(&opts.source, Instant::now()),
+            baseline: overlay::Values::new(),
+            notices,
+            notify,
+            repaint: false,
+            reconvert: false,
+            deadline: None,
+            placer: None,
+            modifiers: ModifiersState::empty(),
+            opts,
+            slot: slot.clone(),
+            gfx: None,
+            in_flight: 0,
+            last_submit: start,
+            end: end.clone(),
+        };
+        app.baseline = app.values();
+        // Ended before it began (a signal as the run started): no window.
+        if !end.is_set()
+            && let Err(e) = event_loop.run_app_on_demand(&mut app)
+        {
+            end.set_or_warn(Outcome::Failed(format!("event loop: {e}")));
+        }
+        if app.opts.stats {
+            let superseded = slot.lock().expect("the slot's lock is never poisoned").superseded;
+            app.stats.summary(superseded);
         }
     }
-    loop_result.map_err(|e| format!("event loop: {e}"))?;
-    if let Some(e) = app.error {
-        return Err(e);
+}
+
+impl Drop for Winit {
+    /// The event loop back for the next window.
+    fn drop(&mut self) {
+        if let Some(l) = self.event_loop.take() {
+            EVENT_LOOP.with(|cell| *cell.borrow_mut() = Some(l));
+        }
     }
-    captured.map(|_| ())
 }
 
 /// The presentation feedback for the window: Wayland's (present.rs), so
@@ -862,6 +784,18 @@ impl App {
         self.reconvert = true;
     }
 
+    /// The window closes: q, the close button, or the wizard moving on.
+    fn close(&self, event_loop: &ActiveEventLoop) {
+        self.end.set(Outcome::Closed);
+        event_loop.exit();
+    }
+
+    /// The window cannot go on.
+    fn fail(&self, event_loop: &ActiveEventLoop, e: String) {
+        self.end.set_or_warn(Outcome::Failed(e));
+        event_loop.exit();
+    }
+
     /// What the keys see of this window (keys.rs).
     fn key_mode(&self) -> keys::Mode {
         if self.opts.wizard.is_some() { keys::Mode::Wizard } else { keys::Mode::Viewer(self.overlay.page) }
@@ -1124,9 +1058,9 @@ impl App {
         let Some(feedback) = gfx.feedback.as_mut() else { return Ok(()) };
         for o in feedback.drain()? {
             match o {
-                Outcome::Presented { tag, at, refresh, flags } => self.stats.presented(tag, at, refresh, flags),
-                Outcome::Discarded => self.stats.discarded(),
-                Outcome::FrameDone => self.in_flight = self.in_flight.saturating_sub(1),
+                present::Outcome::Presented { tag, at, refresh, flags } => self.stats.presented(tag, at, refresh, flags),
+                present::Outcome::Discarded => self.stats.discarded(),
+                present::Outcome::FrameDone => self.in_flight = self.in_flight.saturating_sub(1),
             }
         }
         Ok(())
@@ -1313,22 +1247,23 @@ impl ApplicationHandler<UserEvent> for App {
                 // As view.sh's place job: the start mode, finished.
                 self.place_window();
             }
-            Err(e) => {
-                self.error = Some(e);
-                event_loop.exit();
-            }
+            Err(e) => self.fail(event_loop, e),
         }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
-        let result = match event {
-            UserEvent::Frame => {
+        // An earlier window's, sent as it ended.
+        if event.window != self.window_no {
+            return;
+        }
+        let result = match event.what {
+            What::Run(Wake::Frame) => {
                 if let Some(w) = &self.opts.wizard {
                     w.borrow_mut().frame(Instant::now());
                 }
                 self.render()
             }
-            UserEvent::Signal(s) => {
+            What::Run(Wake::Signal(s)) => {
                 if let Some(w) = &self.opts.wizard {
                     w.borrow_mut().signal(&s);
                 }
@@ -1336,7 +1271,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.repaint = true;
                 self.render()
             }
-            UserEvent::Notice => {
+            What::Notice => {
                 let now = Instant::now();
                 for (text, for_) in self.notices.lock().expect("the notices' lock is never poisoned").drain(..) {
                     self.overlay.message(text, for_, now);
@@ -1344,32 +1279,33 @@ impl ApplicationHandler<UserEvent> for App {
                 self.repaint = true;
                 self.render()
             }
-            UserEvent::Quit => {
-                event_loop.exit();
-                Ok(())
-            }
-            UserEvent::CaptureEnded(n) => {
-                if n == self.window_no {
+            What::Run(Wake::End) => {
+                if self.end.is_set() {
                     event_loop.exit();
                 }
                 Ok(())
             }
         };
         if let Err(e) = result {
-            self.error = Some(e);
-            event_loop.exit();
+            self.fail(event_loop, e);
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                // The wizard's close button ends the wizard, unsaved.
+                if let Some(w) = &self.opts.wizard {
+                    w.borrow_mut().abandon();
+                }
+                self.close(event_loop);
+            }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 if let Some(action) = keys::action(&event.logical_key, self.modifiers, event.repeat, self.key_mode())
                     && self.apply(action)
                 {
-                    event_loop.exit();
+                    self.close(event_loop);
                 }
             }
             WindowEvent::Resized(size) => {
@@ -1403,8 +1339,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // Feedback may have freed the way for a frame that had to wait.
         if let Err(e) = self.drain().and_then(|()| self.render()) {
-            self.error = Some(e);
-            event_loop.exit();
+            self.fail(event_loop, e);
         }
         // Wake for the next change, and while a repaint waits on pacing
         // (no frame from the card may come to wake us); not while the
@@ -1437,7 +1372,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn exiting(&mut self, _: &ActiveEventLoop) {
         // The last feedback, then let go of winit's display while it lives.
         if let Err(e) = self.drain() {
-            self.error.get_or_insert(e);
+            self.end.set_or_warn(Outcome::Failed(e));
         }
         // A screenshot still coming back is finished, not dropped.
         if let Some(gfx) = self.gfx.as_mut() {
@@ -1484,7 +1419,7 @@ mod tests {
             stats: Stats::new(Duration::ZERO, false, Arc::new(crate::dashboard::Live::new())),
             in_flight: 0,
             last_submit: Duration::ZERO,
-            error: None,
+            end: End::new(Arc::new(|_| {})),
             opts: Options {
                 window: WindowMode::Fullscreen,
                 monitor: None,
