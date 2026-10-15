@@ -437,12 +437,14 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Re
         let slot = slot.clone();
         let quit = quit.clone();
         let stop = stopper();
+        let live = crate::dashboard::live();
         thread::spawn(move || -> Result<(u64, u64), String> {
             let mut frames = 0u64;
             let mut gaps = 0u64;
             let result = source.run(&quit, &mut |e| match e {
                 Event::Frame(f) => {
                     frames += 1;
+                    live.frame();
                     {
                         let mut s = slot.lock().expect("the slot's lock is never poisoned");
                         if s.tag.is_some() {
@@ -457,10 +459,17 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Re
                 Event::Gap { .. } if frames == 0 => {}
                 Event::Gap { from, to, lost } => {
                     gaps += 1;
+                    live.gap(from, to, lost);
                     eprintln!("capture gap: sequence {from} -> {to}, {lost} lost");
                 }
-                Event::NoSignal => eprintln!("no signal"),
-                Event::SignalBack => eprintln!("signal back"),
+                Event::NoSignal => {
+                    live.signal(false);
+                    eprintln!("no signal");
+                }
+                Event::SignalBack => {
+                    live.signal(true);
+                    eprintln!("signal back");
+                }
             });
             stop();
             result.map(|()| (frames, gaps)).map_err(|e| format!("capture: {e}"))
@@ -879,6 +888,19 @@ impl App {
         true
     }
 
+    /// d: the dashboard in a terminal of its own (#16).
+    fn open_dashboard(&mut self) {
+        let now = Instant::now();
+        match crate::dashboard::open(Some(self.notify.clone())) {
+            Ok(()) => self.overlay.message("Opening the debug dashboard", Duration::from_millis(1500), now),
+            Err(e) => {
+                eprintln!("warning: {e}");
+                self.overlay.message(format!("Dashboard: {e}"), Duration::from_secs(3), now);
+            }
+        }
+        self.repaint = true;
+    }
+
     /// f: the next display mode, through the toolkit and then the desktop
     /// adapter, as the mpv script sets mpv's properties and then runs
     /// `view.sh --place-window`.
@@ -1281,7 +1303,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // Held down, these act once (the mpv script binds Tab, f
                 // and m without repeat; s is a shot per press); the rest
                 // repeat, the overlay's keys included, as there.
-                let once = matches!(key, Key::Named(NamedKey::Tab)) || ["f", "m", "s"].into_iter().any(is);
+                let once = matches!(key, Key::Named(NamedKey::Tab)) || ["f", "m", "s", "d"].into_iter().any(is);
                 // q quits, as in view.sh.
                 if is("q") {
                     event_loop.exit();
@@ -1289,6 +1311,8 @@ impl ApplicationHandler<UserEvent> for App {
                     // Ignored, or taken by the overlay.
                 } else if plain && is("f") {
                     self.cycle_display();
+                } else if plain && is("d") {
+                    self.open_dashboard();
                 } else if plain && is("s") {
                     if let Some(gfx) = self.gfx.as_mut()
                         && !gfx.screenshot.request()

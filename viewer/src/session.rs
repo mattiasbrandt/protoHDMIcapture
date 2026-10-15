@@ -15,8 +15,9 @@
 //!   stopped under the lock, as view.sh's `kill_orphan` does.
 //!
 //! Not taken over (yet): `audio.lock` and its files (the viewer runs its
-//! own loopback; a killed view.sh's orphan loopback is not stopped), and
-//! the files only the dashboard (#16) reads.
+//! own loopback; a killed view.sh's orphan loopback is not stopped). The
+//! files only view.sh's dashboard reads are not written: the Rust
+//! viewer's dashboard reads `dashboard.sock` (dashboard.rs).
 
 use std::fs::{self, File, OpenOptions};
 use std::os::fd::AsRawFd;

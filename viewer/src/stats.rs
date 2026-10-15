@@ -1,6 +1,7 @@
 //! What the display run measures, against #5's go criteria: dequeue ->
 //! presented (gating), kernel timestamp -> presented (reported), and how
-//! often a refresh went by with no new frame on screen.
+//! often a refresh went by with no new frame on screen. Each present also
+//! goes to the dashboard's rolling numbers (dashboard.rs).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -130,12 +131,9 @@ impl Stats {
             return;
         }
         self.presented += 1;
-        // Samples are kept only to be printed (--stats): a viewer runs for
-        // hours. The dashboard (#16) gets its own rolling numbers.
-        if !self.verbose {
-            return;
+        if self.verbose {
+            *self.flags.entry(flags).or_default() += 1;
         }
-        *self.flags.entry(flags).or_default() += 1;
         if !refresh.is_zero() {
             self.refresh = Some(refresh);
         }
@@ -145,20 +143,27 @@ impl Stats {
         }
         let d = at - tag.dequeued;
         let k = at - tag.captured;
-        self.to_present.push(d);
-        self.kernel_to_present.push(k);
-        self.window.to_present.push(d);
-        self.window.kernel_to_present.push(k);
-
+        let mut skipped = 0;
         if let (Some(prev), Some(r)) = (self.last_present, self.refresh) {
             // Presents a refresh apart are back to back; each further
             // refresh between them showed the same frame again.
             let refreshes = ((at - prev).as_secs_f64() / r.as_secs_f64()).round() as u64;
-            let skipped = refreshes.saturating_sub(1);
+            skipped = refreshes.saturating_sub(1);
             self.skipped_refreshes += skipped;
-            self.window.skipped_refreshes += skipped;
         }
         self.last_present = Some(at);
+        // The dashboard's rolling numbers (#16), at every run.
+        crate::dashboard::live().presented(d, k, skipped, self.refresh);
+        // Samples are kept only to be printed (--stats): a viewer runs for
+        // hours.
+        if !self.verbose {
+            return;
+        }
+        self.to_present.push(d);
+        self.kernel_to_present.push(k);
+        self.window.to_present.push(d);
+        self.window.kernel_to_present.push(k);
+        self.window.skipped_refreshes += skipped;
 
         if at - self.window_start >= WINDOW {
             let w = &mut self.window;

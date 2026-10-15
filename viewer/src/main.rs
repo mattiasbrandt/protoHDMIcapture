@@ -5,6 +5,7 @@ mod app;
 mod audio;
 mod capture;
 mod card;
+mod dashboard;
 mod desktop;
 mod gputime;
 mod mjpeg;
@@ -25,7 +26,7 @@ use std::process::ExitCode;
 
 use settings::Settings;
 
-const USAGE: &str = "usage: protohdmicapture [--settings]
+const USAGE: &str = "usage: protohdmicapture [--settings | --dashboard]
        measurements: [--seconds N] [--monitor NAME] [--stats]";
 
 /// Called first thing in main, before any thread exists.
@@ -161,13 +162,26 @@ fn view(args: &[String]) -> Result<(), String> {
         Ok(a) => a,
         Err(e) => {
             eprintln!("warning: no audio: {e}");
+            dashboard::live().set_audio(dashboard::AudioLive::Failed(e.clone()));
             opts.audio = app::AudioSetup::Failed(e);
             None
         }
     };
     match &sound {
-        Some(a) => opts.audio = app::AudioSetup::Running(a.controls()),
-        None if s.get("AUDIO") == "none" => opts.audio = app::AudioSetup::Off("none".into()),
+        Some(a) => {
+            opts.audio = app::AudioSetup::Running(a.controls());
+            let (source, sink, buffer_ms) = a.link();
+            dashboard::live().set_audio(dashboard::AudioLive::Running {
+                source: source.into(),
+                sink: sink.into(),
+                buffer_ms,
+                counters: a.counters.clone(),
+            });
+        }
+        None if s.get("AUDIO") == "none" => {
+            opts.audio = app::AudioSetup::Off("none".into());
+            dashboard::live().set_audio(dashboard::AudioLive::Off("AUDIO=none".into()));
+        }
         None => {}
     }
     opts.source = s.get("SOURCE").to_string();
@@ -182,6 +196,8 @@ fn view(args: &[String]) -> Result<(), String> {
     if s.get("REFRESH") == "match" {
         session.match_refresh(format.fps);
     }
+    // DEBUG=window opens the dashboard with the feed, as in view.sh.
+    let debug_window = s.get("DEBUG") == "window";
     opts.settings = Some(s);
     let stats = opts.stats;
     if quit.requested() {
@@ -189,6 +205,20 @@ fn view(args: &[String]) -> Result<(), String> {
     }
     // As view.sh writes it once its player is started.
     session.announce()?;
+    // The dashboard's socket, with the video lock held; a failure costs
+    // only the dashboard.
+    let _dashboard = match dashboard::Server::start(&dashboard::socket_path(&session::run_dir()), dashboard::live(), dashboard::TICK) {
+        Ok(server) => {
+            if debug_window && let Err(e) = dashboard::open(None) {
+                eprintln!("warning: DEBUG=window: {e}");
+            }
+            Some(server)
+        }
+        Err(e) => {
+            eprintln!("warning: no dashboard: {e}");
+            None
+        }
+    };
     let result = app::run(Box::new(source), opts, quit);
     if let (true, Some(a)) = (stats, &sound) {
         eprintln!("summary: audio {}", a.granted());
@@ -210,6 +240,21 @@ fn main() -> ExitCode {
         let (text, code) = Settings::resolve().report();
         print!("{text}");
         return ExitCode::from(code as u8);
+    }
+    // The running viewer's numbers in this terminal (#16); like --settings,
+    // it needs no config.
+    if args.first().map(String::as_str) == Some("--dashboard") {
+        if args.len() > 1 {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+        return match dashboard::client(&session::run_dir()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("protohdmicapture: {e}");
+                ExitCode::FAILURE
+            }
+        };
     }
     match view(&args) {
         Ok(()) => ExitCode::SUCCESS,

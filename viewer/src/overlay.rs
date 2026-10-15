@@ -250,8 +250,7 @@ pub fn panel_lines(p: &Panel) -> Vec<String> {
             if p.changes.is_empty() { "nothing changed".to_string() } else { p.changes.join(" ") }
         ),
         String::new(),
-        // d (dashboard) stays unbound until #16.
-        "s screenshot   Tab/Esc close   q quit".to_string(),
+        "s screenshot   d dashboard   Tab/Esc close   q quit".to_string(),
     ]);
     lines
 }
@@ -354,7 +353,7 @@ mod tests {
                 "t     Setup tips   PlayStation 5",
                 "w     Save         LEVELS=full DELAY=0.060",
                 "",
-                "s screenshot   Tab/Esc close   q quit",
+                "s screenshot   d dashboard   Tab/Esc close   q quit",
             ]
         );
         let other = panel(Audio::Other("none".into()), &[]);

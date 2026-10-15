@@ -290,6 +290,12 @@ impl Audio {
         self.counters.target_ms.load(Ordering::Relaxed)
     }
 
+    /// The source and sink linked, and the buffer asked for in ms (the
+    /// dashboard, #16).
+    pub fn link(&self) -> (&str, &str, u32) {
+        (&self.input, &self.output, self.buffer_frames * 1000 / RATE)
+    }
+
     /// The live keys' handle: sync and the output stream's level.
     pub fn controls(&self) -> Controls {
         let (tx, rx) = mpsc::channel::<Option<LevelChange>>();
