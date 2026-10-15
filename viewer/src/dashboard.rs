@@ -41,6 +41,10 @@ const WINDOW: Duration = Duration::from_secs(10);
 const BACKLOG: usize = 64 * 1024;
 /// The events kept for the dashboard.
 const EVENTS: usize = 8;
+/// Latency samples kept between two snapshots: a few seconds even at 240
+/// Hz. Only the server takes them, so with no server (it failed to
+/// start) they would otherwise pile up for as long as the viewer runs.
+const SAMPLES: usize = 4096;
 /// A started dashboard waits this long for a viewer to appear.
 const CONNECT_WAIT: Duration = Duration::from_secs(5);
 /// No line for this long: the viewer is shown as not answering.
@@ -129,7 +133,10 @@ impl Live {
         if let Some(r) = refresh {
             self.refresh_ns.store(r.as_nanos() as u64, Ordering::Relaxed);
         }
-        self.samples.lock().expect("the samples' lock is never poisoned").push((to_present, kernel_to_present));
+        let mut samples = self.samples.lock().expect("the samples' lock is never poisoned");
+        if samples.len() < SAMPLES {
+            samples.push((to_present, kernel_to_present));
+        }
     }
 
     /// Back to a feed that has not started: the setup wizard's feed
@@ -748,6 +755,16 @@ mod tests {
 
     fn read_line(r: &mut Lines<transport::Stream>) -> Value {
         serde_json::from_slice(&r.next().unwrap().expect("a line")).unwrap()
+    }
+
+    #[test]
+    fn samples_stay_bounded_with_no_server_taking_them() {
+        let live = leaked();
+        for _ in 0..SAMPLES + 100 {
+            live.presented(Duration::from_millis(10), Duration::from_millis(30), 0, None);
+        }
+        assert_eq!(live.samples.lock().unwrap().len(), SAMPLES);
+        assert_eq!(live.presented.load(Ordering::Relaxed), (SAMPLES + 100) as u64, "every present still counted");
     }
 
     #[test]
