@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -187,7 +187,14 @@ enum UserEvent {
     /// A thread has something to show (`Notify`).
     Notice,
     Quit,
+    /// This window's capture ended on its own (the card gone): the
+    /// window's number, so that one sent as an earlier window's loop ended
+    /// cannot close the next window (#13).
+    CaptureEnded(u64),
 }
+
+/// Numbers each window `run` opens, for `UserEvent::CaptureEnded`.
+static WINDOWS: AtomicU64 = AtomicU64::new(0);
 
 /// The newest captured frame, waiting for the display; one replaced before
 /// the display took it is skipped (not a capture gap).
@@ -236,6 +243,8 @@ struct Gfx {
 }
 
 struct App {
+    /// This window's number (`WINDOWS`).
+    window_no: u64,
     opts: Options,
     format: Format,
     slot: Arc<Mutex<Slot>>,
@@ -472,6 +481,7 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Re
 
     let slot = Arc::new(Mutex::new(Slot { data: vec![0; format.frame_size()], tag: None, superseded: 0 }));
     let start = now_monotonic();
+    let window_no = WINDOWS.fetch_add(1, Ordering::Relaxed);
     let capture_thread = {
         let slot = slot.clone();
         let quit = quit.clone();
@@ -509,10 +519,11 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Re
                     eprintln!("signal back");
                 }
             });
-            // The window ends with its capture; not when the window ended
-            // first, or the next window's loop would get this Quit.
+            // The window ends with its capture. Not sent when the window
+            // ended first; and one sent just as it ended, which the next
+            // window's loop would get, carries this window's number.
             if !quit.load(Ordering::Relaxed) {
-                let _ = proxy.send_event(UserEvent::Quit);
+                let _ = proxy.send_event(UserEvent::CaptureEnded(window_no));
             }
             result.map(|()| (frames, gaps)).map_err(|e| format!("capture: {e}"))
         })
@@ -532,6 +543,7 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Re
         c.set_notify(notify.clone());
     }
     let mut app = App {
+        window_no,
         format,
         stats: Stats::new(start, opts.stats),
         picture: opts.picture,
@@ -1345,6 +1357,12 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.exit();
                 Ok(())
             }
+            UserEvent::CaptureEnded(n) => {
+                if n == self.window_no {
+                    event_loop.exit();
+                }
+                Ok(())
+            }
         };
         if let Err(e) = result {
             self.error = Some(e);
@@ -1490,6 +1508,7 @@ mod tests {
         let scaling = Scaling::from_settings(s.get("SCALING")).unwrap();
         let format = Format { width: 1920, height: 1080, fps: 60.0, pixels: crate::capture::Pixels::Yuyv };
         let mut app = App {
+            window_no: 0,
             format,
             slot: Arc::new(Mutex::new(Slot { data: Vec::new(), tag: None, superseded: 0 })),
             gfx: None,
