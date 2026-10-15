@@ -36,6 +36,8 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 
 [target.'cfg(windows)'.dependencies]
+# windows-core for the #[implement] macro's generated paths.
+windows-core = "0.62.2"
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Media_MediaFoundation",

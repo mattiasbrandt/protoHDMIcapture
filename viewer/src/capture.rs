@@ -9,8 +9,12 @@ use std::time::Duration;
 
 use crate::picture::Coding;
 
+#[cfg(windows)]
+pub mod mf;
 #[cfg(target_os = "linux")]
 mod v4l2;
+#[cfg(windows)]
+pub use mf::MediaFoundation;
 #[cfg(target_os = "linux")]
 pub use v4l2::V4l2;
 
@@ -105,6 +109,16 @@ pub trait FrameSource: Send {
     fn run(&mut self, quit: &AtomicBool, on_event: &mut dyn FnMut(Event<'_>)) -> io::Result<()>;
 }
 
+/// Frames lost between two sample times (100 ns units) at `fps`, where a
+/// source has times but no sequence numbers (Media Foundation): the
+/// periods skipped when the step is over 1.5 periods.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn lost_between(prev: i64, now: i64, fps: f64) -> u32 {
+    let period = 1e7 / fps.max(1.0);
+    let step = (now - prev) as f64;
+    if step > 1.5 * period { ((step / period).round() as u32).saturating_sub(1) } else { 0 }
+}
+
 /// The clock capture times are on: CLOCK_MONOTONIC, the kernel's buffer
 /// timestamps' clock.
 #[cfg(target_os = "linux")]
@@ -133,6 +147,15 @@ pub fn now_monotonic() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lost_frames_from_sample_times() {
+        let p = 166_667; // 60 fps in 100 ns units
+        assert_eq!(lost_between(0, p, 60.0), 0);
+        assert_eq!(lost_between(0, p * 14 / 10, 60.0), 0, "jitter under 1.5 periods");
+        assert_eq!(lost_between(0, 2 * p, 60.0), 1);
+        assert_eq!(lost_between(0, 5 * p, 60.0), 4);
+    }
 
     #[test]
     fn formats_from_the_settings() {

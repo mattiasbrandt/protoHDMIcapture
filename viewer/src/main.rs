@@ -1,5 +1,9 @@
 //! protoHDMIcapture's Rust viewer (#10): one program for capture, display
 //! and audio. Opt-in beside view.sh until it has every feature (#10).
+// On Windows (#18) the setup wizard, the Hyprland adapter, refresh
+// matching and the presentation feedback are not wired up yet: their code
+// is Linux's, compiled but unused there.
+#![cfg_attr(windows, allow(dead_code))]
 
 mod app;
 mod audio;
@@ -251,10 +255,17 @@ fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::
     Ok((Box::new(capture::V4l2::open(&picked.node.path, format)?), picked.node))
 }
 
-/// The card on Windows: Media Foundation capture comes next (#18).
+/// The card the settings pin, opened at `format` through Media Foundation
+/// (#18). DEV may hold the device's friendly name or its symbolic link.
 #[cfg(windows)]
-fn open_card(_: &Settings, _: capture::Format) -> Result<(Box<dyn capture::FrameSource>, card::Node), String> {
-    Err("capturing a card is not on Windows yet; --test-pattern shows the display path".into())
+fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::FrameSource>, card::Node), String> {
+    let pins = card::Pins { dev: s.get("DEV"), serial: s.get("CARD_SERIAL"), port: s.get("CARD_PORT"), ignore: s.get("IGNORE_CARDS_RE") };
+    let picked = card::pick(&card::list(), &pins, card::describe_dev(pins.dev), &s.config_file.display().to_string())?;
+    if let Some(w) = &picked.warning {
+        eprintln!("warning: {w}");
+    }
+    eprintln!("video device: {} ({})", picked.node.path.display(), picked.node.card_type);
+    Ok((Box::new(capture::MediaFoundation::open(&picked.node.path, format)?), picked.node))
 }
 
 fn view(args: &[String], quit: app::Quit) -> Result<(), String> {

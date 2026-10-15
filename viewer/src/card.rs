@@ -15,6 +15,9 @@ use std::path::PathBuf;
 use linuxvideo::{CapabilityFlags, Device};
 use regex::Regex;
 
+#[cfg(windows)]
+pub use crate::capture::mf::{describe_dev, list};
+
 /// One capture node, as `card_list` describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Node {
