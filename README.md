@@ -29,6 +29,9 @@ borderless → windowed, **d** opens the live dashboard, **1**–**8** adjust
 colour and **s** takes a screenshot (mpv's own keys), **i** / **I** show
 mpv's frame-timing stats, **q** quits.
 
+The Rust viewer, `protohdmicapture`, is its opt-in successor (same settings
+file); to install it, see [packaging/INSTALL.md](packaging/INSTALL.md).
+
 ### The overlay
 
 For the first 10 seconds a bar along the bottom lists the main keys (Tab,
