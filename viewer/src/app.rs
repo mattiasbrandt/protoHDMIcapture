@@ -95,6 +95,8 @@ pub struct Options {
     /// The setup wizard, when this window is its (#13): its page replaces
     /// the overlay and it takes every key.
     pub wizard: Option<Rc<RefCell<Wizard>>>,
+    /// This run's dashboard numbers, from its caller (#21).
+    pub live: Arc<crate::dashboard::Live>,
 }
 
 /// The sound, as the audio keys and the panel see it.
@@ -491,7 +493,7 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Re
     let capture_thread = {
         let slot = slot.clone();
         let quit = quit.clone();
-        let live = crate::dashboard::live();
+        let live = opts.live.clone();
         thread::spawn(move || -> Result<(u64, u64), String> {
             let mut frames = 0u64;
             let mut gaps = 0u64;
@@ -556,7 +558,7 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Re
     let mut app = App {
         window_no,
         format,
-        stats: Stats::new(start, opts.stats),
+        stats: Stats::new(start, opts.stats, opts.live.clone()),
         picture: opts.picture,
         scaling: opts.scaling,
         overlay: Overlay::new(&opts.source, Instant::now()),
@@ -1563,7 +1565,7 @@ mod tests {
             deadline: None,
             placer: None,
             modifiers: ModifiersState::empty(),
-            stats: Stats::new(Duration::ZERO, false),
+            stats: Stats::new(Duration::ZERO, false, Arc::new(crate::dashboard::Live::new())),
             in_flight: 0,
             last_submit: Duration::ZERO,
             error: None,
@@ -1580,6 +1582,7 @@ mod tests {
                 source: "ps5".into(),
                 settings: Some(s),
                 wizard: None,
+                live: Arc::new(crate::dashboard::Live::new()),
             },
         };
         app.baseline = app.values();

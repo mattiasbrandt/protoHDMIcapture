@@ -32,6 +32,7 @@ mod wizard;
 
 use std::env;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use settings::Settings;
 
@@ -174,6 +175,8 @@ fn setup(first_run: bool, quit: &app::Quit) -> Result<bool, String> {
         source: String::new(),
         settings: None,
         wizard: Some(wiz.clone()),
+        // Each feed window's numbers are its own, and nobody reads them.
+        live: Arc::new(dashboard::Live::new()),
     };
 
     let result = (|| -> Result<(), String> {
@@ -261,32 +264,6 @@ fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::
 }
 
 fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
-    let mut opts = app::Options {
-        window: app::WindowMode::Fullscreen,
-        monitor: None,
-        seconds: None,
-        stats: false,
-        picture: picture::Picture::DEFAULT,
-        scaling: scale::Scaling::Balanced,
-        audio: app::AudioSetup::Off(String::new()),
-        window_size: (1280, 720),
-        desktop: desktop::Desktop::Generic,
-        source: String::new(),
-        settings: None,
-        wizard: None,
-    };
-    let mut test_pattern = false;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--seconds" => opts.seconds = Some(it.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?),
-            "--monitor" => opts.monitor = Some(it.next().ok_or(USAGE)?.clone()),
-            "--stats" => opts.stats = true,
-            "--test-pattern" => test_pattern = true,
-            _ => return Err(USAGE.into()),
-        }
-    }
-
     // First run: no settings file, so the wizard, as view.sh offers it
     // (not for a measurement run, nor for the wizard's own children). On
     // Windows there is no wizard yet: the defaults, said once.
@@ -304,6 +281,36 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
         && !setup(true, &quit)?
     {
         return Ok(());
+    }
+
+    // The viewer's numbers, from here on: the dashboard serves these. The
+    // wizard's feed windows (--setup, or the first run above) had their own.
+    let live = Arc::new(dashboard::Live::new());
+    let mut opts = app::Options {
+        window: app::WindowMode::Fullscreen,
+        monitor: None,
+        seconds: None,
+        stats: false,
+        picture: picture::Picture::DEFAULT,
+        scaling: scale::Scaling::Balanced,
+        audio: app::AudioSetup::Off(String::new()),
+        window_size: (1280, 720),
+        desktop: desktop::Desktop::Generic,
+        source: String::new(),
+        settings: None,
+        wizard: None,
+        live: live.clone(),
+    };
+    let mut test_pattern = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--seconds" => opts.seconds = Some(it.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?),
+            "--monitor" => opts.monitor = Some(it.next().ok_or(USAGE)?.clone()),
+            "--stats" => opts.stats = true,
+            "--test-pattern" => test_pattern = true,
+            _ => return Err(USAGE.into()),
+        }
     }
 
     let s = Settings::resolve();
@@ -359,13 +366,11 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
         let (source, node) = open_card(&s, format)?;
         (source, Some(node))
     };
-    // After --setup the wizard's feed windows ran in this process first.
-    dashboard::live().reset();
     let sound = match audio(&s, node.as_ref()) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("warning: no audio: {e}");
-            dashboard::live().set_audio(dashboard::AudioLive::Failed(e.clone()));
+            live.set_audio(dashboard::AudioLive::Failed(e.clone()));
             opts.audio = app::AudioSetup::Failed(e);
             None
         }
@@ -374,7 +379,7 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
         Some(a) => {
             opts.audio = app::AudioSetup::Running(a.controls());
             let (source, sink, buffer_ms) = a.link();
-            dashboard::live().set_audio(dashboard::AudioLive::Running {
+            live.set_audio(dashboard::AudioLive::Running {
                 source: source.into(),
                 sink: sink.into(),
                 buffer_ms,
@@ -383,7 +388,7 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
         }
         None if s.get("AUDIO") == "none" => {
             opts.audio = app::AudioSetup::Off("none".into());
-            dashboard::live().set_audio(dashboard::AudioLive::Off("AUDIO=none".into()));
+            live.set_audio(dashboard::AudioLive::Off("AUDIO=none".into()));
         }
         None => {}
     }
@@ -416,7 +421,7 @@ fn view(args: &[String], quit: app::Quit) -> Result<(), String> {
     session.announce()?;
     // The dashboard's socket, with the video lock held; a failure costs
     // only the dashboard.
-    let _dashboard = match dashboard::Server::start(&dashboard::socket_path(&session::run_dir()), dashboard::live(), dashboard::TICK) {
+    let _dashboard = match dashboard::Server::start(&dashboard::socket_path(&session::run_dir()), live, dashboard::TICK) {
         Ok(server) => {
             if debug_window && let Err(e) = dashboard::open(None) {
                 eprintln!("warning: DEBUG=window: {e}");

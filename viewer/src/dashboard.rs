@@ -1,9 +1,9 @@
 //! The dashboard (#16): the viewer's live numbers in a terminal, as
 //! `protohdmicapture --dashboard`, another process of the same binary.
 //!
-//! - The viewer keeps its numbers in `Live` (one per process: one viewer
-//!   per process, one per session under `video.lock`). The capture thread,
-//!   the display and the audio write it; nothing in it blocks them.
+//! - The viewer keeps its numbers in a `Live`, one per window run, handed
+//!   in by the run's caller (#21). The capture thread, the display and the
+//!   audio write it; nothing in it blocks them.
 //! - `Server`: once a second, a snapshot of `Live` as one JSON line to every
 //!   connected dashboard, over `dashboard.sock` in the run directory
 //!   (docs/run-dir.md). Writes never block: a dashboard that stops reading
@@ -21,7 +21,7 @@ use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -69,10 +69,12 @@ pub enum AudioLive {
     },
 }
 
-/// The viewer's numbers, written where they happen.
+/// One window run's numbers, written where they happen. The viewer's is
+/// the one the dashboard serves; the setup wizard's feed windows (#13) each
+/// write into one nobody reads, so theirs never reach the viewer's.
 pub struct Live {
-    /// The feed's start: set again by `reset`.
-    started: Mutex<Instant>,
+    /// The run's start.
+    started: Instant,
     frames: AtomicU64,
     gaps: AtomicU64,
     lost: AtomicU64,
@@ -87,17 +89,10 @@ pub struct Live {
     audio: Mutex<AudioLive>,
 }
 
-static LIVE: LazyLock<Live> = LazyLock::new(Live::new);
-
-/// This process's numbers.
-pub fn live() -> &'static Live {
-    &LIVE
-}
-
 impl Live {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            started: Mutex::new(Instant::now()),
+            started: Instant::now(),
             frames: AtomicU64::new(0),
             gaps: AtomicU64::new(0),
             lost: AtomicU64::new(0),
@@ -139,22 +134,8 @@ impl Live {
         }
     }
 
-    /// Back to a feed that has not started: the setup wizard's feed
-    /// windows (#13) run in the same process before the viewer's own, and
-    /// their frames, gaps and signal state are not the viewer's. The audio
-    /// is left to `set_audio`.
-    pub fn reset(&self) {
-        *self.started.lock().expect("the start's lock is never poisoned") = Instant::now();
-        for n in [&self.frames, &self.gaps, &self.lost, &self.presented, &self.repeated, &self.refresh_ns] {
-            n.store(0, Ordering::Relaxed);
-        }
-        self.no_signal.store(false, Ordering::Relaxed);
-        self.samples.lock().expect("the samples' lock is never poisoned").clear();
-        self.events.lock().expect("the events' lock is never poisoned").clear();
-    }
-
     fn up(&self) -> Duration {
-        self.started.lock().expect("the start's lock is never poisoned").elapsed()
+        self.started.elapsed()
     }
 
     /// MJPEG frames that arrived but did not decode (`Event::Undecodable`).
@@ -438,14 +419,14 @@ pub struct Server {
 
 impl Server {
     /// Listens on `path` and sends `live` to each dashboard every `tick`.
-    pub fn start(path: &Path, live: &'static Live, tick: Duration) -> Result<Self, String> {
+    pub fn start(path: &Path, live: Arc<Live>, tick: Duration) -> Result<Self, String> {
         let (listener, inode) = transport::listen(path).map_err(|e| format!("dashboard socket {}: {e}", path.display()))?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let stop = stop.clone();
             thread::Builder::new()
                 .name("dashboard".into())
-                .spawn(move || serve(listener, live, tick, &stop))
+                .spawn(move || serve(listener, &live, tick, &stop))
                 .map_err(|e| format!("dashboard thread: {e}"))?
         };
         Ok(Self { path: path.to_path_buf(), inode, stop, thread: Some(thread) })
@@ -837,18 +818,13 @@ mod tests {
         d
     }
 
-    /// A Live of its own (the process's one is shared by every test).
-    fn leaked() -> &'static Live {
-        Box::leak(Box::new(Live::new()))
-    }
-
     fn read_line(r: &mut Lines<transport::Stream>) -> Value {
         serde_json::from_slice(&r.next().unwrap().expect("a line")).unwrap()
     }
 
     #[test]
     fn samples_stay_bounded_with_no_server_taking_them() {
-        let live = leaked();
+        let live = Live::new();
         for _ in 0..SAMPLES + 100 {
             live.presented(Duration::from_millis(10), Duration::from_millis(30), 0, None);
         }
@@ -871,28 +847,52 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_forgets_an_earlier_feed() {
-        // The wizard's feed ended with no signal; the viewer's starts clean.
-        let live = leaked();
-        live.frame();
-        live.gap(1, 3, 1);
-        live.signal(false);
-        live.presented(Duration::from_millis(10), Duration::from_millis(30), 1, Some(Duration::from_micros(16_683)));
-        live.reset();
+    fn two_runs_keep_their_numbers_apart() {
+        // The wizard's feed window ends with gaps and no signal; the
+        // viewer's run, after it, starts clean with no reset.
+        let wizard = Live::new();
+        let viewer = Live::new();
+        wizard.frame();
+        wizard.gap(1, 3, 1);
+        wizard.signal(false);
+        wizard.presented(Duration::from_millis(10), Duration::from_millis(30), 1, Some(Duration::from_micros(16_683)));
         assert_eq!(
-            [&live.frames, &live.gaps, &live.lost, &live.presented, &live.repeated, &live.refresh_ns].map(|n| n.load(Ordering::Relaxed)),
+            [&viewer.frames, &viewer.gaps, &viewer.lost, &viewer.presented, &viewer.repeated, &viewer.refresh_ns]
+                .map(|n| n.load(Ordering::Relaxed)),
             [0; 6]
         );
-        assert!(!live.no_signal.load(Ordering::Relaxed));
-        assert!(live.samples.lock().unwrap().is_empty() && live.events.lock().unwrap().is_empty());
+        assert!(!viewer.no_signal.load(Ordering::Relaxed));
+        assert!(viewer.samples.lock().unwrap().is_empty() && viewer.events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_dashboard_gets_only_the_runs_it_was_given() {
+        let dir = tmp("given");
+        let viewer = Arc::new(Live::new());
+        let wizard = Live::new();
+        let server = Server::start(&socket_path(&dir), viewer.clone(), Duration::from_millis(20)).unwrap();
+        let s = transport::connect(&socket_path(&dir)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut r = Lines { reader: BufReader::new(s), buf: Vec::new() };
+        for _ in 0..5 {
+            wizard.frame();
+        }
+        wizard.signal(false);
+        viewer.frame();
+        let s = (0..250).map(|_| read_line(&mut r)).find(|v| v["frames"] == 1).expect("the viewer's frame arrives");
+        assert_eq!(s["signal"], "ok", "not the wizard's no signal");
+        assert!(s["events"].as_array().unwrap().is_empty(), "{s}");
+        drop(server);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     #[cfg(unix)]
     fn a_dashboard_gets_the_live_numbers() {
         let dir = tmp("numbers");
-        let live = leaked();
-        let server = Server::start(&socket_path(&dir), live, Duration::from_millis(100)).unwrap();
+        let live = Arc::new(Live::new());
+        let server = Server::start(&socket_path(&dir), live.clone(), Duration::from_millis(100)).unwrap();
         let s = transport::connect(&socket_path(&dir)).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut r = Lines { reader: BufReader::new(s), buf: Vec::new() };
@@ -954,8 +954,7 @@ mod tests {
     #[cfg(unix)]
     fn a_dashboard_that_stops_reading_never_holds_the_viewer() {
         let dir = tmp("slow");
-        let live = leaked();
-        let server = Server::start(&socket_path(&dir), live, Duration::from_millis(1)).unwrap();
+        let server = Server::start(&socket_path(&dir), Arc::new(Live::new()), Duration::from_millis(1)).unwrap();
         // Connected, never read: the server must keep its pace and drop it.
         let stuck = transport::connect(&socket_path(&dir)).unwrap();
         let healthy = transport::connect(&socket_path(&dir)).unwrap();
@@ -987,7 +986,7 @@ mod tests {
         // A killed viewer's socket: nobody listens on it.
         drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
         assert!(path.exists());
-        let server = Server::start(&path, leaked(), Duration::from_millis(50)).unwrap();
+        let server = Server::start(&path, Arc::new(Live::new()), Duration::from_millis(50)).unwrap();
         transport::connect(&path).expect("the new one listens");
         // Replaced under us (it cannot be, with video.lock held; checked anyway).
         std::fs::remove_file(&path).unwrap();

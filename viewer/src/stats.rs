@@ -1,11 +1,13 @@
 //! What the display run measures, against #5's go criteria: dequeue ->
 //! presented (gating), kernel timestamp -> presented (reported), and how
 //! often a refresh went by with no new frame on screen. Each present also
-//! goes to the dashboard's rolling numbers (dashboard.rs).
+//! goes to the run's dashboard numbers (dashboard.rs).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::dashboard::Live;
 use crate::present::Tag;
 
 const WINDOW: Duration = Duration::from_secs(10);
@@ -48,6 +50,8 @@ struct Window {
 pub struct Stats {
     /// Print each 10 s window (measurements, --stats).
     verbose: bool,
+    /// The run's dashboard numbers.
+    live: Arc<Live>,
     start: Duration,
     to_present: Vec<Duration>,
     kernel_to_present: Vec<Duration>,
@@ -73,9 +77,10 @@ pub struct Stats {
 }
 
 impl Stats {
-    pub fn new(start: Duration, verbose: bool) -> Self {
+    pub fn new(start: Duration, verbose: bool, live: Arc<Live>) -> Self {
         Self {
             verbose,
+            live,
             start,
             to_present: Vec::with_capacity(64 * 1024),
             kernel_to_present: Vec::with_capacity(64 * 1024),
@@ -153,7 +158,7 @@ impl Stats {
         }
         self.last_present = Some(at);
         // The dashboard's rolling numbers (#16), at every run.
-        crate::dashboard::live().presented(d, k, skipped, self.refresh);
+        self.live.presented(d, k, skipped, self.refresh);
         // Samples are kept only to be printed (--stats): a viewer runs for
         // hours.
         if !self.verbose {
