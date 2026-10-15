@@ -4,6 +4,7 @@
 //! compositor only once it has taken the previous one (#5: a 60.000 Hz card
 //! outruns a 59.95 Hz display, and every frame handed over early queues).
 
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -15,6 +16,7 @@ use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
 use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Fullscreen, Window, WindowId};
 
@@ -400,15 +402,25 @@ impl Quit {
     }
 }
 
+thread_local! {
+    /// The event loop between runs: one per process (winit cannot build a
+    /// second on Linux), run once per window, so that a process can
+    /// open one window after another.
+    static EVENT_LOOP: RefCell<Option<EventLoop<UserEvent>>> = const { RefCell::new(None) };
+}
+
 /// Runs the window until quit; the capture thread feeds it. Returns the
-/// capture's error, if it failed.
+/// capture's error, if it failed. May be called again for another window.
 pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Result<(), String> {
     let format = source.format();
-    let event_loop = EventLoop::<UserEvent>::with_user_event()
-        .build()
-        .map_err(|e| format!("event loop: {e}"))?;
+    let mut event_loop = match EVENT_LOOP.with(|l| l.borrow_mut().take()) {
+        Some(l) => l,
+        None => EventLoop::<UserEvent>::with_user_event().build().map_err(|e| format!("event loop: {e}"))?,
+    };
     let proxy = event_loop.create_proxy();
-    let quit = quitter.flag.clone();
+    // Stops this window's capture: set once its loop ends, which a quit
+    // request (q, a signal, --seconds) or the capture's own end brings.
+    let quit = Arc::new(AtomicBool::new(false));
     {
         let p = proxy.clone();
         quitter.on_request(Box::new(move || {
@@ -436,7 +448,6 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Re
     let capture_thread = {
         let slot = slot.clone();
         let quit = quit.clone();
-        let stop = stopper();
         let live = crate::dashboard::live();
         thread::spawn(move || -> Result<(u64, u64), String> {
             let mut frames = 0u64;
@@ -471,7 +482,11 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Re
                     eprintln!("signal back");
                 }
             });
-            stop();
+            // The window ends with its capture; not when the window ended
+            // first, or the next window's loop would get this Quit.
+            if !quit.load(Ordering::Relaxed) {
+                let _ = proxy.send_event(UserEvent::Quit);
+            }
             result.map(|()| (frames, gaps)).map_err(|e| format!("capture: {e}"))
         })
     };
@@ -511,7 +526,8 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Re
         error: None,
     };
     app.baseline = app.values();
-    let loop_result = event_loop.run_app(&mut app);
+    let loop_result = event_loop.run_app_on_demand(&mut app);
+    EVENT_LOOP.with(|l| *l.borrow_mut() = Some(event_loop));
     quit.store(true, Ordering::Relaxed);
     let captured = capture_thread.join().map_err(|_| "the capture thread panicked".to_string())?;
 
