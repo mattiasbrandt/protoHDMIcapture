@@ -5,11 +5,10 @@
 //! visible as an uneven stripe.
 
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::capture::{Event, Format, Frame, FrameSource, Pixels, now_monotonic};
+use crate::capture::{Format, FrameSource, Mark, Pixels, Raw, Stream, now_monotonic};
 
 /// 75% colour bars, BT.709 limited range (Y, Cb, Cr): white, yellow, cyan,
 /// green, magenta, red, blue, black.
@@ -62,28 +61,36 @@ impl FrameSource for Pattern {
         self.format
     }
 
-    /// One frame per period of FPS, on an absolute schedule; a frame late by
-    /// more than a period starts the schedule again rather than catching up.
-    fn run(&mut self, quit: &AtomicBool, on_event: &mut dyn FnMut(Event<'_>)) -> io::Result<()> {
+    fn start(&mut self) -> io::Result<Box<dyn Stream + '_>> {
         let period = Duration::from_secs_f64(1.0 / self.format.fps.max(1.0));
-        let mut frame = vec![0u8; self.format.frame_size()];
-        let mut next = Instant::now();
-        let mut n = 0u64;
-        while !quit.load(Ordering::Relaxed) {
-            let now = Instant::now();
-            if now < next {
-                // Short sleeps, so a quit is seen within one.
-                thread::sleep((next - now).min(Duration::from_millis(100)));
-                continue;
-            }
-            self.draw(n, &mut frame);
-            let t = now_monotonic();
-            on_event(Event::Frame(Frame { data: &frame, captured: t, dequeued: t }));
-            n += 1;
-            next += period;
-            if Instant::now() > next + period {
-                next = Instant::now() + period;
-            }
+        Ok(Box::new(Running { pattern: self, frame: vec![0u8; self.format.frame_size()], period, next: Instant::now(), n: 0 }))
+    }
+}
+
+/// One frame per period of FPS, on an absolute schedule; a frame late by
+/// more than a period starts the schedule again rather than catching up.
+struct Running<'a> {
+    pattern: &'a Pattern,
+    frame: Vec<u8>,
+    period: Duration,
+    next: Instant,
+    n: u64,
+}
+
+impl Stream for Running<'_> {
+    fn next(&mut self, wait: Duration, take: &mut dyn FnMut(Raw<'_>)) -> io::Result<()> {
+        let now = Instant::now();
+        if now < self.next {
+            thread::sleep((self.next - now).min(wait));
+            return Ok(());
+        }
+        self.pattern.draw(self.n, &mut self.frame);
+        let t = now_monotonic();
+        take(Raw { data: &self.frame, captured: t, dequeued: t, mark: Mark::Sequence(self.n as u32), flagged: false });
+        self.n += 1;
+        self.next += self.period;
+        if Instant::now() > self.next + self.period {
+            self.next = Instant::now() + self.period;
         }
         Ok(())
     }
@@ -91,7 +98,10 @@ impl FrameSource for Pattern {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
+    use crate::capture;
 
     #[test]
     fn bars_then_a_stripe_that_moves() {
@@ -115,8 +125,8 @@ mod tests {
         let quit = AtomicBool::new(false);
         let start = Instant::now();
         let mut frames = 0;
-        p.run(&quit, &mut |e| {
-            if let Event::Frame(_) = e {
+        capture::run(&mut p, &capture::Monotonic, &quit, &capture::Dropped::default(), &mut |e| {
+            if let capture::Event::Frame(_) = e {
                 frames += 1;
                 if frames == 20 {
                     quit.store(true, Ordering::Relaxed);

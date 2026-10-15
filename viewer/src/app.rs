@@ -24,7 +24,7 @@ use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::audio::Controls;
-use crate::capture::{Event, Format, FrameSource, now_monotonic};
+use crate::capture::{self, Event, Format, FrameSource, Signal, now_monotonic};
 use crate::desktop::Desktop;
 use crate::gputime::GpuTimer;
 use crate::keys::{self, Action};
@@ -160,8 +160,8 @@ enum UserEvent {
     /// window's number, so that one sent as an earlier window's loop ended
     /// cannot close the next window (#13).
     CaptureEnded(u64),
-    /// MJPEG frames arrive but do not decode (`Event::Undecodable`).
-    Undecodable(String),
+    /// The frame policy's signal state changed (`Event::Signal`).
+    Signal(Signal),
 }
 
 /// Numbers each window `run` opens, for `UserEvent::CaptureEnded`.
@@ -457,10 +457,14 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Re
         let slot = slot.clone();
         let quit = quit.clone();
         let live = opts.live.clone();
+        // The wizard's page says what its feed does (its signal check), so
+        // its windows log no signal changes; Idle, before a card is picked,
+        // has none to report.
+        let log_signal = opts.wizard.is_none();
         thread::spawn(move || -> Result<(u64, u64), String> {
             let mut frames = 0u64;
             let mut gaps = 0u64;
-            let result = source.run(&quit, &mut |e| match e {
+            let result = capture::run(&mut *source, &capture::Monotonic, &quit, &live.dropped, &mut |e| match e {
                 Event::Frame(f) => {
                     frames += 1;
                     live.frame();
@@ -474,25 +478,17 @@ pub fn run(mut source: Box<dyn FrameSource>, opts: Options, quitter: Quit) -> Re
                     }
                     let _ = proxy.send_event(UserEvent::Frame);
                 }
-                // A gap before the first good frame is the card's start-up.
-                Event::Gap { .. } if frames == 0 => {}
                 Event::Gap { from, to, lost } => {
                     gaps += 1;
                     live.gap(from, to, lost);
                     eprintln!("capture gap: sequence {from} -> {to}, {lost} lost");
                 }
-                Event::NoSignal => {
-                    live.signal(false);
-                    eprintln!("no signal");
-                }
-                Event::SignalBack => {
-                    live.signal(true);
-                    eprintln!("signal back");
-                }
-                Event::Undecodable { count, why } => {
-                    live.undecodable(count, &why);
-                    eprintln!("warning: {count} MJPEG frame(s) dropped, not decodable: {why}");
-                    let _ = proxy.send_event(UserEvent::Undecodable(why));
+                Event::Signal(s) => {
+                    live.signal(&s);
+                    if log_signal {
+                        eprintln!("{s}");
+                    }
+                    let _ = proxy.send_event(UserEvent::Signal(s));
                 }
             });
             // The window ends with its capture. Not sent when the window
@@ -1108,7 +1104,7 @@ impl App {
         Some(SceneText {
             page,
             key_bar: self.overlay.key_bar_showing(now).then(|| overlay::key_bar(loopback)),
-            no_signal: self.overlay.no_signal(now),
+            no_signal: self.overlay.no_signal(),
             message: self.overlay.current_message(now).map(str::to_string),
         })
     }
@@ -1327,19 +1323,16 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         let result = match event {
             UserEvent::Frame => {
-                self.overlay.signal.frame(Instant::now());
                 if let Some(w) = &self.opts.wizard {
                     w.borrow_mut().frame(Instant::now());
                 }
                 self.render()
             }
-            UserEvent::Undecodable(why) => {
-                // Frames arrive, so the banner would say only "no signal".
-                let now = Instant::now();
-                self.overlay.message(format!("The card's MJPEG frames do not decode: {why}"), Duration::from_secs(5), now);
+            UserEvent::Signal(s) => {
                 if let Some(w) = &self.opts.wizard {
-                    w.borrow_mut().undecodable(why);
+                    w.borrow_mut().signal(&s);
                 }
+                self.overlay.signal = s;
                 self.repaint = true;
                 self.render()
             }

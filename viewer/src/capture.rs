@@ -1,30 +1,25 @@
-//! Capture: frames from the card with each buffer's kernel timestamp and
-//! sequence number, and a `poll()` timeout before every dequeue so quit never
-//! waits on a frame (#5). `FrameSource` is the platform seam: V4L2 here,
-//! Media Foundation on Windows (#9).
+//! Capture: the card's buffers, each with its capture time and a sequence
+//! number or sample time, and a timeout on every wait so quit never waits on
+//! a frame (#5). `FrameSource` is the platform seam: an adapter (V4L2 here,
+//! Media Foundation on Windows, #9; the test pattern; the wizard's Idle)
+//! only hands its buffers over. The frame policy (`policy`, #20) above it
+//! decides the rest: what a picture is, the signal state, the gaps.
 
 use std::io;
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::picture::Coding;
 
 #[cfg(windows)]
 pub mod mf;
+mod policy;
 #[cfg(target_os = "linux")]
 mod v4l2;
 #[cfg(windows)]
 pub use mf::MediaFoundation;
+pub use policy::{Dropped, Event, Monotonic, Reason, Since, Signal, run};
 #[cfg(target_os = "linux")]
 pub use v4l2::V4l2;
-
-/// How long one wait for a frame lasts: the longest quit can take with no
-/// frames.
-const POLL_SLICE: Duration = Duration::from_millis(100);
-/// How often a run of undecodable MJPEG frames is reported.
-const DECODE_REPORT_EVERY: Duration = Duration::from_secs(5);
-/// No frame for this long is "no signal" (GLOSSARY).
-pub const NO_SIGNAL_AFTER: Duration = Duration::from_secs(1);
 
 /// What the card sends, from FMT: the one list of the formats the Rust
 /// viewer captures. The settings parse, the wizard's mode list and each
@@ -110,47 +105,52 @@ impl Format {
     }
 }
 
-/// A dequeued frame, valid only inside the callback.
-pub struct Frame<'a> {
+/// A buffer as an adapter dequeued it, lent for one call.
+pub struct Raw<'a> {
     pub data: &'a [u8],
-    /// Kernel capture time (first USB packet, TSTAMP_SRC_SOE), CLOCK_MONOTONIC.
+    /// When the card captured it, on `now_monotonic`'s clock: V4L2's
+    /// kernel time stamp (first USB packet, TSTAMP_SRC_SOE), Media
+    /// Foundation's device time stamp.
     pub captured: Duration,
-    /// When the capture loop got it, CLOCK_MONOTONIC.
+    /// When the adapter got it, `now_monotonic`.
     pub dequeued: Duration,
+    pub mark: Mark,
+    /// The driver flagged it as bad (V4L2's ERROR flag).
+    pub flagged: bool,
 }
 
-/// What the capture loop reports.
-pub enum Event<'a> {
-    Frame(Frame<'a>),
-    /// Sequence numbers jumped: `lost` frames never reached us.
-    Gap { from: u32, to: u32, lost: u32 },
-    /// No frame for `NO_SIGNAL_AFTER`.
-    NoSignal,
-    /// Frames again after `NoSignal`.
-    SignalBack,
-    /// MJPEG frames arrive but do not decode: `count` since the last
-    /// report, at most one report per `DECODE_REPORT_EVERY`. Frames that
-    /// arrive keep `NoSignal` away, but none reach the window, so this is
-    /// what says why the window has no picture.
-    Undecodable { count: u64, why: String },
+/// What a buffer's place in the stream is read from, for the gaps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// The driver's sequence number (V4L2).
+    Sequence(u32),
+    /// The sample time in 100 ns units, where there are no sequence
+    /// numbers (Media Foundation).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Time(i64),
 }
 
-/// The platform seam for capture.
+/// The platform seam for capture: an adapter.
 pub trait FrameSource: Send {
     fn format(&self) -> Format;
-    /// Delivers events until `quit` is set, returning within `POLL_SLICE`
-    /// of it. An error means the source is unusable (the card is gone).
-    fn run(&mut self, quit: &AtomicBool, on_event: &mut dyn FnMut(Event<'_>)) -> io::Result<()>;
+
+    /// Bytes from one YUYV row to the next as the card lays them out,
+    /// stated once, at open; the policy packs padded rows. Unused for MJPEG.
+    fn stride(&self) -> usize {
+        self.format().width as usize * 2
+    }
+
+    /// The stream, started on the capture thread (Media Foundation's
+    /// objects stay on the thread that made them).
+    fn start(&mut self) -> io::Result<Box<dyn Stream + '_>>;
 }
 
-/// Frames lost between two sample times (100 ns units) at `fps`, where a
-/// source has times but no sequence numbers (Media Foundation): the
-/// periods skipped when the step is over 1.5 periods.
-#[cfg_attr(not(windows), allow(dead_code))]
-pub fn lost_between(prev: i64, now: i64, fps: f64) -> u32 {
-    let period = 1e7 / fps.max(1.0);
-    let step = (now - prev) as f64;
-    if step > 1.5 * period { ((step / period).round() as u32).saturating_sub(1) } else { 0 }
+/// A started adapter's buffers.
+pub trait Stream {
+    /// Waits up to `wait` for the next buffer and lends it to `take`;
+    /// returns without one when `wait` runs out. An error means the source
+    /// is unusable (the card is gone).
+    fn next(&mut self, wait: Duration, take: &mut dyn FnMut(Raw<'_>)) -> io::Result<()>;
 }
 
 /// The clock capture times are on: CLOCK_MONOTONIC, the kernel's buffer
@@ -181,15 +181,6 @@ pub fn now_monotonic() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn lost_frames_from_sample_times() {
-        let p = 166_667; // 60 fps in 100 ns units
-        assert_eq!(lost_between(0, p, 60.0), 0);
-        assert_eq!(lost_between(0, p * 14 / 10, 60.0), 0, "jitter under 1.5 periods");
-        assert_eq!(lost_between(0, 2 * p, 60.0), 1);
-        assert_eq!(lost_between(0, 5 * p, 60.0), 4);
-    }
 
     #[test]
     fn formats_from_the_settings() {

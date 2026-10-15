@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+use crate::capture::{Reason, Since, Signal};
 use crate::sources::{self, Profile};
 
 /// Tells the window something to show from another thread: a message and
@@ -15,10 +16,6 @@ pub type Notify = std::sync::Arc<dyn Fn(Option<(String, Duration)>) + Send + Syn
 
 /// How long the key bar shows at start.
 pub const KEY_BAR_FOR: Duration = Duration::from_secs(10);
-/// No frame this long after the feed opened: "never".
-pub const NEVER_AFTER: Duration = Duration::from_secs(5);
-/// No frame this long after the last one: "stopped".
-pub const STOPPED_AFTER: Duration = Duration::from_secs(2);
 /// The width the tips wrap at, in characters.
 const TIPS_WIDTH: usize = 64;
 
@@ -26,48 +23,6 @@ const TIPS_WIDTH: usize = 64;
 pub enum Page {
     Panel,
     Tips,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NoSignal {
-    /// No frame since the feed opened.
-    Never,
-    /// Frames came, then stopped.
-    Stopped,
-}
-
-/// Frame arrivals -> the banner's state.
-#[derive(Debug, Clone, Copy)]
-pub struct SignalWatch {
-    opened: Instant,
-    last_frame: Option<Instant>,
-}
-
-impl SignalWatch {
-    pub fn new(opened: Instant) -> Self {
-        Self { opened, last_frame: None }
-    }
-
-    pub fn frame(&mut self, at: Instant) {
-        self.last_frame = Some(at);
-    }
-
-    pub fn state(&self, now: Instant) -> Option<NoSignal> {
-        match self.last_frame {
-            None if now - self.opened >= NEVER_AFTER => Some(NoSignal::Never),
-            Some(t) if now - t >= STOPPED_AFTER => Some(NoSignal::Stopped),
-            _ => None,
-        }
-    }
-
-    /// When the state can next change without a frame arriving.
-    fn next_change(&self, now: Instant) -> Option<Instant> {
-        let at = match self.last_frame {
-            None => self.opened + NEVER_AFTER,
-            Some(t) => t + STOPPED_AFTER,
-        };
-        (at > now).then_some(at)
-    }
 }
 
 /// What the overlay shows besides the feed.
@@ -79,7 +34,8 @@ pub struct Overlay {
     wake: Option<String>,
     message: Option<(String, Instant)>,
     key_bar_until: Option<Instant>,
-    pub signal: SignalWatch,
+    /// The frame policy's signal state (capture/policy.rs): the banner.
+    pub signal: Signal,
 }
 
 impl Overlay {
@@ -92,7 +48,7 @@ impl Overlay {
             wake: profile.and_then(|p| p.wake),
             message: None,
             key_bar_until: Some(now + KEY_BAR_FOR),
-            signal: SignalWatch::new(now),
+            signal: Signal::Picture,
         }
     }
 
@@ -141,11 +97,12 @@ impl Overlay {
 
     /// The banner's detail line, when it shows: never while a page is open
     /// (its box over the banner is unreadable, and it has the tips).
-    pub fn no_signal(&self, now: Instant) -> Option<String> {
-        if self.page.is_some() {
-            return None;
+    pub fn no_signal(&self) -> Option<String> {
+        match &self.signal {
+            _ if self.page.is_some() => None,
+            Signal::Picture => None,
+            Signal::NoSignal { since, reason } => Some(no_signal_detail(*since, reason, self.wake.as_deref())),
         }
-        self.signal.state(now).map(|s| no_signal_detail(s, self.wake.as_deref()))
     }
 
     /// Anything to draw besides the feed.
@@ -153,27 +110,26 @@ impl Overlay {
         self.page.is_some()
             || self.current_message(now).is_some()
             || self.key_bar_showing(now)
-            || self.no_signal(now).is_some()
+            || self.no_signal().is_some()
     }
 
     /// The next moment something shown changes on its own: a message or
-    /// the key bar going, the banner coming.
+    /// the key bar going. The banner follows the policy's events.
     pub fn next_change(&self, now: Instant) -> Option<Instant> {
-        [
-            self.message.as_ref().map(|(_, t)| *t).filter(|t| *t > now),
-            self.key_bar_until.filter(|t| *t > now),
-            self.signal.next_change(now),
-        ]
+        [self.message.as_ref().map(|(_, t)| *t).filter(|t| *t > now), self.key_bar_until.filter(|t| *t > now)]
         .into_iter()
         .flatten()
         .min()
     }
 }
 
-fn no_signal_detail(state: NoSignal, wake: Option<&str>) -> String {
-    match state {
-        NoSignal::Never => "Is the source on and connected?".into(),
-        NoSignal::Stopped => match wake {
+/// The banner's detail line: what the reason says to do.
+fn no_signal_detail(since: Since, reason: &Reason, wake: Option<&str>) -> String {
+    match (reason, since) {
+        (Reason::Undecodable(why), _) => format!("The card's MJPEG frames do not decode: {why}. Pick a yuyv422 mode."),
+        (Reason::Unusable(why), _) => format!("The card sends frames the viewer cannot use ({why})."),
+        (Reason::Nothing, Since::Never) => "Is the source on and connected?".into(),
+        (Reason::Nothing, Since::Stopped) => match wake {
             Some(w) => {
                 let mut c = w.chars();
                 let first = c.next().map(|f| f.to_uppercase().collect::<String>()).unwrap_or_default();
@@ -391,28 +347,29 @@ mod tests {
     }
 
     #[test]
-    fn the_banner_comes_and_goes_with_frames() {
+    fn the_banner_follows_the_frame_policys_state() {
         let t0 = Instant::now();
-        let s = |o: &Overlay, at: Duration| o.no_signal(t0 + at);
+        let no = |since, reason| Signal::NoSignal { since, reason };
         let mut o = Overlay::new("ps5", t0);
-        assert_eq!(s(&o, Duration::from_secs(4)), None);
-        assert_eq!(s(&o, NEVER_AFTER).as_deref(), Some("Is the source on and connected?"));
-        o.signal.frame(t0 + Duration::from_secs(6));
-        assert_eq!(s(&o, Duration::from_millis(7900)), None);
-        assert_eq!(
-            s(&o, Duration::from_secs(8)).as_deref(),
-            Some("The source stopped sending.  Press the PS button on the controller to wake it.")
-        );
+        assert_eq!(o.no_signal(), None);
+        o.signal = no(Since::Never, Reason::Nothing);
+        assert_eq!(o.no_signal().as_deref(), Some("Is the source on and connected?"));
+        o.signal = no(Since::Stopped, Reason::Nothing);
+        assert_eq!(o.no_signal().as_deref(), Some("The source stopped sending.  Press the PS button on the controller to wake it."));
+        o.signal = no(Since::Never, Reason::Undecodable("not a JPEG".into()));
+        assert_eq!(o.no_signal().as_deref(), Some("The card's MJPEG frames do not decode: not a JPEG. Pick a yuyv422 mode."));
+        o.signal = no(Since::Stopped, Reason::Unusable("flagged as bad by the driver".into()));
+        assert_eq!(o.no_signal().as_deref(), Some("The card sends frames the viewer cannot use (flagged as bad by the driver)."));
         o.toggle();
-        assert_eq!(s(&o, Duration::from_secs(8)), None, "hidden under the panel");
+        assert_eq!(o.no_signal(), None, "hidden under the panel");
+        o.toggle();
+        o.signal = Signal::Picture;
+        assert_eq!(o.no_signal(), None);
         let generic = Overlay::new("", t0);
         assert_eq!(generic.tips_id, "generic");
         let mut g = generic;
-        g.signal.frame(t0);
-        assert_eq!(
-            s(&g, Duration::from_secs(3)).as_deref(),
-            Some("The source stopped sending.  Is it asleep or switched off?")
-        );
+        g.signal = no(Since::Stopped, Reason::Nothing);
+        assert_eq!(g.no_signal().as_deref(), Some("The source stopped sending.  Is it asleep or switched off?"));
     }
 
     #[test]
@@ -420,7 +377,7 @@ mod tests {
         let t0 = Instant::now();
         let mut o = Overlay::new("ps5", t0);
         assert!(o.key_bar_showing(t0) && !o.key_bar_showing(t0 + KEY_BAR_FOR));
-        assert_eq!(o.next_change(t0), Some(t0 + NEVER_AFTER));
+        assert_eq!(o.next_change(t0), Some(t0 + KEY_BAR_FOR));
         o.message("Volume 80%", Duration::from_millis(1500), t0);
         assert_eq!(o.current_message(t0 + Duration::from_secs(1)), Some("Volume 80%"));
         assert_eq!(o.current_message(t0 + Duration::from_secs(2)), None);

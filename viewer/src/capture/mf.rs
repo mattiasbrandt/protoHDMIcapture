@@ -1,15 +1,16 @@
 //! Media Foundation (Windows, #18): the card through a source reader in
 //! asynchronous mode, so every wait for a frame has a timeout (quit and
 //! the no-signal state work as on V4L2). Each sample is copied out in the
-//! reader's callback and handed to the capture loop over a channel.
+//! reader's callback and handed to the frame policy (policy.rs) over a
+//! channel; the policy does the rest, as for V4L2.
 //!
 //! - Formats: the card's own YUY2 or MJPG at RES and FPS, converters off,
 //!   so nothing is decoded or scaled on the way.
 //! - Capture time: `MFSampleExtension_DeviceTimestamp`, the driver's time
 //!   stamp in 100 ns units on the performance counter's epoch, the clock
 //!   `now_monotonic` reads on Windows.
-//! - Lost frames: Media Foundation has no sequence numbers; a sample time
-//!   more than 1.5 periods after the last one counts the periods skipped.
+//! - Lost frames: Media Foundation has no sequence numbers; the policy
+//!   reads them from the sample times.
 //!
 //! COM runs multithreaded, and only on threads of ours: winit initialises
 //! OLE single-threaded on the window's thread, and a multithreaded COM
@@ -18,7 +19,6 @@
 use std::io;
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
@@ -34,9 +34,8 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
 use windows::core::{GUID, HRESULT, HSTRING, PCWSTR, PWSTR, Ref, implement};
 
-use super::{DECODE_REPORT_EVERY, Event, Format, Frame, FrameSource, NO_SIGNAL_AFTER, POLL_SLICE, Pixels, lost_between, now_monotonic};
+use super::{Format, FrameSource, Mark, Pixels, Raw, Stream, now_monotonic};
 use crate::card::Node;
-use crate::mjpeg;
 
 /// The reader's first video stream, as its methods take it.
 const STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
@@ -163,7 +162,7 @@ fn subtype(p: Pixels) -> (GUID, &'static str) {
 
 /// A source reader on the device at `link`, set to `want` among the
 /// card's own types; with `callback`, in asynchronous mode. Also the
-/// type's row stride in bytes (YUY2; MJPG has none).
+/// type's row stride in bytes (YUY2; MJPG has none: a row's width).
 fn reader(link: &str, want: Format, callback: Option<&IMFSourceReaderCallback>) -> Result<(IMFSourceReader, usize), String> {
     let at = |e: windows::core::Error| format!("{link}: {e}");
     let device = attributes(2)?;
@@ -209,7 +208,7 @@ fn reader(link: &str, want: Format, callback: Option<&IMFSourceReaderCallback>) 
                     Ok(s) if (s as i32) > 0 => s as usize,
                     _ => want.width as usize * 2,
                 },
-                Pixels::Mjpeg => 0,
+                Pixels::Mjpeg => want.width as usize * 2,
             };
             return Ok((reader, stride));
         }
@@ -291,10 +290,6 @@ pub struct MediaFoundation {
     link: String,
     format: Format,
     stride: usize,
-    /// MJPEG: the decoder, and the frame it decodes into.
-    mjpeg: Option<(mjpeg::Decoder, Vec<u8>)>,
-    /// YUY2 with padded rows: the frame packed tight.
-    packed: Vec<u8>,
 }
 
 impl MediaFoundation {
@@ -307,8 +302,7 @@ impl MediaFoundation {
             let link = link.clone();
             on_mta_thread(move || reader(&link, want, None).map(|(_, stride)| stride))?
         };
-        let mjpeg = (want.pixels == Pixels::Mjpeg).then(|| (mjpeg::Decoder::new(want.width, want.height), vec![0; want.frame_size()]));
-        Ok(Self { link, format: want, stride, mjpeg, packed: Vec::new() })
+        Ok(Self { link, format: want, stride })
     }
 }
 
@@ -317,117 +311,90 @@ impl FrameSource for MediaFoundation {
         self.format
     }
 
-    fn run(&mut self, quit: &AtomicBool, on_event: &mut dyn FnMut(Event<'_>)) -> io::Result<()> {
-        let _mf = Mf::init().map_err(io::Error::other)?;
+    fn stride(&self) -> usize {
+        self.stride
+    }
+
+    /// On the capture thread: COM and Media Foundation, the reader with its
+    /// callback, and the first request.
+    fn start(&mut self) -> io::Result<Box<dyn Stream + '_>> {
+        let mf = Mf::init().map_err(io::Error::other)?;
         let (tx, rx) = mpsc::channel();
         let (free_tx, free_rx) = mpsc::channel();
         let callback: IMFSourceReaderCallback = Callback { tx: Mutex::new(tx), free: Mutex::new(free_rx) }.into();
         let (reader, _) = reader(&self.link, self.format, Some(&callback)).map_err(io::Error::other)?;
-        // One request outstanding at a time: made here, then again as each
-        // answer comes in.
-        let request = || unsafe { reader.ReadSample(STREAM, 0, None, None, None, None) }.map_err(|e| io::Error::other(format!("reading a sample: {e}")));
-        request()?;
+        let running = Running { reader, _callback: callback, _mf: mf, rx, free_tx, link: &self.link, warned_clock: false };
+        running.request()?;
+        Ok(Box::new(running))
+    }
+}
 
-        let (w, h) = (self.format.width as usize, self.format.height as usize);
-        let frame_size = self.format.frame_size();
-        let mut last_frame = now_monotonic();
-        let mut no_signal = false;
-        let mut warned_clock = false;
-        let (mut seq, mut last_time): (u32, Option<i64>) = (0, None);
-        let mut undecodable = 0u64;
-        let mut reported: Option<Duration> = None;
+/// A started reader. Dropped in this order: the reader (flushed first, in
+/// `drop`), its callback, then Media Foundation and COM.
+struct Running<'a> {
+    reader: IMFSourceReader,
+    _callback: IMFSourceReaderCallback,
+    _mf: Mf,
+    rx: Receiver<Delivered>,
+    /// Buffers handed back to the callback for the next samples.
+    free_tx: Sender<Vec<u8>>,
+    link: &'a str,
+    warned_clock: bool,
+}
 
-        let result = loop {
-            if quit.load(Ordering::Relaxed) {
-                break Ok(());
-            }
-            let d = match rx.recv_timeout(POLL_SLICE) {
-                Ok(d) => d,
-                Err(RecvTimeoutError::Timeout) => {
-                    if !no_signal && now_monotonic() - last_frame >= NO_SIGNAL_AFTER {
-                        no_signal = true;
-                        on_event(Event::NoSignal);
-                    }
-                    continue;
-                }
-                Err(RecvTimeoutError::Disconnected) => break Err(io::Error::other("the source reader's callback went away")),
-            };
-            if let Err(e) = d.status {
-                break Err(io::Error::other(format!("{}: {e} (the card is gone?)", self.link)));
-            }
-            if d.flags & MF_SOURCE_READERF_ERROR.0 as u32 != 0 {
-                break Err(io::Error::other(format!("{}: the source reader failed (the card is gone?)", self.link)));
-            }
-            if d.flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                break Err(io::Error::other(format!("{}: the card's stream ended", self.link)));
-            }
-            if let Err(e) = request() {
-                break Err(e);
-            }
-            if d.data.is_empty() {
-                continue;
-            }
-            last_frame = d.dequeued;
-            if no_signal {
-                no_signal = false;
-                on_event(Event::SignalBack);
-            }
-            if let Some(prev) = last_time {
-                let lost = lost_between(prev, d.time, self.format.fps);
-                if lost > 0 {
-                    on_event(Event::Gap { from: seq, to: seq.wrapping_add(lost + 1), lost });
-                    seq = seq.wrapping_add(lost);
-                }
-            }
-            last_time = Some(d.time);
-            seq = seq.wrapping_add(1);
-            let captured = match d.device {
-                Some(t) => Duration::from_nanos(t.saturating_mul(100)),
-                None => {
-                    if !warned_clock {
-                        warned_clock = true;
-                        eprintln!("warning: the card's samples carry no device time stamp; latency figures are meaningless");
-                    }
-                    d.dequeued
-                }
-            };
-            let data: &[u8] = match &mut self.mjpeg {
-                None if self.stride == w * 2 && d.data.len() == frame_size => &d.data,
-                // Padded rows: packed tight, as the window takes them.
-                None if self.stride > w * 2 && d.data.len() >= self.stride * (h - 1) + w * 2 => {
-                    self.packed.resize(frame_size, 0);
-                    for (row, out) in self.packed.chunks_exact_mut(w * 2).enumerate() {
-                        out.copy_from_slice(&d.data[row * self.stride..row * self.stride + w * 2]);
-                    }
-                    &self.packed
-                }
-                // Short: dropped, as V4L2's short buffers are.
-                None => {
-                    let _ = free_tx.send(d.data);
-                    continue;
-                }
-                Some((decoder, yuyv)) => match decoder.decode(&d.data, yuyv) {
-                    Ok(()) => &yuyv[..],
-                    Err(e) => {
-                        undecodable += 1;
-                        if reported.is_none_or(|t| d.dequeued - t >= DECODE_REPORT_EVERY) {
-                            on_event(Event::Undecodable { count: undecodable, why: e.to_string() });
-                            undecodable = 0;
-                            reported = Some(d.dequeued);
-                        }
-                        let _ = free_tx.send(d.data);
-                        continue;
-                    }
-                },
-            };
-            on_event(Event::Frame(Frame { data, captured, dequeued: d.dequeued }));
-            // Back to the callback for the next sample; gone once it is.
-            let _ = free_tx.send(d.data);
+impl Running<'_> {
+    /// One request outstanding at a time: made at the start, then again as
+    /// each answer comes in.
+    fn request(&self) -> io::Result<()> {
+        // Safety: a live reader on this thread.
+        unsafe { self.reader.ReadSample(STREAM, 0, None, None, None, None) }.map_err(|e| io::Error::other(format!("reading a sample: {e}")))
+    }
+}
+
+impl Stream for Running<'_> {
+    fn next(&mut self, wait: Duration, take: &mut dyn FnMut(Raw<'_>)) -> io::Result<()> {
+        let d = match self.rx.recv_timeout(wait) {
+            Ok(d) => d,
+            Err(RecvTimeoutError::Timeout) => return Ok(()),
+            Err(RecvTimeoutError::Disconnected) => return Err(io::Error::other("the source reader's callback went away")),
         };
+        if let Err(e) = d.status {
+            return Err(io::Error::other(format!("{}: {e} (the card is gone?)", self.link)));
+        }
+        if d.flags & MF_SOURCE_READERF_ERROR.0 as u32 != 0 {
+            return Err(io::Error::other(format!("{}: the source reader failed (the card is gone?)", self.link)));
+        }
+        if d.flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+            return Err(io::Error::other(format!("{}: the card's stream ended", self.link)));
+        }
+        self.request()?;
+        // A stream tick, or a buffer that could not be read: no sample.
+        if d.data.is_empty() {
+            return Ok(());
+        }
+        let captured = match d.device {
+            Some(t) => Duration::from_nanos(t.saturating_mul(100)),
+            None => {
+                if !self.warned_clock {
+                    self.warned_clock = true;
+                    eprintln!("warning: the card's samples carry no device time stamp; latency figures are meaningless");
+                }
+                d.dequeued
+            }
+        };
+        take(Raw { data: &d.data, captured, dequeued: d.dequeued, mark: Mark::Time(d.time), flagged: false });
+        // Back to the callback for the next sample; gone once it is.
+        let _ = self.free_tx.send(d.data);
+        Ok(())
+    }
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
         // Completes the outstanding request before the reader goes.
-        if let Err(e) = unsafe { reader.Flush(STREAM) } {
+        // Safety: a live reader on this thread.
+        if let Err(e) = unsafe { self.reader.Flush(STREAM) } {
             eprintln!("warning: flushing the source reader: {e}");
         }
-        result
     }
 }

@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::audio::{Counters, RATE};
+use crate::capture::{Dropped, Reason, Since, Signal};
 use crate::overlay::Notify;
 use crate::stats::percentiles;
 
@@ -78,7 +79,10 @@ pub struct Live {
     frames: AtomicU64,
     gaps: AtomicU64,
     lost: AtomicU64,
-    no_signal: AtomicBool,
+    /// The frame policy's signal state.
+    signal: Mutex<Signal>,
+    /// Buffers the frame policy dropped, by reason; it counts them here.
+    pub dropped: Dropped,
     presented: AtomicU64,
     repeated: AtomicU64,
     /// The display's refresh period, in ns (0: unknown).
@@ -96,7 +100,8 @@ impl Live {
             frames: AtomicU64::new(0),
             gaps: AtomicU64::new(0),
             lost: AtomicU64::new(0),
-            no_signal: AtomicBool::new(false),
+            signal: Mutex::new(Signal::Picture),
+            dropped: Dropped::default(),
             presented: AtomicU64::new(0),
             repeated: AtomicU64::new(0),
             refresh_ns: AtomicU64::new(0),
@@ -116,9 +121,10 @@ impl Live {
         self.event(format!("capture gap: sequence {from} -> {to}, {lost} lost"));
     }
 
-    pub fn signal(&self, ok: bool) {
-        self.no_signal.store(!ok, Ordering::Relaxed);
-        self.event(if ok { "signal back" } else { "no signal" }.into());
+    /// A change of the signal state, as the frame policy sends it.
+    pub fn signal(&self, signal: &Signal) {
+        *self.signal.lock().expect("the signal's lock is never poisoned") = signal.clone();
+        self.event(signal.to_string());
     }
 
     /// A presented card frame: its latencies and the refreshes it repeated.
@@ -136,11 +142,6 @@ impl Live {
 
     fn up(&self) -> Duration {
         self.started.elapsed()
-    }
-
-    /// MJPEG frames that arrived but did not decode (`Event::Undecodable`).
-    pub fn undecodable(&self, count: u64, why: &str) {
-        self.event(format!("{count} MJPEG frame(s) did not decode: {why}"));
     }
 
     pub fn set_audio(&self, audio: AudioLive) {
@@ -210,6 +211,7 @@ impl Rolling {
             None => Value::Null,
         };
         let refresh_ns = live.refresh_ns.load(Ordering::Relaxed);
+        let (signal, signal_why) = signal_json(&live.signal.lock().expect("the signal's lock is never poisoned"));
 
         let snap = json!({
             "v": VERSION,
@@ -220,7 +222,12 @@ impl Rolling {
             "frames": frames,
             "gaps": live.gaps.load(Ordering::Relaxed),
             "lost": live.lost.load(Ordering::Relaxed),
-            "signal": signal(live.no_signal.load(Ordering::Relaxed), frames),
+            "signal": signal,
+            "signal_why": signal_why,
+            "dropped": {
+                "undecodable": live.dropped.undecodable.load(Ordering::Relaxed),
+                "unusable": live.dropped.unusable.load(Ordering::Relaxed),
+            },
             "window_s": window_s,
             "dequeue_present": latency(&mut to),
             "kernel_present": latency(&mut kernel),
@@ -241,14 +248,21 @@ impl Rolling {
     }
 }
 
-/// As view.sh's dashboard names it: ok, never (no frame since the feed
-/// opened) or stopped.
-fn signal(no_signal: bool, frames: u64) -> &'static str {
-    match (no_signal, frames) {
-        (false, _) => "ok",
-        (true, 0) => "never",
-        (true, _) => "stopped",
-    }
+/// The state as view.sh's dashboard names it: ok, never (no picture since
+/// the feed opened) or stopped; and why, when frames arrive that cannot be
+/// shown (null when nothing arrives).
+fn signal_json(signal: &Signal) -> (&'static str, Value) {
+    let Signal::NoSignal { since, reason } = signal else { return ("ok", Value::Null) };
+    let name = match since {
+        Since::Never => "never",
+        Since::Stopped => "stopped",
+    };
+    let why = match reason {
+        Reason::Nothing => Value::Null,
+        Reason::Undecodable(why) => json!(format!("MJPEG frames do not decode: {why}")),
+        Reason::Unusable(why) => json!(format!("frames the viewer cannot use: {why}")),
+    };
+    (name, why)
 }
 
 fn audio_json(a: &AudioLive) -> Value {
@@ -557,12 +571,24 @@ fn render(s: &Value, p: &Paint) -> String {
     row(
         &mut out,
         "signal",
-        match s["signal"].as_str() {
-            Some("ok") => "ok".into(),
-            Some("never") => p.red("none since the feed opened"),
-            Some("stopped") => p.red("stopped (source asleep or off?)"),
+        match (s["signal"].as_str(), s["signal_why"].as_str()) {
+            (Some("ok"), _) => "ok".into(),
+            (Some("never"), None) => p.red("none since the feed opened"),
+            (Some("stopped"), None) => p.red("stopped (source asleep or off?)"),
+            (Some("never" | "stopped"), Some(why)) => p.red(&format!("no picture: {why}")),
             _ => "?".into(),
         },
+    );
+    let (undecodable, unusable) = (s["dropped"]["undecodable"].as_u64().unwrap_or(0), s["dropped"]["unusable"].as_u64().unwrap_or(0));
+    row(
+        &mut out,
+        "dropped",
+        format!(
+            "{} · {} undecodable · {} unusable",
+            p.good_bad(&(undecodable + unusable).to_string(), undecodable + unusable == 0),
+            int(&s["dropped"]["undecodable"]),
+            int(&s["dropped"]["unusable"])
+        ),
     );
     let window = format!("last {:.0} s", num(&s["window_s"]).unwrap_or(0.0));
     for (name, key) in [("dequeue→presented", "dequeue_present"), ("kernel→presented", "kernel_present")] {
@@ -854,14 +880,16 @@ mod tests {
         let viewer = Live::new();
         wizard.frame();
         wizard.gap(1, 3, 1);
-        wizard.signal(false);
+        wizard.signal(&Signal::NoSignal { since: Since::Stopped, reason: Reason::Nothing });
+        wizard.dropped.unusable.fetch_add(1, Ordering::Relaxed);
         wizard.presented(Duration::from_millis(10), Duration::from_millis(30), 1, Some(Duration::from_micros(16_683)));
         assert_eq!(
             [&viewer.frames, &viewer.gaps, &viewer.lost, &viewer.presented, &viewer.repeated, &viewer.refresh_ns]
                 .map(|n| n.load(Ordering::Relaxed)),
             [0; 6]
         );
-        assert!(!viewer.no_signal.load(Ordering::Relaxed));
+        assert_eq!(*viewer.signal.lock().unwrap(), Signal::Picture);
+        assert_eq!(viewer.dropped.unusable.load(Ordering::Relaxed), 0);
         assert!(viewer.samples.lock().unwrap().is_empty() && viewer.events.lock().unwrap().is_empty());
     }
 
@@ -878,7 +906,7 @@ mod tests {
         for _ in 0..5 {
             wizard.frame();
         }
-        wizard.signal(false);
+        wizard.signal(&Signal::NoSignal { since: Since::Never, reason: Reason::Nothing });
         viewer.frame();
         let s = (0..250).map(|_| read_line(&mut r)).find(|v| v["frames"] == 1).expect("the viewer's frame arrives");
         assert_eq!(s["signal"], "ok", "not the wizard's no signal");
@@ -907,7 +935,8 @@ mod tests {
             live.frame();
         }
         live.gap(10, 13, 2);
-        live.signal(false);
+        live.signal(&Signal::NoSignal { since: Since::Stopped, reason: Reason::Undecodable("not a JPEG".into()) });
+        live.dropped.undecodable.fetch_add(4, Ordering::Relaxed);
         live.presented(Duration::from_millis(10), Duration::from_millis(30), 0, Some(Duration::from_micros(16_683)));
         live.presented(Duration::from_millis(12), Duration::from_millis(32), 2, None);
         let counters = Arc::new(Counters::default());
@@ -923,6 +952,8 @@ mod tests {
         assert_eq!(s["gaps"], 1);
         assert_eq!(s["lost"], 2);
         assert_eq!(s["signal"], "stopped");
+        assert_eq!(s["signal_why"], "MJPEG frames do not decode: not a JPEG");
+        assert_eq!(s["dropped"], json!({ "undecodable": 4, "unusable": 0 }));
         assert_eq!(s["dequeue_present"]["n"], 2);
         assert_eq!(s["kernel_present"]["median_ms"], 32.0);
         assert_eq!(s["repeated_total"], 2);
@@ -935,7 +966,7 @@ mod tests {
         assert_eq!((a["xruns"].as_u64(), a["delay_ms"].as_u64()), (Some(3), Some(80)));
         let events: Vec<&str> = s["events"].as_array().unwrap().iter().map(|e| e.as_str().unwrap()).collect();
         assert!(events[0].ends_with("capture gap: sequence 10 -> 13, 2 lost"), "{events:?}");
-        assert!(events[1].ends_with("no signal"));
+        assert!(events[1].ends_with("no signal (stopped): MJPEG frames do not decode: not a JPEG"), "{events:?}");
 
         // The viewer ends: the dashboard sees the end, the socket goes.
         drop(server);
@@ -1015,7 +1046,8 @@ mod tests {
     fn sample() -> Value {
         json!({
             "v": 1, "pid": 4242, "up_s": 12.4, "capture_fps": 60.0, "presented_fps": 59.9,
-            "frames": 744, "gaps": 0, "lost": 0, "signal": "ok", "window_s": 10.0,
+            "frames": 744, "gaps": 0, "lost": 0, "signal": "ok", "signal_why": null,
+            "dropped": { "undecodable": 0, "unusable": 0 }, "window_s": 10.0,
             "dequeue_present": { "median_ms": 9.31, "p99_ms": 14.2, "n": 599 },
             "kernel_present": { "median_ms": 40.46, "p99_ms": 49.49, "n": 599 },
             "refresh_hz": 59.951, "repeated_window": 0, "repeated_total": 3,
@@ -1035,6 +1067,7 @@ mod tests {
             "  fps               60.0 captured · 59.9 presented · display 59.95 Hz",
             "  capture gaps      0 · 0 frames lost · 744 frames captured",
             "  signal            ok",
+            "  dropped           0 · 0 undecodable · 0 unusable",
             "  dequeue→presented median 9.31 ms · p99 14.20 ms (last 10 s, 599 frames)",
             "  kernel→presented  median 40.46 ms · p99 49.49 ms (last 10 s, 599 frames)",
             "  repeated          0 refreshes (last 10 s) · 3 since start",
@@ -1066,6 +1099,12 @@ mod tests {
         }
         s["audio"] = json!({ "state": "off", "why": "AUDIO=none" });
         assert!(render(&s, &Paint { on: false }).contains("  loopback          not running (AUDIO=none)"));
+        s["signal_why"] = json!("MJPEG frames do not decode: not a JPEG");
+        s["dropped"] = json!({ "undecodable": 120, "unusable": 0 });
+        let text = render(&s, &Paint { on: false });
+        for w in ["  signal            no picture: MJPEG frames do not decode: not a JPEG", "  dropped           120 · 120 undecodable · 0 unusable"] {
+            assert!(text.lines().any(|l| l == w), "no line {w:?} in\n{text}");
+        }
     }
 
     #[test]
@@ -1092,8 +1131,10 @@ mod tests {
 
     #[test]
     fn signal_as_view_shs_dashboard_names_it() {
-        assert_eq!(signal(false, 0), "ok");
-        assert_eq!(signal(true, 0), "never");
-        assert_eq!(signal(true, 5), "stopped");
+        let no = |since, reason| Signal::NoSignal { since, reason };
+        assert_eq!(signal_json(&Signal::Picture), ("ok", Value::Null));
+        assert_eq!(signal_json(&no(Since::Never, Reason::Nothing)), ("never", Value::Null));
+        assert_eq!(signal_json(&no(Since::Stopped, Reason::Nothing)), ("stopped", Value::Null));
+        assert_eq!(signal_json(&no(Since::Never, Reason::Unusable("short".into()))), ("never", json!("frames the viewer cannot use: short")));
     }
 }

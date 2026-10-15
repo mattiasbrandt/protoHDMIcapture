@@ -21,12 +21,11 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use regex::Regex;
 
-use crate::capture::{Event, Format, FrameSource, Pixels};
+use crate::capture::{Format, FrameSource, Pixels, Raw, Reason, Signal, Stream};
 use crate::capture_cards::{self, Known};
 use crate::card::Node;
 use crate::overlay::wrap;
@@ -277,8 +276,8 @@ struct Measure {
     looked_at: usize,
     /// Why the picture could not be checked.
     unchecked: Option<String>,
-    /// Frames arrived but did not decode (MJPEG): the decoder's error.
-    undecodable: Option<String>,
+    /// Why there is no picture, from the frame policy's latest state.
+    reason: Option<Reason>,
 }
 
 /// The card stage's ignore questions: the pattern so far and what was said.
@@ -1022,16 +1021,20 @@ impl Wizard {
         out
     }
 
-    /// MJPEG frames that arrived but did not decode: with none decoding,
-    /// the signal check says so rather than "no frames".
-    pub fn undecodable(&mut self, why: String) {
+    /// The frame policy's signal state: with no frame at all, the signal
+    /// check words its failure from the reason (frames that do not decode
+    /// or cannot be used are not "no frames").
+    pub fn signal(&mut self, signal: &Signal) {
         if self.step == Step::SignalWait && self.running == Phase::Feed {
-            self.measure.undecodable = Some(why);
+            self.measure.reason = match signal {
+                Signal::Picture => None,
+                Signal::NoSignal { reason, .. } => Some(reason.clone()),
+            };
         }
     }
 
-    /// A frame from the card, as it arrives (`app.rs`, every capture
-    /// frame, not only the ones drawn).
+    /// A picture from the card, as the frame policy delivers it (`app.rs`,
+    /// every one, not only the ones drawn).
     pub fn frame(&mut self, now: Instant) {
         if self.step != Step::SignalWait || self.running != Phase::Feed {
             return;
@@ -1106,17 +1109,23 @@ impl Wizard {
         let mut body = self.signal_lines(false);
         body.push(String::new());
         let (Some(first), Some(end)) = (m.first, m.done_at) else {
-            if let Some(why) = &m.undecodable {
-                let failed = format!("frames arrive but none decode as MJPEG ({why}).");
-                self.signal_result = format!("failed: {failed}");
-                body.push(format!("Failed: {}", capital(&failed)));
-                body.push("The card's MJPEG may be broken: go back and pick a yuyv422 mode.".into());
-                return self.show(Step::SignalRetry, body, yes_no("Try again?", true));
-            }
-            let failed = "no frames in 6 seconds: no signal, or HDCP is on at the source.";
+            let (failed, advice) = match &m.reason {
+                Some(Reason::Undecodable(why)) => (
+                    format!("frames arrive but none decode as MJPEG ({why})."),
+                    "The card's MJPEG may be broken: go back and pick a yuyv422 mode.",
+                ),
+                Some(Reason::Unusable(why)) => (
+                    format!("frames arrive but the viewer cannot use them ({why})."),
+                    "Go back and pick another mode, or use view.sh.",
+                ),
+                Some(Reason::Nothing) | None => (
+                    "no frames in 6 seconds: no signal, or HDCP is on at the source.".into(),
+                    "Check the source is on and outputting, HDCP is off, and the card is plugged in.",
+                ),
+            };
             self.signal_result = format!("failed: {failed}");
-            body.push(format!("Failed: {}", capital(failed)));
-            body.push("Check the source is on and outputting, HDCP is off, and the card is plugged in.".into());
+            body.extend(wrap(&format!("Failed: {}", capital(&failed)), WIDTH));
+            body.push(advice.into());
             return self.show(Step::SignalRetry, body, yes_no("Try again?", true));
         };
         let secs = (end - first).as_secs_f64();
@@ -1847,10 +1856,16 @@ impl FrameSource for Idle {
         Self::FORMAT
     }
 
-    fn run(&mut self, quit: &AtomicBool, _: &mut dyn FnMut(Event<'_>)) -> io::Result<()> {
-        while !quit.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(100));
-        }
+    fn start(&mut self) -> io::Result<Box<dyn Stream + '_>> {
+        Ok(Box::new(Idle))
+    }
+}
+
+/// Idle's stream: every wait runs out. The policy calls it "never" after
+/// 5 s, which the wizard's page hides (it shows no banner).
+impl Stream for Idle {
+    fn next(&mut self, wait: Duration, _: &mut dyn FnMut(Raw<'_>)) -> io::Result<()> {
+        std::thread::sleep(wait);
         Ok(())
     }
 }
@@ -2316,7 +2331,8 @@ mod tests {
         w.running = Phase::Feed;
         let t0 = Instant::now();
         w.tick(t0);
-        w.undecodable("not a JPEG".into());
+        let no_signal = |reason| Signal::NoSignal { since: crate::capture::Since::Never, reason };
+        w.signal(&no_signal(Reason::Undecodable("not a JPEG".into())));
         assert!(w.tick(t0 + SIGNAL_TIMEOUT));
         assert_eq!(w.step, Step::SignalRetry);
         assert!(
@@ -2324,6 +2340,25 @@ mod tests {
             "{:#?}",
             w.lines()
         );
+        // Again, with short buffers: the policy's reason words it.
+        press(&mut w, &["Enter"]);
+        let t1 = t0 + Duration::from_secs(10);
+        w.tick(t1);
+        w.signal(&no_signal(Reason::Unusable("10 bytes, not a 1280x720 YUYV frame".into())));
+        assert!(w.tick(t1 + SIGNAL_TIMEOUT));
+        // Wrapped at the page's width.
+        assert!(
+            w.lines().join(" ").contains("Failed: Frames arrive but the viewer cannot use them (10 bytes, not a 1280x720 YUYV frame)."),
+            "{:#?}",
+            w.lines()
+        );
+        // And with nothing arriving, the old words.
+        press(&mut w, &["Enter"]);
+        let t2 = t1 + Duration::from_secs(10);
+        w.tick(t2);
+        w.signal(&no_signal(Reason::Nothing));
+        assert!(w.tick(t2 + SIGNAL_TIMEOUT));
+        assert!(w.lines().iter().any(|l| l == "Failed: No frames in 6 seconds: no signal, or HDCP is on at the source."));
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 

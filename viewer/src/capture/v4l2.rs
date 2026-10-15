@@ -1,18 +1,17 @@
 //! V4L2 (Linux): the card's buffers through linuxvideo, each with its
-//! kernel timestamp and sequence number, `poll()` before every dequeue.
+//! kernel timestamp and sequence number, `poll()` before every dequeue. The
+//! frame policy (policy.rs) does the rest.
 
 use std::io;
 use std::os::fd::AsRawFd;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use linuxvideo::format::{PixFormat, PixelFormat};
 use linuxvideo::stream::ReadStream;
 use linuxvideo::{Device, Fract};
 
-use super::{DECODE_REPORT_EVERY, Event, Format, Frame, FrameSource, NO_SIGNAL_AFTER, POLL_SLICE, Pixels, now_monotonic};
-use crate::mjpeg;
+use super::{Format, FrameSource, Mark, Pixels, Raw, Stream, now_monotonic};
 
 impl Pixels {
     /// Its V4L2 fourcc.
@@ -28,8 +27,8 @@ impl Pixels {
 pub struct V4l2 {
     stream: ReadStream,
     format: Format,
-    /// MJPEG: the decoder, and the frame it decodes into.
-    mjpeg: Option<(mjpeg::Decoder, Vec<u8>)>,
+    /// Bytes per YUYV row.
+    stride: usize,
 }
 
 impl V4l2 {
@@ -53,10 +52,11 @@ impl V4l2 {
                 pixel_format
             ));
         }
-        // A JPEG has no stride.
-        if want.pixels == Pixels::Yuyv && fmt.bytes_per_line() != want.width * 2 {
-            return Err(format!("{}: stride {} bytes, expected {}", node.display(), fmt.bytes_per_line(), want.width * 2));
+        // A JPEG has no stride; padded YUYV rows are packed by the policy.
+        if want.pixels == Pixels::Yuyv && fmt.bytes_per_line() < want.width * 2 {
+            return Err(format!("{}: stride {} bytes, under a row's {}", node.display(), fmt.bytes_per_line(), want.width * 2));
         }
+        let stride = fmt.bytes_per_line() as usize;
         // FPS may be fractional (59.94 = 60000/1001).
         let interval = capture
             .set_frame_interval(Fract::new(1000, (want.fps * 1000.0).round() as u32))
@@ -66,9 +66,7 @@ impl V4l2 {
             return Err(format!("{}: the card gives {got:.3} fps, not {} (FPS)", node.display(), want.fps));
         }
         let stream = capture.into_stream().map_err(at)?;
-        let mjpeg = (want.pixels == Pixels::Mjpeg)
-            .then(|| (mjpeg::Decoder::new(want.width, want.height), vec![0; want.frame_size()]));
-        Ok(Self { stream, format: want, mjpeg })
+        Ok(Self { stream, format: want, stride })
     }
 }
 
@@ -77,88 +75,48 @@ impl FrameSource for V4l2 {
         self.format
     }
 
-    fn run(&mut self, quit: &AtomicBool, on_event: &mut dyn FnMut(Event<'_>)) -> io::Result<()> {
-        let fd = self.stream.as_raw_fd();
-        let frame_size = self.format.frame_size();
-        let mut last_seq: Option<u32> = None;
-        let mut last_frame = now_monotonic();
-        let mut no_signal = false;
-        let mut warned_clock = false;
-        let mjpeg = &mut self.mjpeg;
-        // Undecodable MJPEG frames since the last report, and when that was.
-        let mut undecodable = 0u64;
-        let mut reported: Option<Duration> = None;
+    fn stride(&self) -> usize {
+        self.stride
+    }
 
-        while !quit.load(Ordering::Relaxed) {
-            let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-            let n = unsafe { libc::poll(&mut pfd, 1, POLL_SLICE.as_millis() as libc::c_int) };
-            if n < 0 {
-                let e = io::Error::last_os_error();
-                if e.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(e);
-            }
-            if n == 0 {
-                if !no_signal && now_monotonic() - last_frame >= NO_SIGNAL_AFTER {
-                    no_signal = true;
-                    on_event(Event::NoSignal);
-                }
-                continue;
-            }
-            if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
-                return Err(io::Error::other(format!(
-                    "poll on the stream: revents {:#x} (the card is gone?)",
-                    pfd.revents
-                )));
-            }
-            self.stream.dequeue(|buf| {
-                let dequeued = now_monotonic();
-                last_frame = dequeued;
-                if no_signal {
-                    no_signal = false;
-                    on_event(Event::SignalBack);
-                }
-                if !buf.is_timestamp_monotonic() && !warned_clock {
-                    warned_clock = true;
-                    eprintln!("warning: buffer timestamps are not CLOCK_MONOTONIC; latency figures are meaningless");
-                }
-                let sequence = buf.sequence();
-                if let Some(prev) = last_seq {
-                    let step = sequence.wrapping_sub(prev);
-                    if step != 1 {
-                        on_event(Event::Gap { from: prev, to: sequence, lost: step.wrapping_sub(1) });
-                    }
-                }
-                last_seq = Some(sequence);
-                // The card's first buffers after stream-on come short and
-                // flagged (#5): dropped here.
-                if buf.is_error() {
-                    return Ok(());
-                }
-                let data = match mjpeg {
-                    None if buf.len() != frame_size => return Ok(()),
-                    None => &buf[..],
-                    // Decoded here, on the capture thread, so the frame
-                    // reaches the window as YUYV; a frame that does not
-                    // decode is dropped, as a short one is.
-                    Some((decoder, yuyv)) => match decoder.decode(&buf, yuyv) {
-                        Ok(()) => &yuyv[..],
-                        Err(e) => {
-                            undecodable += 1;
-                            if reported.is_none_or(|t| dequeued - t >= DECODE_REPORT_EVERY) {
-                                on_event(Event::Undecodable { count: undecodable, why: e.to_string() });
-                                undecodable = 0;
-                                reported = Some(dequeued);
-                            }
-                            return Ok(());
-                        }
-                    },
-                };
-                on_event(Event::Frame(Frame { data, captured: buf.timestamp(), dequeued }));
-                Ok(())
-            })?;
+    fn start(&mut self) -> io::Result<Box<dyn Stream + '_>> {
+        Ok(Box::new(Running { stream: &mut self.stream, warned_clock: false }))
+    }
+}
+
+struct Running<'a> {
+    stream: &'a mut ReadStream,
+    warned_clock: bool,
+}
+
+impl Stream for Running<'_> {
+    fn next(&mut self, wait: Duration, take: &mut dyn FnMut(Raw<'_>)) -> io::Result<()> {
+        let fd = self.stream.as_raw_fd();
+        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        // Safety: one valid pollfd.
+        let n = unsafe { libc::poll(&mut pfd, 1, wait.as_millis() as libc::c_int) };
+        if n < 0 {
+            let e = io::Error::last_os_error();
+            // A signal cut the wait short: as a timeout.
+            return if e.kind() == io::ErrorKind::Interrupted { Ok(()) } else { Err(e) };
         }
-        Ok(())
+        if n == 0 {
+            return Ok(());
+        }
+        if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Err(io::Error::other(format!("poll on the stream: revents {:#x} (the card is gone?)", pfd.revents)));
+        }
+        let warned_clock = &mut self.warned_clock;
+        self.stream.dequeue(|buf| {
+            let dequeued = now_monotonic();
+            if !buf.is_timestamp_monotonic() && !*warned_clock {
+                *warned_clock = true;
+                eprintln!("warning: buffer timestamps are not CLOCK_MONOTONIC; latency figures are meaningless");
+            }
+            // The card's first buffers after stream-on come short and
+            // flagged (#5): the policy drops them.
+            take(Raw { data: &buf[..], captured: buf.timestamp(), dequeued, mark: Mark::Sequence(buf.sequence()), flagged: buf.is_error() });
+            Ok(())
+        })
     }
 }
