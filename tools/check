@@ -67,6 +67,15 @@ else
                  CONFIG_FILE="$cfg" "${envs[@]}" viewer/target/debug/protohdmicapture --settings 2>&1; echo "exit $?")
         [ "$sh_out" = "$rs_out" ] || { bad "settings fixture $name: the viewers differ"; diff <(echo "$sh_out") <(echo "$rs_out") | head -10; }
     done
+    # The Windows build (#18): clippy only, no link, so no Windows SDK is
+    # needed; skipped where the target is not installed.
+    win=x86_64-pc-windows-msvc
+    if rustup target list --installed 2>/dev/null | grep -qx "$win"; then
+        step "viewer: clippy for Windows ($win)"
+        cargo clippy --manifest-path viewer/Cargo.toml --target "$win" --quiet -- -D warnings || bad "viewer: clippy for Windows"
+    else
+        step "viewer: clippy for Windows skipped (rustup target add $win)"
+    fi
 fi
 
 # A source profile may suggest only the settings flagged "suggest".

@@ -832,7 +832,10 @@ v4l2-ctl -d /dev/video2 --get-fmt-video
   `FPS` and emits the `hyprctl eval` Lua for switching and restoring
 - `config.example` — the settings file, documented
 - `tools/check` — static checks (shellcheck, Lua/Python syntax, banned
-  patterns, the capture card table being current); the pre-commit hook in
+  patterns, the capture card table being current), the Rust viewer's
+  build, tests and clippy (for Windows too, when the
+  `x86_64-pc-windows-msvc` target is installed), and the hardware-free
+  harnesses; the pre-commit hook in
   `.githooks/` runs it once enabled with
   `git config core.hooksPath .githooks`
 - `docs/testing.md`, `docs/run-dir.md`, `CODING_STANDARDS.md` — how to verify a
