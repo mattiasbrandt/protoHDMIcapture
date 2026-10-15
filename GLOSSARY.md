@@ -61,7 +61,10 @@ _Avoid_: stream, preview, playback
 **No signal**:
 The capture card delivers no picture, either since the feed opened or
 because the source stopped (asleep, switched off). A card that keeps sending
-black frames is still delivering a picture.
+black frames is still delivering a picture. Frames that arrive but cannot be
+shown (MJPEG that does not decode, short or flagged buffers) are no picture
+either; the viewer says which. Shown after 5 s with no picture since the feed
+opened, or 2 s after the last one.
 _Avoid_: stall, frozen, signal loss
 
 **Overlay**:
