@@ -162,7 +162,7 @@ fn died(counters: &Counters, notify: &NotifySlot, why: String) {
     eprintln!("warning: the audio loopback stopped mid-feed: {why}");
     eprintln!("warning: the feed plays on without sound; ctrl -/+, m, 9 or 0 start the loopback again");
     if let Some(notify) = notify.lock().expect("the notify lock is never poisoned").as_ref() {
-        notify(Some((format!("Audio stopped ({why}): ctrl -/+ or m starts it again"), Duration::from_secs(5))));
+        notify(Some((format!("Audio stopped ({why}): ctrl -/+, m, 9 or 0 start it again"), Duration::from_secs(5))));
     }
 }
 
@@ -831,7 +831,7 @@ mod tests {
         output(cpal::Error::with_message(ErrorKind::DeviceNotAvailable, "Device disconnected"));
         input(cpal::Error::with_message(ErrorKind::StreamInvalidated, "error"));
         assert_eq!(counters.dead().as_deref(), Some("output: Device disconnected"), "the first one says why");
-        assert_eq!(*said.lock().unwrap(), ["Audio stopped (output: Device disconnected): ctrl -/+ or m starts it again"]);
+        assert_eq!(*said.lock().unwrap(), ["Audio stopped (output: Device disconnected): ctrl -/+, m, 9 or 0 start it again"]);
         // Torn down on purpose: PipeWire reports that as a disconnect too.
         let closing = Arc::new(Counters::default());
         closing.closing.store(true, Ordering::Relaxed);
