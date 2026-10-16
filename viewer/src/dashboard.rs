@@ -840,7 +840,9 @@ pub fn client(run_dir: &Path) -> Result<(), String> {
             ),
             Err(e) => return Err(format!("dashboard socket: {e}")),
         };
-        let clear = if tty { "\x1b[H\x1b[2J" } else { "" };
+        // The title too, each time: the viewer knows its window by it
+        // where the terminal took no app id (`$TERMINAL -e`).
+        let clear = if tty { format!("\x1b]0;{}\x07\x1b[H\x1b[2J", crate::desktop::DASHBOARD_TITLE) } else { String::new() };
         let note = note.map_or_else(String::new, |n| format!("\n  {}", paint.red(&n)));
         // A closed terminal ends the dashboard, nothing else.
         if writeln!(out, "{clear}{text}{note}").and_then(|()| out.flush()).is_err() {
@@ -880,7 +882,7 @@ impl<R: Read> Lines<R> {
 /// picks one: xdg-terminal-exec, then $TERMINAL, then x-terminal-emulator.
 #[cfg(unix)]
 fn terminal_command(args: &[String], terminal: Option<&str>, have: impl Fn(&str) -> bool) -> Option<std::process::Command> {
-    let (app, title) = (crate::desktop::DASHBOARD_APP, "protoHDMIcapture debug");
+    let (app, title) = (crate::desktop::DASHBOARD_APP, crate::desktop::DASHBOARD_TITLE);
     if have("xdg-terminal-exec") {
         let mut c = std::process::Command::new("xdg-terminal-exec");
         c.args([format!("--app-id={app}"), format!("--title={title}"), "--".into()]).args(args);

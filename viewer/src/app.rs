@@ -98,6 +98,24 @@ pub struct Options {
     pub wizard: Option<Rc<RefCell<Wizard>>>,
     /// This run's dashboard numbers, from its caller (#21).
     pub live: Arc<crate::dashboard::Live>,
+    /// A dashboard opened with the window (DEBUG=window): the dashboard
+    /// windows there before it, for placing it with the window.
+    pub dashboard: Option<Vec<String>>,
+}
+
+/// A job for the placement worker: the window's mode, and a dashboard to
+/// move off its monitor first (the windows there before it was started).
+struct Placement {
+    mode: &'static str,
+    size: (u32, u32),
+    dashboard: Option<Vec<String>>,
+}
+
+impl Placement {
+    /// A newer job: its mode wins; a dashboard still to move is kept.
+    fn then(self, newer: Placement) -> Placement {
+        Placement { dashboard: self.dashboard.or(newer.dashboard), ..newer }
+    }
 }
 
 /// The sound, as the audio keys and the panel see it.
@@ -144,19 +162,6 @@ fn no_sound(why: String) {
     }
 }
 
-/// The dashboard's terminal off the viewer's monitor and the viewer back
-/// in `mode` (`Desktop::place_dashboard`), off the window thread.
-pub fn place_dashboard(desktop: &Desktop, mode: &'static str, size: (u32, u32)) {
-    if matches!(desktop, Desktop::Generic) {
-        return;
-    }
-    let desktop = desktop.clone();
-    thread::spawn(move || match desktop.place_dashboard(std::process::id(), mode, size) {
-        Ok(m) => eprintln!("{m}"),
-        Err(m) => eprintln!("warning: {m}"),
-    });
-}
-
 impl WindowMode {
     /// f: fullscreen -> borderless -> windowed (WINDOW's order).
     fn next(self, size: (u32, u32)) -> Self {
@@ -168,7 +173,7 @@ impl WindowMode {
     }
 
     /// As the settings spell it, and as the panel names it.
-    pub fn names(self) -> (&'static str, &'static str) {
+    fn names(self) -> (&'static str, &'static str) {
         match self {
             Self::Fullscreen => ("fullscreen", "Fullscreen"),
             Self::Borderless => ("borderless", "Borderless"),
@@ -282,7 +287,7 @@ struct App {
     /// When the overlay next changes on its own.
     deadline: Option<Instant>,
     /// The window placement worker, once started.
-    placer: Option<std::sync::mpsc::Sender<(&'static str, (u32, u32))>>,
+    placer: Option<std::sync::mpsc::Sender<Placement>>,
     modifiers: ModifiersState,
     stats: Stats,
     in_flight: u32,
@@ -982,10 +987,19 @@ impl App {
     /// d: the dashboard in a terminal of its own (#16).
     fn open_dashboard(&mut self) {
         let now = Instant::now();
+        // One dashboard: d again raises it.
+        let before = self.opts.desktop.dashboards();
+        if let Some(open) = before.first()
+            && self.opts.desktop.focus_window(open)
+        {
+            self.overlay.message("The debug dashboard is open", Duration::from_millis(1500), now);
+            self.repaint = true;
+            return;
+        }
         match crate::dashboard::open(Some(self.notify.clone())) {
             Ok(()) => {
                 self.overlay.message("Opening the debug dashboard", Duration::from_millis(1500), now);
-                place_dashboard(&self.opts.desktop, self.opts.window.names().0, self.opts.window_size);
+                self.place_window_with(Some(before));
             }
             Err(e) => {
                 eprintln!("warning: {e}");
@@ -1031,26 +1045,43 @@ impl App {
     /// worker does them in turn and skips to the latest, so quick f
     /// presses cannot interleave their dispatches.
     fn place_window(&mut self) {
+        let dashboard = self.opts.dashboard.take();
+        self.place_window_with(dashboard);
+    }
+
+    /// `place_window`, moving a newly started dashboard first (`d`,
+    /// DEBUG=window): the same worker, so an f pressed while it maps is
+    /// applied after it, not undone by it.
+    fn place_window_with(&mut self, dashboard: Option<Vec<String>>) {
         if matches!(self.opts.desktop, Desktop::Generic) {
             return;
         }
         let placer = self.placer.get_or_insert_with(|| {
-            let (tx, rx) = std::sync::mpsc::channel::<(&'static str, (u32, u32))>();
+            let (tx, rx) = std::sync::mpsc::channel::<Placement>();
             let desktop = self.opts.desktop.clone();
+            let say = |r: crate::desktop::Report| match r {
+                Ok(m) => eprintln!("{m}"),
+                Err(m) => eprintln!("warning: {m}"),
+            };
             thread::spawn(move || {
+                let pid = std::process::id();
                 while let Ok(mut job) = rx.recv() {
                     while let Ok(newer) = rx.try_recv() {
-                        job = newer;
+                        job = job.then(newer);
                     }
-                    match desktop.place_window(std::process::id(), job.0, job.1) {
-                        Ok(m) => eprintln!("{m}"),
-                        Err(m) => eprintln!("warning: {m}"),
+                    if let Some(before) = job.dashboard.take() {
+                        say(desktop.move_dashboard(pid, &before));
+                        // f pressed while it mapped: the latest mode.
+                        while let Ok(newer) = rx.try_recv() {
+                            job = job.then(newer);
+                        }
                     }
+                    say(desktop.place_window(pid, job.mode, job.size));
                 }
             });
             tx
         });
-        let _ = placer.send((self.opts.window.names().0, self.opts.window_size));
+        let _ = placer.send(Placement { mode: self.opts.window.names().0, size: self.opts.window_size, dashboard });
     }
 
     /// The saveable settings' live values, spelled as the settings file
@@ -1579,6 +1610,7 @@ mod tests {
                 settings: Some(s),
                 wizard: None,
                 live: Arc::new(crate::dashboard::Live::new()),
+                dashboard: None,
             },
         };
         app.baseline = app.values();
@@ -1622,6 +1654,16 @@ mod tests {
             press(app, "Tab");
         }
         panel(app)[6].clone()
+    }
+
+    #[test]
+    fn a_dashboard_to_move_survives_newer_placements_and_the_latest_mode_wins() {
+        // d, then f before the dashboard maps: both happen, f's mode last
+        // (it ran on its own thread with d's mode, and undid f's).
+        let job = |mode, dashboard: Option<Vec<String>>| Placement { mode, size: (1280, 720), dashboard };
+        let merged = job("fullscreen", Some(vec!["0x1".into()])).then(job("borderless", None)).then(job("windowed", None));
+        assert_eq!((merged.mode, merged.dashboard), ("windowed", Some(vec!["0x1".to_string()])));
+        assert_eq!(job("fullscreen", None).then(job("borderless", None)).dashboard, None);
     }
 
     #[test]

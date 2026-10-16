@@ -50,13 +50,31 @@ impl Desktop {
         }
     }
 
-    /// The dashboard's terminal (app id `protohdmicapture.debug`) off the
-    /// viewer's monitor, and the viewer (`pid`) back in `mode`: a new
-    /// window takes over the fullscreen on its workspace, which hid the
-    /// feed behind the dashboard. Blocks: up to 3 s for each to map.
-    pub fn place_dashboard(&self, pid: u32, mode: &str, size: (u32, u32)) -> Report {
+    /// The dashboard windows open now (their addresses); none where this
+    /// desktop cannot tell.
+    pub fn dashboards(&self) -> Vec<String> {
         match self {
-            Self::Hyprland(h) => h.place_dashboard(pid, mode, size),
+            Self::Hyprland(h) => h.json("clients").map(|c| dashboard_windows(&c)).unwrap_or_default(),
+            Self::Generic => Vec::new(),
+        }
+    }
+
+    /// Raises the dashboard window at `address`; false if this desktop cannot.
+    pub fn focus_window(&self, address: &str) -> bool {
+        match self {
+            Self::Hyprland(h) => h.dispatch(&format!("hl.dsp.focus({{ window = \"address:{address}\" }})")),
+            Self::Generic => false,
+        }
+    }
+
+    /// The dashboard window that was not there `before` it was started,
+    /// off the viewer's (`pid`) monitor: a new window takes over the
+    /// fullscreen on its workspace, which hid the feed behind it. Blocks:
+    /// up to 3 s for it to map. The viewer's own mode is the caller's
+    /// next `place_window`.
+    pub fn move_dashboard(&self, pid: u32, before: &[String]) -> Report {
+        match self {
+            Self::Hyprland(h) => h.move_dashboard(pid, before),
             Self::Generic => Ok("dashboard: left where the desktop put it".into()),
         }
     }
@@ -152,10 +170,18 @@ pub fn parse_monitors(monitors: &Value, viewer_on: Option<i64>) -> Result<Vec<Mo
         .collect()
 }
 
-/// The monitor id the window of `pid` is on, from `hyprctl clients -j`;
-/// None before it maps.
-/// The dashboard terminal's app id (`dashboard::terminal_command`).
+/// The dashboard terminal's app id (`dashboard::terminal_command`), set by
+/// xdg-terminal-exec only.
 pub const DASHBOARD_APP: &str = "protohdmicapture.debug";
+/// Its title, which the dashboard also sets itself (an OSC 0), so a
+/// terminal started with `-e` is known by it too.
+pub const DASHBOARD_TITLE: &str = "protoHDMIcapture debug";
+
+/// The addresses of the dashboard windows in `hyprctl clients -j`.
+fn dashboard_windows(clients: &Value) -> Vec<String> {
+    let dashboard = |c: &&Value| c["class"].as_str() == Some(DASHBOARD_APP) || c["title"].as_str() == Some(DASHBOARD_TITLE);
+    clients.as_array().into_iter().flatten().filter(dashboard).filter_map(|c| c["address"].as_str().map(str::to_string)).collect()
+}
 
 /// A monitor other than the viewer's (`viewer_on`; the focused one while
 /// the viewer has no window yet), focused first: its name and active
@@ -169,6 +195,8 @@ fn other_workspace(monitors: &Value, viewer_on: Option<i64>) -> Option<(String, 
     Some((m["name"].as_str()?.to_string(), m["activeWorkspace"]["id"].as_i64()?))
 }
 
+/// The monitor id the window of `pid` is on, from `hyprctl clients -j`;
+/// None before it maps.
 pub fn window_monitor(clients: &Value, pid: u32) -> Option<i64> {
     clients.as_array()?.iter().find(|c| c["pid"].as_u64() == Some(u64::from(pid)))?["monitor"].as_i64()
 }
@@ -268,22 +296,25 @@ impl Hyprland {
         Ok(said)
     }
 
-    fn place_dashboard(&self, pid: u32, mode: &str, size: (u32, u32)) -> Report {
-        let sel = format!("class:^{DASHBOARD_APP}$");
+    fn move_dashboard(&self, pid: u32, before: &[String]) -> Report {
         let mut tries = 0;
-        let clients = loop {
-            match self.json("clients") {
-                Some(c) if c.as_array().is_some_and(|a| a.iter().any(|c| c["class"].as_str() == Some(DASHBOARD_APP))) => break c,
-                _ if tries == 30 => return Err(format!("dashboard: its window ({DASHBOARD_APP}) never mapped")),
-                _ => {}
+        let (clients, address) = loop {
+            if let Some(c) = self.json("clients")
+                && let Some(a) = dashboard_windows(&c).into_iter().find(|a| !before.contains(a))
+            {
+                break (c, a);
+            }
+            if tries == 30 {
+                return Err(format!("dashboard: no new window titled \"{DASHBOARD_TITLE}\" mapped"));
             }
             tries += 1;
             thread::sleep(Duration::from_millis(100));
         };
+        let sel = format!("address:{address}");
         let monitors = self.json_or_why("monitors")?;
         let dispatch = |l: String| self.dispatch(&l);
         dispatch(format!("hl.dsp.window.fullscreen({{ mode = \"fullscreen\", action = \"unset\", window = \"{sel}\" }})"));
-        let said = match other_workspace(&monitors, window_monitor(&clients, pid)) {
+        Ok(match other_workspace(&monitors, window_monitor(&clients, pid)) {
             Some((name, ws)) => {
                 dispatch(format!("hl.dsp.window.move({{ workspace = \"{ws}\", window = \"{sel}\" }})"));
                 format!("dashboard: on {name}")
@@ -292,9 +323,7 @@ impl Hyprland {
                 dispatch(format!("hl.dsp.window.float({{ action = \"enable\", window = \"{sel}\" }})"));
                 "dashboard: floating over the feed (one monitor)".to_string()
             }
-        };
-        let placed = self.place_window(pid, mode, size)?;
-        Ok(format!("{said}; {placed}"))
+        })
     }
 
     fn refresh_match(&self, fps: f64, on: Option<&str>, record: &Path) -> (Option<String>, Report) {
@@ -553,6 +582,19 @@ mod tests {
              "x": 3440, "y": 120, "scale": 1.25, "transform": 1,
              "availableModes": ["1920x1200@59.95Hz", "1920x1080@60.00Hz", "1920x1200@60.00Hz", "1920x1200@50.00Hz", "bogus"]}
         ])
+    }
+
+    #[test]
+    fn dashboard_windows_are_known_by_app_id_or_title() {
+        let clients = serde_json::json!([
+            {"address": "0x1", "class": "protohdmicapture.debug", "title": "anything"},
+            {"address": "0x2", "class": "foot", "title": "protoHDMIcapture debug"},
+            {"address": "0x3", "class": "protohdmicapture", "title": "protoHDMIcapture"},
+            {"address": "0x4", "class": "foot", "title": "protoHDMIcapture debug - foot"}
+        ]);
+        // xdg-terminal-exec's app id, or the title the dashboard sets
+        // (a terminal started with -e has no app id of ours).
+        assert_eq!(dashboard_windows(&clients), ["0x1", "0x2"]);
     }
 
     #[test]

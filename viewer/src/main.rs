@@ -197,6 +197,7 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
         wizard: Some(wiz.clone()),
         // Each feed window's numbers are its own, and nobody reads them.
         live: Arc::new(dashboard::Live::new()),
+        dashboard: None,
     };
 
     let result = (|| -> Result<(), String> {
@@ -336,6 +337,7 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
         settings: None,
         wizard: None,
         live: live.clone(),
+        dashboard: None,
     };
     let mut test_pattern = false;
     let mut debug = false;
@@ -505,8 +507,10 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
         Ok(server) => {
             feed.set_dashboard(server);
             if debug_window {
+                let before = opts.desktop.dashboards();
                 match dashboard::open(None) {
-                    Ok(()) => app::place_dashboard(&opts.desktop, opts.window.names().0, opts.window_size),
+                    // Moved off the window's monitor once the window places.
+                    Ok(()) => opts.dashboard = Some(before),
                     Err(e) => eprintln!("warning: DEBUG=window: {e}"),
                 }
             }
