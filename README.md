@@ -236,11 +236,12 @@ RES=1920x1080 FPS=60 FMT=yuyv422 \
 | Audio source | `alsa_input.usb-1e4e_7016_20000130041415-02.analog-stereo`, **s16le 2ch 48000 Hz** |
 | Resets during capture | none; `devnum` stable |
 
-Two things worth knowing:
+Worth knowing:
 
-- **MJPEG is broken on this unit.** Capturing `-input_format mjpeg` produces
-  `No JPEG data found in image` / `Error submitting packet to decoder`. YUYV is
-  not merely preferable here, it is the only clean path.
+- **YUYV is this unit's best mode.** An early ffmpeg capture with
+  `-input_format mjpeg` reported `No JPEG data found in image`, but the Rust
+  viewer decodes its MJPEG at 1080p60 (2 undecodable frames in 2400, at stream
+  start; #17). YUYV needs no decode step.
 - **The audio is plain 48 kHz stereo**, so the notorious MS2109 96 kHz-mono
   firmware bug does not apply to this unit. Nothing to work around.
 - **No DV-timings support** (`VIDIOC_G_DV_TIMINGS: Inappropriate ioctl`), so
