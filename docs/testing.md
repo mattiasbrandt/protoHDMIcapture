@@ -103,7 +103,7 @@ trusting it. Below: the traps that produce false results on real runs.
 - **`--monitor NAME`** picks the monitor REFRESH=match switches and the
   window opens on; without it, both follow focus.
 - **The baseline** (2026-10-16, `78951f6`, MS2130 1080p60, DP-1 at
-  59.97 Hz, 2 min; no 10-minute run yet): kernel → presented median
+  59.97 Hz, 2 min): kernel → presented median
   44.9 ms, p99 53.7 ms, 2 repeated refreshes. Re-measure against it after a
   change to pacing, the event loop or the present path; count the repeated
   refreshes too (they come in bursts every ~37 s at 60.00 against 59.97 Hz,
