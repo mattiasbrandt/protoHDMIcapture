@@ -118,7 +118,11 @@ fn paint(p: &egui::Painter, w: f32, h: f32, scene: &Scene) {
 
     // The panel or the tips, top left, below the messages' line.
     if let Some(lines) = scene.page {
-        let fs = panel_fs;
+        // Sized by the height, then smaller where the widest line would
+        // run past a narrow window (a tiled one); monospace scales evenly.
+        let widest = lines.iter().map(|l| text_width(p, l, &FontId::monospace(panel_fs))).fold(0.0, f32::max);
+        let room = w - 5.0 * panel_fs;
+        let fs = if widest > room && widest > 0.0 { (panel_fs * room / widest).floor().max(8.0) } else { panel_fs };
         let font = FontId::monospace(fs);
         let lh = (fs * 1.3).floor();
         let pad = fs;
@@ -143,10 +147,19 @@ fn paint(p: &egui::Painter, w: f32, h: f32, scene: &Scene) {
         outlined(p, Pos2::new((w / 2.0).floor(), y0 + (bh / 2.0).floor()), Align2::CENTER_CENTER, text, font, TEXT);
     }
 
-    // A short message, top left, where mpv shows its OSD messages.
+    // A short message, top left, where mpv shows its OSD messages; a long
+    // one (an audio error's reason) wraps inside the window.
     if let Some(text) = scene.message {
         let fs = (panel_fs * 1.4).floor();
-        outlined(p, Pos2::new((panel_fs * 1.5).floor(), panel_fs.floor()), Align2::LEFT_TOP, text, FontId::monospace(fs), TITLE);
+        let x = (panel_fs * 1.5).floor();
+        let font = FontId::monospace(fs);
+        let wrap = (w - 2.0 * x).max(fs);
+        let pos = Pos2::new(x, panel_fs.floor());
+        let edge = p.layout(text.to_string(), font.clone(), Color32::BLACK, wrap);
+        for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+            p.galley(pos + Vec2::new(dx, dy), edge.clone(), Color32::BLACK);
+        }
+        p.galley(pos, p.layout(text.to_string(), font, TITLE, wrap), TITLE);
     }
 }
 
