@@ -112,6 +112,10 @@ pub struct Options {
     /// A dashboard opened with the window (DEBUG=window): the dashboard
     /// windows there before it, for placing it with the window.
     pub dashboard: Option<Vec<String>>,
+    /// The monitor that had focus before --monitor took it: given back once
+    /// the window is placed, so typing meant for it does not reach the
+    /// viewer.
+    pub refocus: Option<String>,
 }
 
 /// A job for the placement worker: the window's mode, and a dashboard to
@@ -120,12 +124,15 @@ struct Placement {
     mode: &'static str,
     size: (u32, u32),
     dashboard: Option<Vec<String>>,
+    /// A monitor to focus once placed (`Options::refocus`).
+    refocus: Option<String>,
 }
 
 impl Placement {
-    /// A newer job: its mode wins; a dashboard still to move is kept.
+    /// A newer job: its mode wins; a dashboard still to move and a focus
+    /// still to give back are kept.
     fn then(self, newer: Placement) -> Placement {
-        Placement { dashboard: self.dashboard.or(newer.dashboard), ..newer }
+        Placement { dashboard: self.dashboard.or(newer.dashboard), refocus: self.refocus.or(newer.refocus), ..newer }
     }
 }
 
@@ -1115,11 +1122,15 @@ impl App {
                         }
                     }
                     say(desktop.place_window(pid, job.mode, job.size));
+                    if let Some(m) = job.refocus.take() {
+                        desktop.focus_monitor(&m);
+                    }
                 }
             });
             tx
         });
-        let _ = placer.send(Placement { mode: self.opts.window.names().0, size: self.opts.window_size, dashboard });
+        let refocus = self.opts.refocus.take();
+        let _ = placer.send(Placement { mode: self.opts.window.names().0, size: self.opts.window_size, dashboard, refocus });
     }
 
     /// The saveable settings' live values, spelled as the settings file
@@ -1652,6 +1663,7 @@ mod tests {
                 wizard: None,
                 live: Arc::new(crate::dashboard::Live::new()),
                 dashboard: None,
+                refocus: None,
             },
         };
         app.baseline = app.values();
@@ -1701,10 +1713,13 @@ mod tests {
     fn a_dashboard_to_move_survives_newer_placements_and_the_latest_mode_wins() {
         // d, then f before the dashboard maps: both happen, f's mode last
         // (it ran on its own thread with d's mode, and undid f's).
-        let job = |mode, dashboard: Option<Vec<String>>| Placement { mode, size: (1280, 720), dashboard };
+        let job = |mode, dashboard: Option<Vec<String>>| Placement { mode, size: (1280, 720), dashboard, refocus: None };
         let merged = job("fullscreen", Some(vec!["0x1".into()])).then(job("borderless", None)).then(job("windowed", None));
         assert_eq!((merged.mode, merged.dashboard), ("windowed", Some(vec!["0x1".to_string()])));
         assert_eq!(job("fullscreen", None).then(job("borderless", None)).dashboard, None);
+        // --monitor's focus to give back is kept too, until placed.
+        let first = Placement { refocus: Some("DP-2".into()), ..job("fullscreen", None) };
+        assert_eq!(first.then(job("windowed", None)).refocus.as_deref(), Some("DP-2"));
     }
 
     #[test]

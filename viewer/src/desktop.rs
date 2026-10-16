@@ -80,6 +80,18 @@ impl Desktop {
         }
     }
 
+    /// The monitor with focus now, where this desktop can tell.
+    pub fn focused_monitor(&self) -> Option<String> {
+        match self {
+            Self::Hyprland(h) => {
+                let monitors = h.json("monitors")?;
+                let m = monitors.as_array()?.iter().find(|m| m["focused"].as_bool() == Some(true))?;
+                Some(m["name"].as_str()?.to_string())
+            }
+            Self::Generic => None,
+        }
+    }
+
     /// Focuses the monitor `name`, so a window opened next lands on it (a
     /// measurement run's --monitor: Hyprland opens new windows on the
     /// focused monitor, whatever output the toolkit asks for).

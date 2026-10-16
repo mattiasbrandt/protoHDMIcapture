@@ -198,6 +198,7 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
         // Each feed window's numbers are its own, and nobody reads them.
         live: Arc::new(dashboard::Live::new()),
         dashboard: None,
+        refocus: None,
     };
 
     let result = (|| -> Result<(), String> {
@@ -338,6 +339,7 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
         wizard: None,
         live: live.clone(),
         dashboard: None,
+        refocus: None,
     };
     let mut test_pattern = false;
     let mut debug = false;
@@ -474,6 +476,7 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
         opts.source.clear();
     }
     if let Some(name) = &opts.monitor {
+        opts.refocus = opts.desktop.focused_monitor().filter(|m| m != name);
         opts.desktop.focus_monitor(name);
     }
     // As view.sh: after the audio, before the window.
