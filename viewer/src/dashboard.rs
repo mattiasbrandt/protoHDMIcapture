@@ -880,7 +880,7 @@ impl<R: Read> Lines<R> {
 /// picks one: xdg-terminal-exec, then $TERMINAL, then x-terminal-emulator.
 #[cfg(unix)]
 fn terminal_command(args: &[String], terminal: Option<&str>, have: impl Fn(&str) -> bool) -> Option<std::process::Command> {
-    let (app, title) = ("protohdmicapture.debug", "protoHDMIcapture debug");
+    let (app, title) = (crate::desktop::DASHBOARD_APP, "protoHDMIcapture debug");
     if have("xdg-terminal-exec") {
         let mut c = std::process::Command::new("xdg-terminal-exec");
         c.args([format!("--app-id={app}"), format!("--title={title}"), "--".into()]).args(args);

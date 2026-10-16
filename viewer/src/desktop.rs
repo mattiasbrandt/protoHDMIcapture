@@ -50,6 +50,17 @@ impl Desktop {
         }
     }
 
+    /// The dashboard's terminal (app id `protohdmicapture.debug`) off the
+    /// viewer's monitor, and the viewer (`pid`) back in `mode`: a new
+    /// window takes over the fullscreen on its workspace, which hid the
+    /// feed behind the dashboard. Blocks: up to 3 s for each to map.
+    pub fn place_dashboard(&self, pid: u32, mode: &str, size: (u32, u32)) -> Report {
+        match self {
+            Self::Hyprland(h) => h.place_dashboard(pid, mode, size),
+            Self::Generic => Ok("dashboard: left where the desktop put it".into()),
+        }
+    }
+
     /// Focuses the monitor `name`, so a window opened next lands on it (a
     /// measurement run's --monitor: Hyprland opens new windows on the
     /// focused monitor, whatever output the toolkit asks for).
@@ -143,6 +154,21 @@ pub fn parse_monitors(monitors: &Value, viewer_on: Option<i64>) -> Result<Vec<Mo
 
 /// The monitor id the window of `pid` is on, from `hyprctl clients -j`;
 /// None before it maps.
+/// The dashboard terminal's app id (`dashboard::terminal_command`).
+pub const DASHBOARD_APP: &str = "protohdmicapture.debug";
+
+/// A monitor other than the viewer's (`viewer_on`; the focused one while
+/// the viewer has no window yet), focused first: its name and active
+/// workspace id. None with one monitor.
+fn other_workspace(monitors: &Value, viewer_on: Option<i64>) -> Option<(String, i64)> {
+    let all = monitors.as_array()?;
+    let viewer = viewer_on.or_else(|| all.iter().find(|m| m["focused"].as_bool() == Some(true))?["id"].as_i64());
+    let mut others: Vec<&Value> = all.iter().filter(|m| m["id"].as_i64() != viewer).collect();
+    others.sort_by_key(|m| m["focused"].as_bool() != Some(true));
+    let m = others.first()?;
+    Some((m["name"].as_str()?.to_string(), m["activeWorkspace"]["id"].as_i64()?))
+}
+
 pub fn window_monitor(clients: &Value, pid: u32) -> Option<i64> {
     clients.as_array()?.iter().find(|c| c["pid"].as_u64() == Some(u64::from(pid)))?["monitor"].as_i64()
 }
@@ -240,6 +266,35 @@ impl Hyprland {
             self.dispatch(s);
         }
         Ok(said)
+    }
+
+    fn place_dashboard(&self, pid: u32, mode: &str, size: (u32, u32)) -> Report {
+        let sel = format!("class:^{DASHBOARD_APP}$");
+        let mut tries = 0;
+        let clients = loop {
+            match self.json("clients") {
+                Some(c) if c.as_array().is_some_and(|a| a.iter().any(|c| c["class"].as_str() == Some(DASHBOARD_APP))) => break c,
+                _ if tries == 30 => return Err(format!("dashboard: its window ({DASHBOARD_APP}) never mapped")),
+                _ => {}
+            }
+            tries += 1;
+            thread::sleep(Duration::from_millis(100));
+        };
+        let monitors = self.json_or_why("monitors")?;
+        let dispatch = |l: String| self.dispatch(&l);
+        dispatch(format!("hl.dsp.window.fullscreen({{ mode = \"fullscreen\", action = \"unset\", window = \"{sel}\" }})"));
+        let said = match other_workspace(&monitors, window_monitor(&clients, pid)) {
+            Some((name, ws)) => {
+                dispatch(format!("hl.dsp.window.move({{ workspace = \"{ws}\", window = \"{sel}\" }})"));
+                format!("dashboard: on {name}")
+            }
+            None => {
+                dispatch(format!("hl.dsp.window.float({{ action = \"enable\", window = \"{sel}\" }})"));
+                "dashboard: floating over the feed (one monitor)".to_string()
+            }
+        };
+        let placed = self.place_window(pid, mode, size)?;
+        Ok(format!("{said}; {placed}"))
     }
 
     fn refresh_match(&self, fps: f64, on: Option<&str>, record: &Path) -> (Option<String>, Report) {
@@ -498,6 +553,22 @@ mod tests {
              "x": 3440, "y": 120, "scale": 1.25, "transform": 1,
              "availableModes": ["1920x1200@59.95Hz", "1920x1080@60.00Hz", "1920x1200@60.00Hz", "1920x1200@50.00Hz", "bogus"]}
         ])
+    }
+
+    #[test]
+    fn the_dashboard_goes_to_a_monitor_the_viewer_is_not_on() {
+        let three = serde_json::json!([
+            {"id": 0, "name": "DP-1", "focused": false, "activeWorkspace": {"id": 1}},
+            {"id": 1, "name": "DP-2", "focused": true, "activeWorkspace": {"id": 5}},
+            {"id": 2, "name": "HDMI-A-1", "focused": false, "activeWorkspace": {"id": 3}}
+        ]);
+        // The focused monitor first, when the viewer is elsewhere.
+        assert_eq!(other_workspace(&three, Some(0)), Some(("DP-2".into(), 5)));
+        assert_eq!(other_workspace(&three, Some(1)), Some(("DP-1".into(), 1)));
+        // No viewer window yet (DEBUG=window): the focused monitor is its.
+        assert_eq!(other_workspace(&three, None), Some(("DP-1".into(), 1)));
+        let one = serde_json::json!([{"id": 0, "name": "DP-1", "focused": true, "activeWorkspace": {"id": 1}}]);
+        assert_eq!(other_workspace(&one, Some(0)), None);
     }
 
     /// The same answer as lib/pick-refresh-mode.py, byte for byte.

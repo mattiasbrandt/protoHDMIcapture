@@ -504,8 +504,11 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
     match dashboard::Server::start(&dashboard::socket_path(&session::run_dir()), live, Some(display), dashboard::TICK) {
         Ok(server) => {
             feed.set_dashboard(server);
-            if debug_window && let Err(e) = dashboard::open(None) {
-                eprintln!("warning: DEBUG=window: {e}");
+            if debug_window {
+                match dashboard::open(None) {
+                    Ok(()) => app::place_dashboard(&opts.desktop, opts.window.names().0, opts.window_size),
+                    Err(e) => eprintln!("warning: DEBUG=window: {e}"),
+                }
             }
         }
         Err(e) => eprintln!("warning: no dashboard: {e}"),

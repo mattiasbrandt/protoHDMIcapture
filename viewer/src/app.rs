@@ -144,6 +144,19 @@ fn no_sound(why: String) {
     }
 }
 
+/// The dashboard's terminal off the viewer's monitor and the viewer back
+/// in `mode` (`Desktop::place_dashboard`), off the window thread.
+pub fn place_dashboard(desktop: &Desktop, mode: &'static str, size: (u32, u32)) {
+    if matches!(desktop, Desktop::Generic) {
+        return;
+    }
+    let desktop = desktop.clone();
+    thread::spawn(move || match desktop.place_dashboard(std::process::id(), mode, size) {
+        Ok(m) => eprintln!("{m}"),
+        Err(m) => eprintln!("warning: {m}"),
+    });
+}
+
 impl WindowMode {
     /// f: fullscreen -> borderless -> windowed (WINDOW's order).
     fn next(self, size: (u32, u32)) -> Self {
@@ -155,7 +168,7 @@ impl WindowMode {
     }
 
     /// As the settings spell it, and as the panel names it.
-    fn names(self) -> (&'static str, &'static str) {
+    pub fn names(self) -> (&'static str, &'static str) {
         match self {
             Self::Fullscreen => ("fullscreen", "Fullscreen"),
             Self::Borderless => ("borderless", "Borderless"),
@@ -970,7 +983,10 @@ impl App {
     fn open_dashboard(&mut self) {
         let now = Instant::now();
         match crate::dashboard::open(Some(self.notify.clone())) {
-            Ok(()) => self.overlay.message("Opening the debug dashboard", Duration::from_millis(1500), now),
+            Ok(()) => {
+                self.overlay.message("Opening the debug dashboard", Duration::from_millis(1500), now);
+                place_dashboard(&self.opts.desktop, self.opts.window.names().0, self.opts.window_size);
+            }
             Err(e) => {
                 eprintln!("warning: {e}");
                 self.overlay.message(format!("Dashboard: {e}"), Duration::from_secs(3), now);
