@@ -71,7 +71,8 @@ pub enum From {
 }
 
 impl From {
-    fn word(self) -> &'static str {
+    /// As `--settings` and the debug log's settings line spell it.
+    pub fn word(self) -> &'static str {
         match self {
             From::Env => "env",
             From::Saved => "saved",

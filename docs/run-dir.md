@@ -20,7 +20,7 @@ contract; change a writer or a reader, update the row.
 | `window.mode`, `window.size` | `view.sh` `run_player`, `--place-window`; removed in its EXIT trap (left by a killed session) | `--place-window` | current `WINDOW` and `WINDOW_SIZE` for the f key |
 | `player.quit` | mpv script `on_unload` hook (via `quitfile`), then USR2 to `view.sh` (checked as for `audio.request`) | `view.sh` after the player exits | mpv began to quit; a later SIGKILL is `view.sh`'s 2 s quit bound (teardown hung without frames), another signal death is the upstream teardown crash |
 | `dashboard.sock` | the Rust viewer (`viewer/src/dashboard.rs`), bound with the video lock held, replacing a killed viewer's; removed at its end if still its own | `protohdmicapture --dashboard` | Unix socket: one JSON line a second with the viewer's live numbers; a dashboard that stops reading is dropped, never waited for. view.sh's dashboard reads the files above instead |
-| `debug.log` | `view.sh` with `DEBUG≠off` (tee) | dashboard | the session's full output |
+| `debug.log` | `view.sh` with `DEBUG≠off` (tee); the Rust viewer with `DEBUG≠off` (its stdout and stderr, `[dbg]` lines and a perf line every `DEBUG_PERF_INTERVAL` s; how the run ended). Both truncate it once `video.lock` is held | view.sh's dashboard, the user | the session's full output |
 | `mpv.sock` | mpv, when `DEBUG=window` and `IPC=""` | dashboard | private IPC socket for that session |
 | `setup.lock` | `lib/setup.sh` (flock, held while it runs); the Rust viewer's wizard likewise (`--setup` or a first run, `viewer/src/main.rs`) | `launch.sh` (blocks on it) | one wizard; "wizard ended" however it ended |
 | `setup.pid` | `lib/setup.sh`; the Rust viewer's wizard (its own PID) | `launch.sh` | the wizard started |

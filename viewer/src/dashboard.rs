@@ -144,6 +144,20 @@ impl Live {
         self.started.elapsed()
     }
 
+    /// The counters, for the debug log's perf line (#27).
+    #[cfg(target_os = "linux")]
+    pub fn counts(&self) -> crate::debuglog::Counts {
+        crate::debuglog::Counts {
+            frames: self.frames.load(Ordering::Relaxed),
+            presented: self.presented.load(Ordering::Relaxed),
+            repeated: self.repeated.load(Ordering::Relaxed),
+            gaps: self.gaps.load(Ordering::Relaxed),
+            lost: self.lost.load(Ordering::Relaxed),
+            undecodable: self.dropped.undecodable.load(Ordering::Relaxed),
+            unusable: self.dropped.unusable.load(Ordering::Relaxed),
+        }
+    }
+
     pub fn set_audio(&self, audio: AudioLive) {
         *self.audio.lock().expect("the audio's lock is never poisoned") = audio;
     }
@@ -294,7 +308,7 @@ fn audio_json(a: &AudioLive) -> Value {
 
 /// This process's user and system CPU time, in clock ticks.
 #[cfg(target_os = "linux")]
-fn cpu_ticks() -> Option<u64> {
+pub(crate) fn cpu_ticks() -> Option<u64> {
     let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
     // After the command name, which may hold spaces: fields 3 onwards.
     let rest = &stat[stat.rfind(')')? + 2..];
@@ -303,13 +317,13 @@ fn cpu_ticks() -> Option<u64> {
 }
 
 #[cfg(target_os = "linux")]
-fn clock_ticks_per_s() -> f64 {
+pub(crate) fn clock_ticks_per_s() -> f64 {
     // Safety: sysconf has no preconditions.
     unsafe { libc::sysconf(libc::_SC_CLK_TCK) as f64 }
 }
 
 #[cfg(target_os = "linux")]
-fn rss_mb() -> Option<f64> {
+pub(crate) fn rss_mb() -> Option<f64> {
     let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
     let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
     // Safety: sysconf has no preconditions.

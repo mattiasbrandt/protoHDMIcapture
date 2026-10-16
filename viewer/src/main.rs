@@ -11,6 +11,8 @@ mod capture;
 mod capture_cards;
 mod card;
 mod dashboard;
+#[cfg(target_os = "linux")]
+mod debuglog;
 mod desktop;
 mod feed;
 mod gputime;
@@ -321,6 +323,7 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
         live: live.clone(),
     };
     let mut test_pattern = false;
+    let mut debug = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -328,11 +331,18 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
             "--monitor" => opts.monitor = Some(it.next().ok_or(USAGE)?.clone()),
             "--stats" => opts.stats = true,
             "--test-pattern" => test_pattern = true,
+            // As view.sh's: DEBUG=window, as if from the environment.
+            "--debug" => debug = true,
             _ => return Err(USAGE.into()),
         }
     }
 
-    let s = settings(menu);
+    let s = if debug {
+        Settings::resolve_with(&|k| if k == "DEBUG" { Some("window".into()) } else { env::var(k).ok() })
+    } else {
+        Settings::resolve()
+    };
+    let s = if menu { s.with_menu_defaults() } else { s };
     for n in &s.notes {
         eprintln!("note: {n}");
     }
@@ -378,6 +388,25 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
     };
     #[cfg(not(target_os = "linux"))]
     let session = None;
+    // DEBUG≠off: the output into debug.log from here, with the lock held
+    // (a refused second launch must not truncate the running one's), as
+    // view.sh's debug_tee. Declared before the feed, so it outlives the
+    // feed's teardown. A log that cannot start costs only the log.
+    #[cfg(target_os = "linux")]
+    let mut debug_log = match (s.get("DEBUG"), &session) {
+        ("off", _) | (_, None) => None,
+        (_, Some(_)) => match debuglog::DebugLog::start(&session::run_dir().join("debug.log")) {
+            Ok(log) => {
+                log.header(&desktop);
+                log.settings(&s);
+                Some(log)
+            }
+            Err(e) => {
+                eprintln!("warning: debug.log: {e}; the feed goes on without it");
+                None
+            }
+        },
+    };
     // From here on, an early return ends what the feed holds in its order.
     let mut feed: feed::Feed = feed::Feed::new(session);
     opts.desktop = desktop;
@@ -386,9 +415,25 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
         eprintln!("video: the test pattern at {}x{} {} fps", format.width, format.height, format.fps);
         (Box::new(pattern::Pattern::new(format)), None)
     } else {
-        let (source, node) = open_card(&s, format)?;
+        let opened = open_card(&s, format);
+        #[cfg(target_os = "linux")]
+        if let (Err(e), Some(log)) = (&opened, &debug_log) {
+            log.ended(&Err(e.clone()));
+        }
+        let (source, node) = opened?;
         (source, Some(node))
     };
+    #[cfg(target_os = "linux")]
+    if let Some(log) = debug_log.as_mut() {
+        log.format(format, test_pattern);
+        match debuglog::perf_every(env::var("DEBUG_PERF_INTERVAL").ok().as_deref()) {
+            Ok(every) => log.perf(live.clone(), every),
+            Err(e) => {
+                eprintln!("warning: {e}");
+                log.perf(live.clone(), debuglog::perf_every(None).expect("the default is valid"));
+            }
+        }
+    }
     match audio(&s, node.as_ref()) {
         Ok(Some(a)) => {
             let a = feed.set_audio(a);
@@ -461,11 +506,16 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
     }
     feed.finish();
     // Every way the viewer's window ends is the end of the viewer.
-    match outcome {
+    let result = match outcome {
         run::Outcome::Closed | run::Outcome::Signal | run::Outcome::TimeUp => Ok(()),
         run::Outcome::CaptureEnded(e) => Err(format!("capture: {e}")),
         run::Outcome::Failed(e) => Err(e),
+    };
+    #[cfg(target_os = "linux")]
+    if let Some(log) = &debug_log {
+        log.ended(&result);
     }
+    result
 }
 
 fn main() -> ExitCode {
