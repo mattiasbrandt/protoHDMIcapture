@@ -1,3 +1,20 @@
 #!/usr/bin/env bash
 # Enabled per clone with: git config core.hooksPath .githooks
-exec "$(git rev-parse --show-toplevel)/tools/check"
+# Checks what is being committed: with unstaged or untracked changes, the
+# index is exported to a scratch tree and checked there (a partial commit
+# that does not build passed when the working tree did).
+top=$(git rev-parse --show-toplevel) || exit 1
+if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+    exec "$top/tools/check"
+fi
+# A fixed path with its own build directory: build.rs bakes its source path
+# into the build, so one build directory serves one tree only.
+tree="$(git rev-parse --absolute-git-dir)/precommit-tree"
+find "$tree" -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} + 2>/dev/null
+mkdir -p "$tree" && git checkout-index -a --prefix="$tree/" || exit 1
+echo ":: pre-commit: checking the staged tree in $tree (unstaged or untracked changes left out)"
+# git ls-files in tools/check reads this index. git commit passes the index
+# as a relative path, which tools/check's cd into the tree would break.
+GIT_INDEX_FILE=$(realpath "${GIT_INDEX_FILE:-$(git rev-parse --git-path index)}") \
+GIT_DIR=$(git rev-parse --absolute-git-dir) GIT_WORK_TREE="$tree" \
+    CARGO_TARGET_DIR="$tree/target" "$tree/tools/check"

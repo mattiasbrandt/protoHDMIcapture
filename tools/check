@@ -64,7 +64,7 @@ else
         sh_out=$(env -i HOME="$HOME" PATH="$PATH" XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}" \
                  CONFIG_FILE="$cfg" "${envs[@]}" ./view.sh --settings 2>&1; echo "exit $?")
         rs_out=$(env -i HOME="$HOME" PATH="$PATH" \
-                 CONFIG_FILE="$cfg" "${envs[@]}" viewer/target/debug/protohdmicapture --settings 2>&1; echo "exit $?")
+                 CONFIG_FILE="$cfg" "${envs[@]}" "${CARGO_TARGET_DIR:-viewer/target}/debug/protohdmicapture" --settings 2>&1; echo "exit $?")
         [ "$sh_out" = "$rs_out" ] || { bad "settings fixture $name: the viewers differ"; diff <(echo "$sh_out") <(echo "$rs_out") | head -10; }
     done
     # The Windows build (#18): clippy only, no link, so no Windows SDK is
