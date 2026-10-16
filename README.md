@@ -9,7 +9,7 @@ measurements and source-side settings below were taken with a PS5 on the HDMI
 side. Nothing in the scripts is PS5-specific.
 
 A viewer only: it shows the picture and plays the sound, and does not record
-or stream. Tested end to end with the MS2130 card and a PS5 (see
+or stream. Tested end to end with the MS2130 and MS2109 cards and a PS5 (see
 [docs/capture-cards.md](docs/capture-cards.md) for each card's support status).
 
 ---
@@ -22,15 +22,42 @@ or stream. Tested end to end with the MS2130 card and a PS5 (see
 ./view.sh --debug             # play with verbose logging and a live dashboard
 ./view.sh --settings          # every setting, its value and where it came from; checks them
 ./view.sh --tune              # re-tune audio sync: the overlay opens, ctrl -/+ shifts it, w keeps it
+./view.sh --help              # every flag
 ```
 
 In the video window: **Tab** opens the overlay, **f** cycles fullscreen →
 borderless → windowed, **d** opens the live dashboard, **1**–**8** adjust
 colour and **s** takes a screenshot (mpv's own keys), **i** / **I** show
-mpv's frame-timing stats, **q** quits.
+mpv's frame-timing stats (view.sh only), **q** quits.
 
 The Rust viewer, `protohdmicapture`, is its opt-in successor (same settings
 file); to install it, see [packaging/INSTALL.md](packaging/INSTALL.md).
+
+### The Rust viewer
+
+Its own capture, renderer and audio loopback in one process, on Linux; it
+also builds for Windows (Media Foundation, WASAPI, DX12), where it has not
+run yet (#18). `protohdmicapture --help` lists its flags:
+
+- `--setup` runs its setup wizard in the viewer window; `--settings`,
+  `--dashboard` and `--debug` do what view.sh's do.
+- `--menu` is what its desktop entry passes: `REFRESH=match` unless the
+  environment or the file sets `REFRESH`, and a desktop notification
+  when it fails or has no sound.
+- Measurements: `--stats`, `--seconds N`, `--test-pattern`, and
+  `--monitor NAME` (the window and `REFRESH=match` use that monitor, and
+  the focus goes back once the window is placed).
+
+The keys are the overlay's. **d** opens the dashboard on another monitor
+(Hyprland); with one open, **d** raises it. **ctrl −/+** move the sync live,
+without a restart, and start the loopback again if it died. It refuses
+view.sh-only settings (`BACKEND=gst`/`ffplay`, `AUDIO=mpv`), and with
+`DEBUG` on it logs to `debug.log` in the run directory
+([`docs/run-dir.md`](docs/run-dir.md)). From the frame reaching the PC to
+the screen it measures about 45 ms median (p99 54 ms) at 1080p60
+([`docs/testing.md`](docs/testing.md#measuring-latency)): it holds a frame
+for the display's next refresh only within 5 ms of it, and otherwise shows
+the newest.
 
 ### The overlay
 
@@ -80,7 +107,7 @@ audio. The tuning pair above is one of each, so it is allowed.
 
 `./view.sh --setup` walks through, in a centered terminal UI:
 
-1. **Capture card**: every capture device with its serial; the one with a
+1. **Capture card**: every video device with its serial; the one with a
    known capture-chip USB id is recommended. Pinned by USB serial
    (`CARD_SERIAL`), or by USB port (`CARD_PORT`) when the card reports none,
    or as a last resort by its node (`DEV=/dev/videoN`, which can change on a
@@ -176,7 +203,7 @@ is exactly what OBS *cannot* do and why you had to fight it:
 
 | Stream | Path | Latency |
 |---|---|---|
-| Video | `mpv --untimed` (or GStreamer `sync=false`) straight from `/dev/videoN`, **no audio track** | shown the instant the frame arrives |
+| Video | `mpv --untimed` (or GStreamer `sync=false`) straight from `/dev/videoN`, **no audio track** | shown the instant the frame arrives (the Rust viewer: about 45 ms from the frame reaching the PC to the screen) |
 | Audio | PipeWire loopback: card's capture source → your sink, **never touches the video player** | ~5–20 ms, tunable |
 | Sync | one fixed `--delay` on the loopback, tuned once | — |
 
@@ -539,14 +566,16 @@ Both flags confirmed against `pw-loopback --help` on 1.6.8 and the
 Omitting `-P` makes playback follow your **default sink**, so switching between
 the Arctis Nova Pro and HDMI output mid-game just works.
 
-**Which direction to tune:** audio through this path is ~10–20 ms; video through
-the card + USB + decode + display is ~50–100 ms. So audio arrives *early*, and
+**Which direction to tune:** audio through this path is ~10–20 ms; video pays
+the card's own latency (see below), then about 45 ms from the frame reaching
+the PC to the screen (the Rust viewer, measured 2026-10-16). So audio arrives *early*, and
 `--delay` should go *up* from 0 until it matches. Starting guess `DELAY=0.05`.
 
 Tune it in the feed: **ctrl −** / **ctrl +** move the audio 10 ms earlier /
 later, **alt −** / **alt +** by 50 ms, and **w** in the overlay (**Tab**)
 saves it as `DELAY`. `./view.sh --tune` is the feed with the overlay already
-open. Each change restarts the loopback (a moment of silence): `view.sh`,
+open. In view.sh each change restarts the loopback (a moment of silence; the
+Rust viewer moves the delay live instead): `view.sh`,
 which owns it, does that on a request from the mpv script (`audio.request`
 and a USR1, see [`docs/run-dir.md`](docs/run-dir.md)); volume and mute carry
 over. The setup wizard's sync stage still uses its own terminal tuner.
@@ -596,8 +625,9 @@ the PS5 plugged directly into a monitor.
 
 ## What software cannot fix
 
-The dominant term is the **card's own internal latency** — typically 30–80 ms
-for USB cards, and entirely out of reach from this side. If after all of the
+The dominant term is the **card's own internal latency** — reported as 6–11
+frames (~100–180 ms at 60 fps) for the MS2130 (see the HDMI loop-out section
+below; not measured here), and entirely out of reach from this side. If after all of the
 above it still feels laggy for anything twitchy, the honest answer is to play
 through the card's HDMI passthrough on a real display and use the PC only for
 the video feed. No player flag beats a wire.
@@ -630,7 +660,7 @@ the hub, not a faulty card.
 **Keep it on a SuperSpeed port.** It is not merely a stability matter — see the
 format table below; USB 2 also costs you the uncompressed path.
 
-### 2. The OBSBOT Meet 2 is wedged — nothing holds it, the kernel just says EBUSY
+### 2. The OBSBOT Meet 2 was wedged (2026-09) — nothing held it, the kernel just said EBUSY
 
 `/dev/video0` and `/dev/video1` return `Device or resource busy` to every client.
 Chased to a conclusion:
@@ -710,37 +740,15 @@ Everything below was executed on this machine, not predicted.
 | Source-mismatch warning | fires with the correct node name when wrong; silent when right |
 | `mpv --show-profile=low-latency` | expansion quoted in this document is from 0.41.0 on this box, not from memory |
 
-**Not verified, and cannot be until the card is here:** the actual v4l2 capture
-path end-to-end, the real latency numbers, and the correct `FMT`/`RES`/`FPS`.
-The OBSBOT is busy and the `1e4e` device resets out from under any client, so
-neither could stand in for a full run. The v4l2 attempt against `/dev/video2`
-*did* get as far as negotiating MJPEG 1920x1080 and queuing buffers before the
-device reset, which at least confirms the demuxer option string is well-formed.
-
----
-
-## Unrelated small find
-
-`~/.config/mpv/mpv.conf:31` makes mpv print a warning on **every** launch:
-
-```
-mpv.conf:31: fixed-length quoting expected - put "quotes" around the option
-value if you did not intend to use this, but your option value starts with '%'
-```
-
-Line 31 is `screenshot-template=%F-%wH.%wM.%wS`. mpv 0.41 reads a leading `%` as
-its fixed-length quoting syntax. Fix is to quote the value:
-
-```ini
-screenshot-template="%F-%wH.%wM.%wS"
-```
-
+The capture path end to end was verified later, with the MS2130 and a PS5
+(2026-09-06, the confirmed configuration above); the latency baseline is in
+[`docs/testing.md`](docs/testing.md#measuring-latency).
 
 ---
 
 ## Troubleshooting
 
-### Frozen picture, but audio works
+### Picture stuck, but audio works
 
 The single most likely cause is **mpv paused itself**, and the split
 architecture makes that diagnosable in one glance: audio never passes through
@@ -841,6 +849,11 @@ v4l2-ctl -d /dev/video2 --get-fmt-video
 - `docs/testing.md`, `docs/run-dir.md`, `CODING_STANDARDS.md` — how to verify a
   change on hardware, the session-file contract, and the review rules
 - `desktop/` — the `.desktop` entry and icon, symlinked into `~/.local/share`
+- `viewer/` — the Rust viewer (`protohdmicapture`); `packaging/` — its
+  PKGBUILD, release archive and install script
+  ([`packaging/INSTALL.md`](packaging/INSTALL.md))
+- `.github/workflows/` — `check.yml` runs `tools/check` on pushes to
+  `main` and pull requests against it; `release.yml` builds the release archive on a `v*` tag
 
 ---
 
@@ -851,7 +864,7 @@ live in `desktop/` in this repo and are symlinked to where XDG looks for them:
 
 | file | what it is |
 |---|---|
-| `~/.local/share/applications/protohdmicapture.desktop` → `desktop/protohdmicapture.desktop` | the menu entry; `Exec=` points at `launch.sh` |
+| `~/.local/share/applications/protohdmicapture.desktop` → `desktop/protohdmicapture.desktop` | the menu entry; `Exec=` points at `launch.sh` (view.sh). The packaged Rust viewer's entry, `packaging/protohdmicapture.desktop`, runs `protohdmicapture --menu` instead |
 | `~/.local/share/icons/hicolor/scalable/apps/protohdmicapture.svg` → `desktop/protohdmicapture.svg` | the icon |
 
 On a fresh machine:
@@ -941,9 +954,9 @@ you're on USB 2 and should move it.
 ### Use the DC5V input
 
 The board has a USB-C aux power jack for a reason: 4K input plus USB 3 streaming
-exceeds what some ports comfortably deliver. Given that this machine already has
-a USB device stuck in a reset loop (see below), power it externally and plug the
-data side into a rear motherboard port — **not** the `3-5` hub.
+exceeds what some ports comfortably deliver. On a bus-powered USB 2 hub this
+card reset ~950 times a day (see above), so power it externally and plug the
+data side into a rear SuperSpeed port — **not** the `3-5` hub.
 
 ### The HDMI loop-out is genuinely useful
 
@@ -980,7 +993,7 @@ really 48 kHz stereo, with swapped channels and unaligned transfers. On Windows
 people run [mono-to-stereo](https://github.com/ToadKing/mono-to-stereo) for it.
 **On Linux this is fixed in the kernel** (`QUIRK_AUDIO_ALIGN_TRANSFER` plus the
 96 kHz-mono → 48 kHz-stereo remap, mainlined years ago and backported as far as
-4.9). This box runs 7.1.9, so it is handled automatically — nothing to do.
+4.9). This box's kernel (7.2) has it, so it is handled automatically — nothing to do.
 
 If the audio still comes through mono, at half speed, or with L/R swapped,
 that's the signal the quirk didn't match your exact ID; capture the output of
