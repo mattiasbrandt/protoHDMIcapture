@@ -253,9 +253,13 @@ impl Drop for DebugLog {
 
 /// Copies `from` to `to` and to the log until `from` ends. A log that
 /// cannot be written is said once and the copy goes on without it: the
-/// feed matters more than its log.
+/// feed matters more than its log. An original output that fails (a
+/// reader gone) is said once in the log, which then has the rest alone.
+/// The log's lock is held for one write at a time: `ended` and the other
+/// copy take it too, and this one blocks in `read`.
 fn copy(mut from: File, mut to: File, file: &Mutex<Option<File>>, path: &Path) {
     let mut buf = [0u8; 8192];
+    let mut forward = true;
     loop {
         let n = match from.read(&mut buf) {
             Ok(0) => return,
@@ -273,30 +277,20 @@ fn copy(mut from: File, mut to: File, file: &Mutex<Option<File>>, path: &Path) {
                 && let Err(e) = f.write_all(&buf[..n])
             {
                 // As above: the original output is the only place left.
-                let _ = writeln!(to, "warning: {}: {e}; the feed goes on without its log", path.display());
+                if forward {
+                    let _ = writeln!(to, "warning: {}: {e}; the feed goes on without its log", path.display());
+                }
                 *log = None;
             }
         }
-        // The terminal gone: the log still gets the output.
-        if let Err(e) = to.write_all(&buf[..n]) {
+        // The original output gone: the log still gets the rest, and the
+        // pipe is still drained so that nothing writing to it blocks.
+        if forward && let Err(e) = to.write_all(&buf[..n]) {
+            forward = false;
             let mut log = file.lock().expect("the log's lock is never poisoned");
             if let Some(f) = log.as_mut() {
                 // The log is the only place left to say it.
                 let _ = writeln!(f, "[dbg] the original output failed: {e}; only the log has the rest");
-            }
-            loop {
-                match from.read(&mut buf) {
-                    Ok(0) => return,
-                    Ok(n) => {
-                        if let Some(f) = log.as_mut()
-                            && f.write_all(&buf[..n]).is_err()
-                        {
-                            return;
-                        }
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(_) => return,
-                }
             }
         }
     }
@@ -434,6 +428,38 @@ mod tests {
         terminal.read_to_string(&mut seen).unwrap();
         assert_eq!(seen, "after the log\n");
         assert!(!std::fs::read_to_string(&path).unwrap().contains("after the log"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_original_output_gone_leaves_the_log_and_its_end_working() {
+        // The terminal's reader gone mid-run: the copy goes on into the
+        // log alone, and neither `ended` nor the end waits on it (Codex
+        // review of #27: the copy held the log's lock while it read).
+        let dir = tmp("gone");
+        let path = dir.join("debug.log");
+        let (terminal, fd) = stand_in();
+        drop(terminal);
+        let log = DebugLog::start_on(&path, &[fd]).unwrap();
+        write_fd(fd, "before\n");
+        write_fd(fd, "after\n");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !std::fs::read_to_string(&path).unwrap().contains("after") {
+            assert!(std::time::Instant::now() < deadline, "the log never got the output");
+            thread::sleep(Duration::from_millis(5));
+        }
+        let (done, ended) = mpsc::channel();
+        thread::spawn(move || {
+            log.ended(&Ok(()));
+            drop(log);
+            done.send(()).unwrap();
+        });
+        ended.recv_timeout(Duration::from_secs(5)).expect("the log's end hung on the copy");
+        let text = std::fs::read_to_string(&path).unwrap();
+        for want in ["before", "after", "[dbg] the original output failed: ", "[dbg] ended"] {
+            assert!(text.contains(want), "no {want:?} in\n{text}");
+        }
+        unsafe { libc::close(fd) };
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
