@@ -362,7 +362,7 @@ fn rewrite(config_file: &Path, pairs: &[(&str, &str)], unset: bool) -> Result<()
             }
         }
         None => {
-            out.push_str("# protoHDMIcapture settings, written by ./view.sh --setup.\n");
+            out.push_str("# protoHDMIcapture settings, written by the setup wizard.\n");
             out.push_str("# One KEY=value per line; see config.example in the repo.\n");
         }
     }

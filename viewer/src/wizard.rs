@@ -2172,7 +2172,7 @@ mod tests {
         let saved = std::fs::read_to_string(&file).unwrap();
         assert_eq!(
             saved,
-            "# protoHDMIcapture settings, written by ./view.sh --setup.\n\
+            "# protoHDMIcapture settings, written by the setup wizard.\n\
              # One KEY=value per line; see config.example in the repo.\n\
              SOURCE=ps5\nCARD_SERIAL=20000130041415\nIGNORE_CARDS_RE='OBSBOT Meet 2'\nRES=1920x1080\nFPS=60\n\
              FMT=yuyv422\nDELAY=0.110\nBACKEND=mpv\nWINDOW=fullscreen\nSCALING=balanced\nREFRESH=match\n"

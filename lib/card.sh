@@ -111,7 +111,7 @@ _config_rewrite() {
                 printf '%s\n' "$line"
             done <"$CONFIG_FILE"
         else
-            printf '# protoHDMIcapture settings, written by ./view.sh --setup.\n'
+            printf '# protoHDMIcapture settings, written by the setup wizard.\n'
             printf '# One KEY=value per line; see config.example in the repo.\n'
         fi
         if [ "$mode" = set ]; then
