@@ -53,6 +53,21 @@ trusting it. Below: the traps that produce false results on real runs.
   timeout rather than failing: a "hang" usually means one answer too few.
 - **Keys in the mpv window** go through its IPC socket:
   `echo '{"command":["keypress","f"]}' | socat - /tmp/mpv-protohdmicapture.sock`.
+- **Keys in the Rust viewer's window** have no socket: focus it, then type.
+  Omarchy's Hyprland takes Lua dispatches only, and the old
+  `dispatch focuswindow` form fails without a word:
+
+  ```bash
+  hyprctl dispatch 'hl.dsp.focus({ window = "class:^protohdmicapture$" })'
+  wtype -k Tab          # ctrl+=: wtype -M ctrl -k equal -m ctrl
+  ```
+
+  Focus follows the mouse: a key the user types lands in the window under
+  the pointer, and their own typing can reach the viewer mid-run (it
+  closed the panel in a 10-minute overlay-open run). Screenshot the panel
+  now and then to prove a long run's state.
+- **`--setup` takes no other flag** (no `--monitor`): focus the monitor
+  first, `hyprctl dispatch 'hl.dsp.focus({ monitor = "DP-1" })'`.
 - **See the overlay** by screenshotting the window with its OSD, then reading
   the PNG: `{"command":["screenshot-to-file","/path/shot.png","window"]}`.
   The MS2109 with no source streams black, so the panel reads cleanly.
@@ -66,6 +81,33 @@ trusting it. Below: the traps that produce false results on real runs.
   back to 100 % before finishing.
 - **The menu path**: `gtk-launch protohdmicapture`. A stand-in
   `xdg-terminal-exec` first on `PATH` can run the wizard with scripted answers.
+  The installed entry runs `launch.sh` (view.sh); the Rust viewer's
+  `--menu` is reached the way a menu starts it:
+  `setsid protohdmicapture --menu </dev/null >log 2>&1 &` (no terminal, so
+  it notifies).
+- **A new window takes the fullscreen** of a fullscreen viewer on its
+  workspace (Hyprland): any terminal opened there hides the feed, and a
+  hidden window presents nothing, which reads as a viewer bug.
+
+## Measuring latency
+
+- **Compare builds, not sessions:** alternate the builds on the same
+  monitor and card, two runs each, `--stats --seconds 40`; one run's median
+  moves with the capture/display phase. Build an old commit in a scratch
+  worktree with its own `CARGO_TARGET_DIR`.
+- **Pin the monitor's mode first.** `REFRESH=match` switches a 100 Hz
+  monitor to about 60 Hz, and builds before it ran at the monitor's own rate
+  (about 30 ms, against 41 at 60 Hz): a bisect across it measures the
+  monitor. `hyprctl eval 'hl.monitor({ output = "DP-1", mode = "3440x1440@59.97", position = "0x0", scale = 1 })'`,
+  and back afterwards.
+- **`--monitor NAME`** picks the monitor REFRESH=match switches and the
+  window opens on; without it, both follow focus.
+- **The baseline** (2026-10-16, `20ca430`, MS2130 1080p60, DP-1 at
+  59.97 Hz, 10 min): kernel → presented median 41.8 ms, p99 50.6 ms; about
+  4 % of refreshes repeat. Re-measure against it after a change to pacing,
+  the event loop or the present path.
+- **The MS2109 sends about 7 s of black** after every stream start, with a
+  source playing: a shorter probe sees only black.
 
 ## Signals
 
