@@ -178,9 +178,66 @@ pub fn describe_dev(dev: &str) -> Option<Option<(String, bool)>> {
     (!dev.is_empty()).then(|| if Path::new(dev).exists() { probe(Path::new(dev)) } else { None })
 }
 
+/// An error from opening the card, with the hint lib/setup.sh gives when
+/// the card is busy: who holds it, where that can be read (`holders`).
+pub fn open_error(e: String, holders: &[String]) -> String {
+    if !e.contains("busy") {
+        return e;
+    }
+    match holders {
+        [] => format!("the card is busy: a feed is probably running. Close it first. ({e})"),
+        h => format!("the card is busy: {} has it open. Close it first. ({e})", h.join(", ")),
+    }
+}
+
+/// The processes that have `node` open, as "name (pid N)", from /proc.
+/// Another user's processes cannot be read and are not listed.
+#[cfg(target_os = "linux")]
+pub fn holders(node: &Path) -> Vec<String> {
+    let Ok(procs) = fs::read_dir("/proc") else { return Vec::new() };
+    let mut out = Vec::new();
+    for p in procs.flatten() {
+        let Some(pid) = p.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
+        let Ok(fds) = fs::read_dir(p.path().join("fd")) else { continue };
+        if fds.flatten().any(|fd| fs::read_link(fd.path()).is_ok_and(|t| t == node)) {
+            let name = fs::read_to_string(p.path().join("comm")).map_or_else(|_| "?".to_string(), |c| c.trim().to_string());
+            out.push(format!("{name} (pid {pid})"));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_busy_card_says_who_holds_it() {
+        let e = "/dev/video0: Device or resource busy (os error 16)";
+        assert_eq!(
+            open_error(e.into(), &["mpv (pid 4242)".into()]),
+            "the card is busy: mpv (pid 4242) has it open. Close it first. (/dev/video0: Device or resource busy (os error 16))"
+        );
+        assert_eq!(
+            open_error(e.into(), &[]),
+            "the card is busy: a feed is probably running. Close it first. (/dev/video0: Device or resource busy (os error 16))"
+        );
+        // Any other error is left as it is.
+        assert_eq!(open_error("/dev/video0: No such device".into(), &["mpv (pid 1)".into()]), "/dev/video0: No such device");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn holders_of_a_file_this_process_has_open() {
+        let dir = std::env::temp_dir().join(format!("protohdmi-holders-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("node");
+        let _open = fs::File::create(&path).unwrap();
+        let me = format!("(pid {})", std::process::id());
+        assert!(holders(&path).iter().any(|h| h.ends_with(&me)), "{:?}", holders(&path));
+        assert!(holders(&dir.join("other")).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn node(path: &str, serial: &str, port: &str, t: &str) -> Node {
         Node { path: path.into(), serial: serial.into(), port: port.into(), card_type: t.into() }

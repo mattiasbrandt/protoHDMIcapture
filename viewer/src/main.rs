@@ -33,6 +33,7 @@ mod session;
 mod settings;
 mod sources;
 mod stats;
+mod view_sh_only;
 mod wizard;
 
 use std::env;
@@ -41,8 +42,21 @@ use std::sync::Arc;
 
 use settings::Settings;
 
-const USAGE: &str = "usage: protohdmicapture [--setup | --settings | --dashboard]
-       measurements: [--seconds N] [--monitor NAME] [--stats] [--test-pattern]";
+const USAGE: &str = "usage: protohdmicapture [--setup | --settings | --dashboard | -h | --help] [--debug] [--menu]
+       measurements: [--seconds N] [--monitor NAME] [--stats] [--test-pattern]
+
+  (none)          the card's feed, with the settings file (--settings shows it)
+  --setup         the setup wizard, then the feed
+  --settings      each setting, its value and where it came from
+  --dashboard     the running viewer's numbers in this terminal
+  -h, --help      this text
+  --debug         DEBUG=window: the dashboard opens with the feed
+  --menu          as started from the desktop entry: REFRESH=match
+                  unless the environment or the settings file sets it
+  --seconds N     end the feed after N seconds
+  --monitor NAME  open the window on monitor NAME
+  --stats         print the latency numbers every 10 s, and a summary
+  --test-pattern  colour bars instead of the card";
 
 /// Called first thing in main, before any thread exists.
 /// - MANGOHUD=0, as view.sh does for mpv: MangoHud is an implicit Vulkan
@@ -72,10 +86,9 @@ fn environment() {
 /// reported and the feed goes on without sound, as in view.sh.
 /// `card`: None with `--test-pattern`, where only SRC can name an input.
 fn audio(s: &Settings, card: Option<&card::Node>) -> Option<audio::Loopback> {
-    match s.get("AUDIO") {
-        "none" => return None,
-        "mpv" => eprintln!("note: AUDIO=mpv means mpv's own audio in view.sh; the Rust viewer uses its loopback"),
-        _ => {}
+    // AUDIO=mpv is refused before this (view_sh_only).
+    if s.get("AUDIO") == "none" {
+        return None;
     }
     let src = s.get("SRC").to_string();
     let sink = Some(s.get("SINK").to_string()).filter(|v| !v.is_empty());
@@ -217,7 +230,7 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
                     let source = match format.and_then(|f| capture::V4l2::open(&node.path, f)) {
                         Ok(source) => source,
                         Err(e) => {
-                            let e = if e.contains("busy") { format!("the card is busy: a feed is probably running. Close it first. ({e})") } else { e };
+                            let e = card::open_error(e, &card::holders(&node.path));
                             wiz.borrow_mut().feed_failed(e);
                             continue;
                         }
@@ -274,9 +287,9 @@ fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::
     }
     eprintln!("video device: {} ({})", picked.node.path.display(), picked.node.card_type);
     #[cfg(target_os = "linux")]
-    let source = capture::V4l2::open(&picked.node.path, format)?;
+    let source = capture::V4l2::open(&picked.node.path, format).map_err(|e| card::open_error(e, &card::holders(&picked.node.path)))?;
     #[cfg(windows)]
-    let source = capture::MediaFoundation::open(&picked.node.path, format)?;
+    let source = capture::MediaFoundation::open(&picked.node.path, format).map_err(|e| card::open_error(e, &[]))?;
     Ok((Box::new(source), picked.node))
 }
 
@@ -351,6 +364,9 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
     let errors = s.errors();
     if !errors.is_empty() {
         return Err(format!("settings:\n  {}", errors.join("\n  ")));
+    }
+    for n in view_sh_only::check(&s)? {
+        eprintln!("note: {n}");
     }
     opts.window = app::WindowMode::from_settings(s.get("WINDOW"), s.get("WINDOW_SIZE"))?;
     opts.window_size = app::WindowMode::from_settings("windowed", s.get("WINDOW_SIZE")).map(|m| match m {
@@ -518,6 +534,12 @@ fn main() -> ExitCode {
     // setting (launch.sh's defaults, #28); with any other flag.
     let menu = args.iter().any(|a| a == "--menu");
     args.retain(|a| a != "--menu");
+    if let [a] = args.as_slice()
+        && (a == "-h" || a == "--help")
+    {
+        println!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
     if args.first().map(String::as_str) == Some("--settings") {
         if args.len() > 1 {
             eprintln!("{USAGE}");
