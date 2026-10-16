@@ -123,16 +123,17 @@ impl Session {
         Ok(())
     }
 
-    /// REFRESH=match, just before the window opens: the focused monitor to
-    /// its mode nearest `fps`, switched back when the session ends.
-    pub fn match_refresh(&mut self, fps: f64) {
+    /// REFRESH=match, just before the window opens: the focused monitor (or
+    /// `on`, --monitor's) to its mode nearest `fps`, switched back when the
+    /// session ends.
+    pub fn match_refresh(&mut self, fps: f64, on: Option<&str>) {
         let record = self.dir.join("refresh.restore");
         if record.exists() {
             // A switch now would record the switched rate as the original.
             eprintln!("warning: REFRESH=match skipped: a killed session's refresh switch is still unresolved ({})", record.display());
             return;
         }
-        let (restore, report) = self.desktop.refresh_match(fps, &record);
+        let (restore, report) = self.desktop.refresh_match(fps, on, &record);
         say(report);
         self.restore = restore;
     }
@@ -290,7 +291,7 @@ mod tests {
         fs::write(dir.join("refresh.restore"), "DP-2|60|59.95|hl.monitor({})\n").unwrap();
         // Generic cannot recover it: kept, and REFRESH=match does not switch.
         let mut s = Session::start(&dir, Desktop::Generic).unwrap().unwrap();
-        s.match_refresh(60.0);
+        s.match_refresh(60.0, None);
         assert!(s.restore.is_none());
         drop(s);
         assert!(dir.join("refresh.restore").exists());

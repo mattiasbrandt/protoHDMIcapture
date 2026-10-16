@@ -471,12 +471,15 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
         );
         opts.source.clear();
     }
+    if let Some(name) = &opts.monitor {
+        opts.desktop.focus_monitor(name);
+    }
     // As view.sh: after the audio, before the window.
     #[cfg(target_os = "linux")]
     if s.get("REFRESH") == "match"
         && let Some(session) = feed.session()
     {
-        session.match_refresh(format.fps);
+        session.match_refresh(format.fps, opts.monitor.as_deref());
     }
     #[cfg(windows)]
     if s.get("REFRESH") == "match" {

@@ -50,6 +50,16 @@ impl Desktop {
         }
     }
 
+    /// Focuses the monitor `name`, so a window opened next lands on it (a
+    /// measurement run's --monitor: Hyprland opens new windows on the
+    /// focused monitor, whatever output the toolkit asks for).
+    pub fn focus_monitor(&self, name: &str) -> bool {
+        match self {
+            Self::Hyprland(h) => h.dispatch(&format!("hl.dsp.focus({{ monitor = \"{name}\" }})")),
+            Self::Generic => false,
+        }
+    }
+
     /// Shapes the window of `pid` for `mode` (fullscreen, borderless,
     /// windowed at `size`) where the toolkit's own requests are ignored.
     /// Blocks: up to 3 s for the window to map, then a few dispatches.
@@ -60,12 +70,12 @@ impl Desktop {
         }
     }
 
-    /// REFRESH=match: the focused monitor to its mode nearest `fps`, the
-    /// way back recorded in `record` first. Some(restore command) when a
-    /// switch was made.
-    pub fn refresh_match(&self, fps: f64, record: &Path) -> (Option<String>, Report) {
+    /// REFRESH=match: the monitor named `on` (--monitor), else the focused
+    /// one, to its mode nearest `fps`, the way back recorded in `record`
+    /// first. Some(restore command) when a switch was made.
+    pub fn refresh_match(&self, fps: f64, on: Option<&str>, record: &Path) -> (Option<String>, Report) {
         match self {
-            Self::Hyprland(h) => h.refresh_match(fps, record),
+            Self::Hyprland(h) => h.refresh_match(fps, on, record),
             Self::Generic => (None, Err("REFRESH=match is only implemented for Hyprland; leaving the display alone".into())),
         }
     }
@@ -232,8 +242,8 @@ impl Hyprland {
         Ok(said)
     }
 
-    fn refresh_match(&self, fps: f64, record: &Path) -> (Option<String>, Report) {
-        let plan = match self.json("monitors").ok_or("could not read hyprctl monitors".to_string()).and_then(|m| plan(&m, fps)) {
+    fn refresh_match(&self, fps: f64, on: Option<&str>, record: &Path) -> (Option<String>, Report) {
+        let plan = match self.json("monitors").ok_or("could not read hyprctl monitors".to_string()).and_then(|m| plan(&m, fps, on)) {
             Ok(p) => p,
             Err(why) => {
                 return (None, Err(format!("could not work out a refresh plan ({why}); leaving the display alone")));
@@ -390,14 +400,16 @@ impl Plan {
     }
 }
 
-/// lib/pick-refresh-mode.py: on the focused monitor, among its modes at the
-/// same resolution (never a resolution change: it would rearrange the
-/// layout), the rate nearest `fps`; position, scale and transform kept.
-pub fn plan(monitors: &Value, fps: f64) -> Result<Plan, String> {
-    let m = monitors
-        .as_array()
-        .and_then(|a| a.iter().find(|m| m["focused"].as_bool() == Some(true)))
-        .ok_or("no focused monitor reported")?;
+/// lib/pick-refresh-mode.py: on the focused monitor (or the one named `on`,
+/// a measurement run's --monitor), among its modes at the same resolution
+/// (never a resolution change: it would rearrange the layout), the rate
+/// nearest `fps`; position, scale and transform kept.
+pub fn plan(monitors: &Value, fps: f64, on: Option<&str>) -> Result<Plan, String> {
+    let all = monitors.as_array();
+    let m = match on {
+        Some(name) => all.and_then(|a| a.iter().find(|m| m["name"].as_str() == Some(name))).ok_or(format!("no monitor {name} reported"))?,
+        None => all.and_then(|a| a.iter().find(|m| m["focused"].as_bool() == Some(true))).ok_or("no focused monitor reported")?,
+    };
     let (width, height) = (m["width"].as_i64().ok_or("no width")?, m["height"].as_i64().ok_or("no height")?);
     let current = m["refreshRate"].as_f64().ok_or("no refresh rate")?;
     let mut best: Option<f64> = None;
@@ -509,11 +521,14 @@ mod tests {
             let out = child.wait_with_output().unwrap();
             assert!(out.status.success());
             let py = String::from_utf8(out.stdout).unwrap();
-            assert_eq!(plan(&m, fps).unwrap().line(), py.trim_end(), "fps {fps}");
+            assert_eq!(plan(&m, fps, None).unwrap().line(), py.trim_end(), "fps {fps}");
         }
         let mut none = monitors();
         none[1]["focused"] = serde_json::json!(false);
-        assert_eq!(plan(&none, 60.0).unwrap_err(), "no focused monitor reported");
+        assert_eq!(plan(&none, 60.0, None).unwrap_err(), "no focused monitor reported");
+        // --monitor names the monitor, focused or not.
+        assert_eq!(plan(&none, 60.0, Some("DP-1")).unwrap().name, "DP-1");
+        assert_eq!(plan(&none, 60.0, Some("HDMI-A-9")).unwrap_err(), "no monitor HDMI-A-9 reported");
     }
 
     /// A stand-in hyprctl, as tools/harness/refresh-record.sh has: the
@@ -578,7 +593,7 @@ mod tests {
         let dir = tmp("match");
         let h = Desktop::Hyprland(fake(&dir, Some(59.950001), true));
         let rec = dir.join("refresh.restore");
-        let (restore, report) = h.refresh_match(60.0, &rec);
+        let (restore, report) = h.refresh_match(60.0, None, &rec);
         assert_eq!(report.unwrap(), "display: DP-2 59.95Hz -> 60Hz (restored on exit)");
         let restore = restore.unwrap();
         let line = fs::read_to_string(&rec).unwrap();
@@ -590,7 +605,7 @@ mod tests {
         assert!(!rec.exists());
 
         // Already there: nothing switched, nothing recorded.
-        let (none, report) = h.refresh_match(59.95, &rec);
+        let (none, report) = h.refresh_match(59.95, None, &rec);
         assert_eq!((none, report.unwrap()), (None, "display: DP-2 already at 59.95Hz, nothing to change".to_string()));
         assert!(!rec.exists());
         fs::remove_dir_all(&dir).unwrap();
@@ -598,7 +613,7 @@ mod tests {
         // A failed switch leaves no record; a failed restore keeps it.
         let dir = tmp("match-fail");
         let h = Desktop::Hyprland(fake(&dir, Some(59.950001), false));
-        let (none, report) = h.refresh_match(60.0, &rec_in(&dir));
+        let (none, report) = h.refresh_match(60.0, None, &rec_in(&dir));
         assert!(none.is_none() && !rec_in(&dir).exists());
         assert!(report.unwrap_err().contains("(config error: bad monitor)"), "hyprctl's reason is shown");
         fs::write(rec_in(&dir), "x").unwrap();
