@@ -39,10 +39,17 @@ wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 # windows-core for the #[implement] macro's generated paths.
 windows-core = "0.62.2"
 windows = { version = "0.62.2", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_Devices_Properties",
     "Win32_Foundation",
+    "Win32_Media_Audio",
     "Win32_Media_MediaFoundation",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_Performance",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
 ] }
 
 [profile.release]

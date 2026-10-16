@@ -219,15 +219,87 @@ fn names(d: &cpal::Device) -> Result<Vec<String>, String> {
     Ok(vec![name, id.id().to_string()])
 }
 
-/// The audio inputs' names, for a message that lists what SRC may say.
+/// An audio input as the card's lookup sees it (#18).
 #[cfg(windows)]
-pub fn input_names() -> Result<Vec<String>, String> {
+pub struct Input {
+    /// As Windows' sound settings show it.
+    pub name: String,
+    /// The endpoint id: what SRC may say, and unique.
+    pub id: String,
+    /// The physical device's container id; None when it has none.
+    pub container: Option<u128>,
+}
+
+/// Every audio input with its container id. The ids come from a COM
+/// thread of its own, which touches no cpal object: cpal keeps one device
+/// enumerator for the process, made on the first thread that asks.
+#[cfg(windows)]
+pub fn inputs() -> Result<Vec<Input>, String> {
+    let containers = thread::spawn(capture_containers).join().map_err(|_| "the audio endpoint listing panicked".to_string())??;
     let host = cpal::host_from_id(HOST).map_err(|e| format!("{HOST} host: {e}"))?;
     let mut out = Vec::new();
     for d in host.input_devices().map_err(|e| format!("audio inputs: {e}"))? {
-        out.extend(names(&d)?.into_iter().take(1));
+        let [name, id] = <[String; 2]>::try_from(names(&d)?).map_err(|_| "an audio input without a name and id")?;
+        let container = containers.iter().find(|(i, _)| *i == id).and_then(|(_, c)| *c);
+        out.push(Input { name, id, container });
     }
     Ok(out)
+}
+
+/// The active capture endpoints' ids and container ids, with COM up on
+/// this thread for the call.
+#[cfg(windows)]
+fn capture_containers() -> Result<Vec<(String, Option<u128>)>, String> {
+    use windows::Win32::Media::Audio::{DEVICE_STATE_ACTIVE, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture};
+    use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize};
+
+    // Safety: no reserved pointer; balanced by CoUninitialize below.
+    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok().map_err(|e| format!("COM: {e}"))?;
+    let result = (|| {
+        // Safety: COM calls on this thread's MTA; each id string is freed
+        // once read; every object is dropped before CoUninitialize.
+        let endpoints: IMMDeviceEnumerator =
+            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(|e| format!("audio endpoints: {e}"))?;
+        let all = unsafe { endpoints.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE) }.map_err(|e| format!("audio inputs: {e}"))?;
+        let mut out = Vec::new();
+        for i in 0..unsafe { all.GetCount() }.map_err(|e| format!("audio inputs: {e}"))? {
+            let device = unsafe { all.Item(i) }.map_err(|e| format!("audio input {i}: {e}"))?;
+            let raw = unsafe { device.GetId() }.map_err(|e| format!("audio input {i}: {e}"))?;
+            let id = unsafe { raw.to_string() }.map_err(|e| format!("audio input {i}: {e}"));
+            unsafe { CoTaskMemFree(Some(raw.0 as *const _)) };
+            let id = id?;
+            let container = endpoint_container(&device).unwrap_or_else(|e| {
+                eprintln!("warning: audio input {id}: {e}");
+                None
+            });
+            out.push((id, container));
+        }
+        Ok(out)
+    })();
+    // Safety: this thread's CoInitializeEx, above.
+    unsafe { CoUninitialize() };
+    result
+}
+
+/// The endpoint's container id (PKEY_Device_ContainerId in its
+/// property store), as a u128; None when it has none.
+#[cfg(windows)]
+fn endpoint_container(device: &windows::Win32::Media::Audio::IMMDevice) -> Result<Option<u128>, String> {
+    use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_ContainerId;
+    use windows::Win32::System::Com::STGM_READ;
+    use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToGUID};
+    use windows::Win32::System::Variant::VT_EMPTY;
+
+    // Safety: COM calls on the caller's MTA (`capture_containers`).
+    let store = unsafe { device.OpenPropertyStore(STGM_READ) }.map_err(|e| format!("its properties: {e}"))?;
+    let mut value = unsafe { store.GetValue(&PKEY_Device_ContainerId) }.map_err(|e| format!("its container id: {e}"))?;
+    // Safety: `value` is the store's PROPVARIANT, read and then cleared once.
+    let empty = unsafe { value.Anonymous.Anonymous.vt } == VT_EMPTY;
+    let guid = if empty { Ok(None) } else { unsafe { PropVariantToGUID(&value) }.map(|g| Some(g.to_u128())) };
+    if let Err(e) = unsafe { PropVariantClear(&mut value) } {
+        eprintln!("warning: clearing a property value: {e}");
+    }
+    guid.map_err(|e| format!("its container id: {e}"))
 }
 
 /// The output stream's level: read (None) or changed, on PipeWire.
@@ -250,7 +322,7 @@ impl Drop for Audio {
 
 impl Audio {
     /// `source` and `sink` are PipeWire node names (no sink: the default);
-    /// on Windows, endpoint names or ids (`input_names`). `buffer_ms` is
+    /// on Windows, endpoint names or ids (`inputs`). `buffer_ms` is
     /// LAT_MS.
     pub fn start(source: &str, sink: Option<&str>, delay_ms: u32, buffer_ms: u32) -> Result<Self, String> {
         let delay_ms = check_delay(delay_ms)?;

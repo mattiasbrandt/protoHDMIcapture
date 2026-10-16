@@ -118,19 +118,33 @@ fn card_audio_input(card: Option<&card::Node>) -> Result<String, String> {
         .ok_or_else(|| "the card has no PipeWire source; set SRC=<name from pactl list short sources>".to_string())
 }
 
-/// The card's own audio input on Windows (#18): the one input whose name
-/// holds the card's (a UVC card's audio endpoint is "Digital Audio
-/// Interface (<card>)"-like); else SRC must name it.
+/// The card's own audio input on Windows (#18): the one input in the
+/// card's container (one physical device), by its endpoint id. Not by name:
+/// Windows called the MS2130 only "USB Video Device" and its audio function
+/// "USB Audio Device" (the #18 VM run); else SRC must name it.
 #[cfg(windows)]
 fn card_audio_input(card: Option<&card::Node>) -> Result<String, String> {
-    let inputs = audio::input_names()?;
-    let set_src = || format!("set SRC to one of: {}", inputs.join(" | "));
+    let inputs: Vec<(String, String, Option<u128>)> =
+        audio::inputs()?.into_iter().map(|i| (i.name, i.id, i.container)).collect();
+    let set_src = || format!("set SRC to one of: {}", inputs.iter().map(|i| i.0.as_str()).collect::<Vec<_>>().join(" | "));
     let card = card.ok_or_else(|| format!("no card to find the audio input of (--test-pattern); {}", set_src()))?;
-    let matching: Vec<&String> = inputs.iter().filter(|n| n.contains(card.card_type.as_str())).collect();
-    match matching.as_slice() {
-        [one] => Ok((*one).clone()),
-        [] => Err(format!("no audio input is named after the card ({}); {}", card.card_type, set_src())),
-        _ => Err(format!("more than one audio input is named after the card ({}); {}", card.card_type, set_src())),
+    let container = capture::mf::container(&card.path)
+        .map_err(|e| format!("the card's audio input cannot be found: {e}; {}", set_src()))?
+        .to_u128();
+    let id = card_input(container, &inputs).map_err(|e| format!("{e} ({}); {}", card.card_type, set_src()))?;
+    eprintln!("audio: the card's input: {}", inputs.iter().find(|i| i.1 == id).map_or(id, |i| i.0.as_str()));
+    Ok(id.to_string())
+}
+
+/// The one input (name, endpoint id, container id) in the card's
+/// container: its id.
+#[cfg(any(windows, test))]
+fn card_input(card: u128, inputs: &[(String, String, Option<u128>)]) -> Result<&str, &'static str> {
+    let mut found = inputs.iter().filter(|i| i.2 == Some(card));
+    match (found.next(), found.next()) {
+        (Some(one), None) => Ok(&one.1),
+        (None, _) => Err("no audio input belongs to the card"),
+        (Some(_), Some(_)) => Err("more than one audio input belongs to the card"),
     }
 }
 
@@ -605,5 +619,28 @@ fn main() -> ExitCode {
             desktop::Notice::Failed(e).send();
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::card_input;
+
+    fn input(name: &str, id: &str, container: Option<u128>) -> (String, String, Option<u128>) {
+        (name.into(), id.into(), container)
+    }
+
+    #[test]
+    fn the_cards_input_is_the_one_in_its_container() {
+        // Names that say nothing of the card, as on Windows (#18).
+        let inputs = [
+            input("Remote Audio", "{0.0.1.00000000}.{a}", None),
+            input("Microphone (USB Audio Device)", "{0.0.1.00000000}.{b}", Some(7)),
+            input("Microphone (Yeti Nano)", "{0.0.1.00000000}.{c}", Some(9)),
+        ];
+        assert_eq!(card_input(7, &inputs), Ok("{0.0.1.00000000}.{b}"));
+        assert_eq!(card_input(8, &inputs), Err("no audio input belongs to the card"));
+        let two = [input("a", "1", Some(7)), input("b", "2", Some(7))];
+        assert_eq!(card_input(7, &two), Err("more than one audio input belongs to the card"));
     }
 }

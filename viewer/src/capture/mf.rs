@@ -31,6 +31,13 @@ use windows::Win32::Media::MediaFoundation::{
     MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFSTARTUP_FULL, MFSampleExtension_DeviceTimestamp, MFShutdown, MFStartup,
     MFVideoFormat_MJPG, MFVideoFormat_YUY2,
 };
+use windows::Win32::Devices::DeviceAndDriverInstallation::{
+    CM_Get_DevNode_PropertyW, CM_Get_Device_Interface_PropertyW, CM_LOCATE_DEVNODE_NORMAL, CM_Locate_DevNodeW, CR_BUFFER_SMALL,
+    CR_SUCCESS,
+};
+use windows::Win32::Devices::Properties::{
+    DEVPKEY_Device_ContainerId, DEVPKEY_Device_InstanceId, DEVPROP_TYPE_GUID, DEVPROP_TYPE_STRING, DEVPROPTYPE,
+};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
 use windows::core::{GUID, HRESULT, HSTRING, PCWSTR, PWSTR, Ref, implement};
 
@@ -151,6 +158,49 @@ fn link(node: &Path) -> Result<String, String> {
             found.iter().map(|n| n.path.display().to_string()).collect::<Vec<_>>().join(" | ")
         )),
     }
+}
+
+/// The container id of the device behind `node` (a symbolic link, or a
+/// friendly name as DEV may hold): one per physical device, shared by its
+/// functions, so the card's audio endpoint carries the same (#18).
+pub fn container(node: &Path) -> Result<GUID, String> {
+    let link = HSTRING::from(link(node)?);
+    let instance = interface_instance(&link)?;
+    let mut devnode = 0u32;
+    // Safety: an out-pointer and a NUL-terminated instance id.
+    let r = unsafe { CM_Locate_DevNodeW(&mut devnode, PCWSTR(instance.as_ptr()), CM_LOCATE_DEVNODE_NORMAL) };
+    if r != CR_SUCCESS {
+        return Err(format!("the capture device's node: CONFIGRET {}", r.0));
+    }
+    let (mut kind, mut guid) = (DEVPROPTYPE::default(), GUID::zeroed());
+    let mut size = size_of::<GUID>() as u32;
+    // Safety: the buffer is a GUID, and `size` says so.
+    let r = unsafe {
+        CM_Get_DevNode_PropertyW(devnode, &DEVPKEY_Device_ContainerId, &mut kind, Some((&raw mut guid).cast()), &mut size, 0)
+    };
+    if r != CR_SUCCESS || kind != DEVPROP_TYPE_GUID {
+        return Err(format!("the capture device's container id: CONFIGRET {}", r.0));
+    }
+    Ok(guid)
+}
+
+/// The device instance id of the interface `link`, NUL-terminated.
+fn interface_instance(link: &HSTRING) -> Result<Vec<u16>, String> {
+    let (mut kind, mut size) = (DEVPROPTYPE::default(), 0u32);
+    // Safety: no buffer; asks only for the size.
+    let r = unsafe { CM_Get_Device_Interface_PropertyW(link, &DEVPKEY_Device_InstanceId, &mut kind, None, &mut size, 0) };
+    if r != CR_BUFFER_SMALL {
+        return Err(format!("the capture device's instance id: CONFIGRET {}", r.0));
+    }
+    let mut buf = vec![0u16; size.div_ceil(2) as usize];
+    // Safety: `buf` holds `size` bytes.
+    let r = unsafe {
+        CM_Get_Device_Interface_PropertyW(link, &DEVPKEY_Device_InstanceId, &mut kind, Some(buf.as_mut_ptr().cast()), &mut size, 0)
+    };
+    if r != CR_SUCCESS || kind != DEVPROP_TYPE_STRING {
+        return Err(format!("the capture device's instance id: CONFIGRET {}", r.0));
+    }
+    Ok(buf)
 }
 
 fn subtype(p: Pixels) -> (GUID, &'static str) {
