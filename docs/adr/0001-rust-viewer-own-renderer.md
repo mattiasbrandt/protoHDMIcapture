@@ -10,7 +10,8 @@ inside the Rust window as equally fast: kernel timestamp -> presented median
 against 69.0 ms for today's view.sh with mpv (`docs/research/rust-viewer-poc.md`).
 With libmpv, mpv reads the capture card itself, so the viewer would give up
 its own capture loop: the capture-gap count, "no signal" after 1 s of no
-frames, and a quit that never waits on a frame, the loop that removed the
+frames (5 s and 2 s since `0217d89`, `viewer/src/capture/policy.rs`), and
+a quit that never waits on a frame, the loop that removed the
 no-frames quit hang. On Windows that capture would be FFmpeg's DirectShow
 rather than the Media Foundation path #9 plans. We keep our own capture and
 renderer, and write mpv's share ourselves.

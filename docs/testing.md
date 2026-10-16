@@ -1,6 +1,8 @@
 # Verifying a change
 
-`tools/check` (also the pre-commit hook) plus real runs against the card.
+`tools/check` (also the pre-commit hook, which checks the staged tree:
+with unstaged or untracked changes, a copy in `.git/precommit-tree`) plus
+real runs against the card.
 `tools/check` includes `tools/harness/`: hardware-free checks of the
 functions behind past defects. Fixing one that a stand-in can reach, add a
 harness there (`lib.sh` lifts functions out of view.sh and lib/setup.sh,

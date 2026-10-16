@@ -81,7 +81,8 @@ _Avoid_: latency, offset, A/V delay
 **Setting**:
 A named value that shapes a run, such as the levels, the audio sync or the
 capture card pin; taken from the environment, else the saved settings, else
-its default.
+its default (started from the menu, the Rust viewer's menu default sits
+before the default: `REFRESH=match`).
 _Avoid_: knob, key, option
 
 **Saved settings**:
@@ -95,6 +96,12 @@ unless it is saved.
 _Avoid_: temporary setting, override
 
 **Dashboard**:
-The diagnostics view in its own terminal: frame rates, drops, CPU, audio
-xruns and warnings. Never part of the overlay.
+The diagnostics view in its own terminal: frame rates, drops, repeated
+refreshes, latency, CPU, the audio's delay, underruns and xruns, the
+monitors, and recent events. Never part of the overlay.
 _Avoid_: debug window, stats
+
+**Repeated refresh**:
+A monitor refresh that showed the previous card frame again because no new
+one was ready: a dropped or late frame, seen as judder.
+_Avoid_: stutter, frame skip

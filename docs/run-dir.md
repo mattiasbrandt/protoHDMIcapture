@@ -1,7 +1,8 @@
 # Run directory
 
 Every process of a session talks through files in
-`$XDG_RUNTIME_DIR/protohdmicapture/` (cleared at logout). This table is the
+`$XDG_RUNTIME_DIR/protohdmicapture/` (cleared at logout; the Rust viewer on
+Windows uses `%LOCALAPPDATA%\protohdmicapture`). This table is the
 contract; change a writer or a reader, update the row.
 
 | File | Written by | Read by | Meaning |
@@ -14,7 +15,7 @@ contract; change a writer or a reader, update the row.
 | `audio.failed` | `view.sh` `audio_failed`; removed by the next `start_audio` and, by the audio lock holder, at the session's end | mpv script (the overlay's Audio line, the sync confirmation), dashboard | the loopback is not running: it exited, found no source, or linked to another source than the card's; one line, the reason (view.sh only; the Rust viewer keeps this in-process, `viewer/src/audio.rs` `Loopback`, #29) |
 | `audio.request` | mpv script (overlay's ctrl/alt −/+), written as `.tmp` and renamed, then USR1 to `view.sh` (its parent, PID passed as a script option and checked against mpv's own parent first) | `view.sh` `apply_sync_request`, which claims it by renaming to `.claimed`, then removes it | the wanted `DELAY`; `view.sh` restarts its own loopback with it (view.sh only; the Rust viewer keeps this in-process, `viewer/src/audio.rs` `Loopback`, #29) |
 | `audio.ctl.lock` | `lib/audio.sh` (flock, held while one control runs) | `view.sh --audio`, `audio_state_apply` | one mute/volume change or restore at a time (view.sh only; the Rust viewer keeps this in-process, `viewer/src/audio.rs` `Loopback`, #29) |
-| `audio.state` | `view.sh --audio` (overlay's m, 9, 0); cleared by `take_audio_lock` at a session's start | `start_audio` (`audio_state_apply`) | the session's loopback `VOLUME` and `MUTE`, re-applied to a restarted loopback; written via `audio.state.tmp` and renamed (view.sh only; the Rust viewer keeps this in-process, `viewer/src/audio.rs` `Loopback`, #29) |
+| `audio.state` | `view.sh --audio` (overlay's m, 9, 0), written as `.tmp` and renamed; cleared by `take_audio_lock` at a session's start | `start_audio` (`audio_state_apply`) | the session's loopback `VOLUME` and `MUTE`, re-applied to a restarted loopback; written via `audio.state.tmp` and renamed (view.sh only; the Rust viewer keeps this in-process, `viewer/src/audio.rs` `Loopback`, #29) |
 | `backend`, `ipc.path` | `view.sh` `run_player`; removed in its EXIT trap (left by a killed session) | dashboard | which player; mpv IPC socket (absent for gst/ffplay) |
 | `refresh.restore` | `desktop_refresh_match` (hyprland), before it switches; removed by `desktop_refresh_restore`; the Rust viewer's hyprland adapter likewise (`viewer/src/desktop.rs`) | `view.sh` at start, with the video lock held (`desktop_refresh_recover`); the Rust viewer the same way, and its dashboard's Display section (which monitor was switched, and to what) | `monitor\|rate set\|original rate\|restore command`: a switch a killed session never undid; restored only if the monitor is still at the rate set. Removed only once settled (restored, or changed by hand); while it stands, `REFRESH=match` does not switch |
 | `window.mode`, `window.size` | `view.sh` `run_player`, `--place-window`; removed in its EXIT trap (left by a killed session) | `--place-window` | current `WINDOW` and `WINDOW_SIZE` for the f key |

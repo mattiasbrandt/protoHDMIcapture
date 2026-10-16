@@ -36,7 +36,8 @@ hobby viewer, plain commits on `main`, push only when told.
 
 1. **One worktree per ticket, with the tool:** `tools/epic-worktree <issue> <slug>`.
    It branches off `main`, checks out under `.claude/worktrees/`, copies
-   `viewer/target` by reflink, and prints the path. The branch stays local:
+   `viewer/target` by reflink (a plain copy where there is none), and prints
+   the path. The branch stays local:
    `gh issue develop` would create it on GitHub, which is a push.
 2. **Render each brief from [worker-brief.md](worker-brief.md)**, filling its
    placeholders; the ticket-specific knowledge stays in the ticket.

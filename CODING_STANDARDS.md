@@ -11,7 +11,8 @@ Rules for reviewing a change to this repo. Mechanical ones are enforced by
    ownership (its parent is your child) before signalling; a PID read from
    the shared run directory may belong to another session. See
    [`docs/run-dir.md`](docs/run-dir.md). One exception: an orphan a killed
-   session left running (`view.sh` `kill_orphan`), signalled only while
+   session left running (`view.sh` `kill_orphan`, and the Rust viewer's
+   in `viewer/src/session.rs`), signalled only while
    holding the lock its session held, and only if it is the user's own and
    its command line is ours.
 3. **A setting whose empty value means something carries the `empty` flag**
@@ -20,7 +21,8 @@ Rules for reviewing a change to this repo. Mechanical ones are enforced by
    default. Outside the settings, the same rule: `${X-default}` when empty
    means something, `${X:-default}` only when it should mean the default.
 4. **Cleanup reaches every path.** Anything a session starts (player,
-   loopback, refresh switch, preview feed) is undone from its EXIT trap, and
+   loopback, refresh switch, preview feed) is undone from its EXIT trap
+   (the Rust viewer: `Drop`), and
    a background job is stopped explicitly: it ignores SIGINT.
 5. **A lock stays with the script that holds it.** `exec {fd}>` is inherited
    by every child, so each child closes the script's lock fds first:

@@ -44,7 +44,8 @@ viewer/target/release/protohdmicapture
 ```
 
 `d` opens the dashboard with `xdg-terminal-exec`, else `$TERMINAL`, else
-`x-terminal-emulator`.
+`x-terminal-emulator`; on Hyprland it goes to another monitor than the
+viewer's. With one open, `d` raises it.
 
 ## License
 
