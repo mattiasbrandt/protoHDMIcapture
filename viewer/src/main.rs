@@ -507,10 +507,10 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
         Ok(server) => {
             feed.set_dashboard(server);
             if debug_window {
-                let before = opts.desktop.dashboards();
+                let before = opts.desktop.dashboards().map_err(|e| eprintln!("warning: dashboard: cannot list the windows ({e}); it opens where the desktop puts it"));
                 match dashboard::open(None) {
                     // Moved off the window's monitor once the window places.
-                    Ok(()) => opts.dashboard = Some(before),
+                    Ok(()) => opts.dashboard = before.ok(),
                     Err(e) => eprintln!("warning: DEBUG=window: {e}"),
                 }
             }

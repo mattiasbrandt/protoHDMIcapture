@@ -81,10 +81,10 @@ trusting it. Below: the traps that produce false results on real runs.
   back to 100 % before finishing.
 - **The menu path**: `gtk-launch protohdmicapture`. A stand-in
   `xdg-terminal-exec` first on `PATH` can run the wizard with scripted answers.
-  The installed entry runs `launch.sh` (view.sh); the Rust viewer's
-  `--menu` is reached the way a menu starts it:
-  `setsid protohdmicapture --menu </dev/null >log 2>&1 &` (no terminal, so
-  it notifies).
+  The repo's own entry (`desktop/`, the one installed here) runs `launch.sh`
+  (view.sh); packaging's runs `protohdmicapture --menu`. Reach that path the
+  way a menu starts it: `setsid protohdmicapture --menu </dev/null >log 2>&1 &`
+  (no terminal, so it notifies).
 - **A new window takes the fullscreen** of a fullscreen viewer on its
   workspace (Hyprland): any terminal opened there hides the feed, and a
   hidden window presents nothing, which reads as a viewer bug.

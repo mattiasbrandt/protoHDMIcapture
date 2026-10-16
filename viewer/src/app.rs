@@ -52,6 +52,9 @@ const PACE_TIMEOUT: Duration = Duration::from_millis(100);
 /// minutes for 3.5 ms more latency (MS2130, 2026-10-16, decided with the
 /// user).
 const HOLD: Duration = Duration::from_millis(5);
+/// How long a new dashboard has to map (`Desktop::move_dashboard`'s wait):
+/// d meanwhile starts no second one.
+const DASHBOARD_MAPS: Duration = Duration::from_secs(3);
 /// How often the device is polled while a screenshot comes back.
 const READBACK_POLL: Duration = Duration::from_millis(10);
 
@@ -289,6 +292,8 @@ struct App {
     repaint: bool,
     /// A card frame came on this wake (`about_to_wait` sends it).
     arrived: bool,
+    /// When d last started a dashboard (`DASHBOARD_MAPS`).
+    dashboard_opened: Option<Instant>,
     /// LEVELS or a colour value changed: convert the last frame again on a
     /// repaint, so a frozen feed shows it too.
     reconvert: bool,
@@ -510,6 +515,7 @@ impl Host for Winit {
             notify,
             repaint: false,
             arrived: false,
+            dashboard_opened: None,
             reconvert: false,
             deadline: None,
             placer: None,
@@ -995,9 +1001,21 @@ impl App {
     /// d: the dashboard in a terminal of its own (#16).
     fn open_dashboard(&mut self) {
         let now = Instant::now();
-        // One dashboard: d again raises it.
-        let before = self.opts.desktop.dashboards();
-        if let Some(open) = before.first()
+        // One dashboard: d again raises it, or waits for the one opening
+        // (not mapped yet, so not listed).
+        if self.dashboard_opened.is_some_and(|t| now.duration_since(t) < DASHBOARD_MAPS) {
+            self.overlay.message("The debug dashboard is opening", Duration::from_millis(1500), now);
+            self.repaint = true;
+            return;
+        }
+        let before = match self.opts.desktop.dashboards() {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("warning: dashboard: cannot list the windows ({e}); it opens where the desktop puts it");
+                None
+            }
+        };
+        if let Some(open) = before.as_ref().and_then(|b| b.first())
             && self.opts.desktop.focus_window(open)
         {
             self.overlay.message("The debug dashboard is open", Duration::from_millis(1500), now);
@@ -1007,7 +1025,10 @@ impl App {
         match crate::dashboard::open(Some(self.notify.clone())) {
             Ok(()) => {
                 self.overlay.message("Opening the debug dashboard", Duration::from_millis(1500), now);
-                self.place_window_with(Some(before));
+                self.dashboard_opened = Some(now);
+                if before.is_some() {
+                    self.place_window_with(before);
+                }
             }
             Err(e) => {
                 eprintln!("warning: {e}");
@@ -1073,12 +1094,21 @@ impl App {
             };
             thread::spawn(move || {
                 let pid = std::process::id();
+                // Dashboards moved already: never "new" again.
+                let mut moved: Vec<String> = Vec::new();
                 while let Ok(mut job) = rx.recv() {
                     while let Ok(newer) = rx.try_recv() {
                         job = job.then(newer);
                     }
                     if let Some(before) = job.dashboard.take() {
-                        say(desktop.move_dashboard(pid, &before));
+                        let skip: Vec<String> = before.into_iter().chain(moved.iter().cloned()).collect();
+                        match desktop.move_dashboard(pid, &skip) {
+                            Ok((address, said)) => {
+                                eprintln!("{said}");
+                                moved.push(address);
+                            }
+                            Err(m) => eprintln!("warning: {m}"),
+                        }
                         // f pressed while it mapped: the latest mode.
                         while let Ok(newer) = rx.try_recv() {
                             job = job.then(newer);
@@ -1598,6 +1628,7 @@ mod tests {
             notify: Arc::new(|_| {}),
             repaint: false,
             arrived: false,
+            dashboard_opened: None,
             reconvert: false,
             deadline: None,
             placer: None,

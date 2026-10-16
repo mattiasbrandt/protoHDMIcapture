@@ -51,11 +51,11 @@ impl Desktop {
     }
 
     /// The dashboard windows open now (their addresses); none where this
-    /// desktop cannot tell.
-    pub fn dashboards(&self) -> Vec<String> {
+    /// desktop cannot tell. Err: the window list could not be read.
+    pub fn dashboards(&self) -> Result<Vec<String>, String> {
         match self {
-            Self::Hyprland(h) => h.json("clients").map(|c| dashboard_windows(&c)).unwrap_or_default(),
-            Self::Generic => Vec::new(),
+            Self::Hyprland(h) => h.json_or_why("clients").map(|c| dashboard_windows(&c)),
+            Self::Generic => Ok(Vec::new()),
         }
     }
 
@@ -67,15 +67,16 @@ impl Desktop {
         }
     }
 
-    /// The dashboard window that was not there `before` it was started,
-    /// off the viewer's (`pid`) monitor: a new window takes over the
-    /// fullscreen on its workspace, which hid the feed behind it. Blocks:
-    /// up to 3 s for it to map. The viewer's own mode is the caller's
-    /// next `place_window`.
-    pub fn move_dashboard(&self, pid: u32, before: &[String]) -> Report {
+    /// The dashboard window not among `skip` (those there before it was
+    /// started, and those already moved), off the viewer's (`pid`) monitor:
+    /// a new window takes over the fullscreen on its workspace, which hid
+    /// the feed behind it. Blocks: up to 3 s for it to map. Ok: its address
+    /// and what was done. The viewer's own mode is the caller's next
+    /// `place_window`.
+    pub fn move_dashboard(&self, pid: u32, skip: &[String]) -> Result<(String, String), String> {
         match self {
-            Self::Hyprland(h) => h.move_dashboard(pid, before),
-            Self::Generic => Ok("dashboard: left where the desktop put it".into()),
+            Self::Hyprland(h) => h.move_dashboard(pid, skip),
+            Self::Generic => Ok((String::new(), "dashboard: left where the desktop put it".into())),
         }
     }
 
@@ -296,11 +297,11 @@ impl Hyprland {
         Ok(said)
     }
 
-    fn move_dashboard(&self, pid: u32, before: &[String]) -> Report {
+    fn move_dashboard(&self, pid: u32, skip: &[String]) -> Result<(String, String), String> {
         let mut tries = 0;
         let (clients, address) = loop {
             if let Some(c) = self.json("clients")
-                && let Some(a) = dashboard_windows(&c).into_iter().find(|a| !before.contains(a))
+                && let Some(a) = dashboard_windows(&c).into_iter().find(|a| !skip.contains(a))
             {
                 break (c, a);
             }
@@ -314,7 +315,7 @@ impl Hyprland {
         let monitors = self.json_or_why("monitors")?;
         let dispatch = |l: String| self.dispatch(&l);
         dispatch(format!("hl.dsp.window.fullscreen({{ mode = \"fullscreen\", action = \"unset\", window = \"{sel}\" }})"));
-        Ok(match other_workspace(&monitors, window_monitor(&clients, pid)) {
+        let said = match other_workspace(&monitors, window_monitor(&clients, pid)) {
             Some((name, ws)) => {
                 dispatch(format!("hl.dsp.window.move({{ workspace = \"{ws}\", window = \"{sel}\" }})"));
                 format!("dashboard: on {name}")
@@ -323,7 +324,8 @@ impl Hyprland {
                 dispatch(format!("hl.dsp.window.float({{ action = \"enable\", window = \"{sel}\" }})"));
                 "dashboard: floating over the feed (one monitor)".to_string()
             }
-        })
+        };
+        Ok((address, said))
     }
 
     fn refresh_match(&self, fps: f64, on: Option<&str>, record: &Path) -> (Option<String>, Report) {
