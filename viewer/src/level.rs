@@ -17,6 +17,9 @@ pub enum LevelChange {
     /// Percent points, the result clamped to 0..100 as lib/audio.sh does
     /// (past 100 % the loopback only clips).
     Volume(i32),
+    /// This level: a restarted loopback given the last one's (#29), as
+    /// view.sh's `audio_state_apply`.
+    Set(Level),
 }
 
 impl Level {
@@ -24,6 +27,7 @@ impl Level {
         match change {
             LevelChange::Mute => Self { mute: !self.mute, ..self },
             LevelChange::Volume(by) => Self { volume: (self.volume as i32 + by).clamp(0, 100) as u32, ..self },
+            LevelChange::Set(level) => level,
         }
     }
 }

@@ -10,8 +10,14 @@
 //! drops a block: the output plays faster or slower (linear interpolation),
 //! in proportion to how far the fill is from the target and at most
 //! `CATCH_UP`, until it gets there.
+//!
+//! A loopback whose stream goes away mid-feed (the card's audio unplugged,
+//! the node removed) is dead: said once, and the next sync or volume key
+//! starts a new one (`Loopback`, #29), as view.sh's sync keys do.
 
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -73,7 +79,20 @@ pub struct Counters {
     /// Set while the streams are torn down, which PipeWire reports as a
     /// disconnect.
     closing: AtomicBool,
+    /// Why the loopback stopped mid-feed, once a stream reported itself
+    /// gone (#29).
+    dead: Mutex<Option<String>>,
 }
+
+impl Counters {
+    /// Why the loopback stopped mid-feed, if it did.
+    pub fn dead(&self) -> Option<String> {
+        self.dead.lock().expect("the death's lock is never poisoned").clone()
+    }
+}
+
+/// Where a message for the window goes, once it runs (`Controls::set_notify`).
+type NotifySlot = Arc<Mutex<Option<Notify>>>;
 
 struct Ring {
     frames: VecDeque<Frame>,
@@ -90,6 +109,7 @@ pub struct Audio {
     output: String,
     buffer_frames: u32,
     pub counters: Arc<Counters>,
+    notify: NotifySlot,
 }
 
 fn seen(min: &AtomicU32, max: &AtomicU32, n: u32) {
@@ -97,18 +117,43 @@ fn seen(min: &AtomicU32, max: &AtomicU32, n: u32) {
     max.fetch_max(n, Ordering::Relaxed);
 }
 
-fn on_error(counters: &Arc<Counters>, side: &'static str) -> impl FnMut(cpal::Error) + Send + 'static {
-    let counters = counters.clone();
+fn on_error(counters: &Arc<Counters>, notify: &NotifySlot, side: &'static str) -> impl FnMut(cpal::Error) + Send + 'static {
+    let (counters, notify) = (counters.clone(), notify.clone());
     move |e| {
         if counters.closing.load(Ordering::Relaxed) {
             return;
         }
-        if e.kind() == ErrorKind::Xrun {
-            counters.xruns.fetch_add(1, Ordering::Relaxed);
-        } else {
-            counters.other_errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!("audio {side}: {e}");
+        match e.kind() {
+            ErrorKind::Xrun => {
+                counters.xruns.fetch_add(1, Ordering::Relaxed);
+            }
+            // The stream is gone: cpal reports PipeWire's stream state
+            // going Unconnected or Error this way (host/pipewire/stream.rs
+            // `state_changed`), and WASAPI's device removal and invalidated
+            // resources.
+            ErrorKind::DeviceNotAvailable | ErrorKind::StreamInvalidated => died(&counters, &notify, format!("{side}: {e}")),
+            _ => {
+                counters.other_errors.fetch_add(1, Ordering::Relaxed);
+                eprintln!("audio {side}: {e}");
+            }
         }
+    }
+}
+
+/// The loopback stopped mid-feed (#29): said once (the other stream goes
+/// too), in the terminal and in the window, as view.sh's `audio_failed`.
+fn died(counters: &Counters, notify: &NotifySlot, why: String) {
+    {
+        let mut dead = counters.dead.lock().expect("the death's lock is never poisoned");
+        if dead.is_some() {
+            return;
+        }
+        *dead = Some(why.clone());
+    }
+    eprintln!("warning: the audio loopback stopped mid-feed: {why}");
+    eprintln!("warning: the feed plays on without sound; ctrl -/+, m, 9 or 0 start the loopback again");
+    if let Some(notify) = notify.lock().expect("the notify lock is never poisoned").as_ref() {
+        notify(Some((format!("Audio stopped ({why}): ctrl -/+ or m starts it again"), Duration::from_secs(5))));
     }
 }
 
@@ -223,6 +268,7 @@ impl Audio {
             ..Default::default()
         });
         let ring = Arc::new(Mutex::new(Ring { frames: VecDeque::with_capacity(ring_frames(buffer_frames)), pos: 0.0, primed: false }));
+        let notify = NotifySlot::default();
 
         let input = {
             let ring = ring.clone();
@@ -240,7 +286,7 @@ impl Audio {
                         let excess = r.frames.len().saturating_sub(ring_frames(buffer_frames));
                         r.frames.drain(..excess);
                     },
-                    on_error(&counters, "input"),
+                    on_error(&counters, &notify, "input"),
                     None,
                 )
                 .map_err(|e| format!("input stream on {in_name}: {e}"))?
@@ -292,7 +338,7 @@ impl Audio {
                         r.frames.drain(..used);
                         r.pos = pos - used as f64;
                     },
-                    on_error(&counters, "output"),
+                    on_error(&counters, &notify, "output"),
                     None,
                 )
                 .map_err(|e| format!("output stream on {out_name}: {e}"))?
@@ -304,7 +350,7 @@ impl Audio {
         #[cfg(target_os = "linux")]
         verify_linked(source)?;
         output.play().map_err(|e| format!("output play: {e}"))?;
-        Ok(Self { _input: input, _output: output, input: in_name, output: out_name, buffer_frames, counters })
+        Ok(Self { _input: input, _output: output, input: in_name, output: out_name, buffer_frames, counters, notify })
     }
 
     pub fn describe(&self) -> String {
@@ -349,46 +395,7 @@ impl Audio {
 
     /// The live keys' handle: sync and the output stream's level.
     pub fn controls(&self) -> Controls {
-        let (tx, rx) = mpsc::channel::<Option<LevelChange>>();
-        let level: Arc<Mutex<Option<Result<Level, String>>>> = Arc::default();
-        let notify: Arc<Mutex<Option<Notify>>> = Arc::default();
-        let (l, n) = (level.clone(), notify.clone());
-        // PipeWire round trips off the window's thread, one change at a
-        // time (lib/audio.sh serialises them with a lock); the thread ends
-        // with the last sender.
-        thread::spawn(move || {
-            for change in rx {
-                // The first read can come before PipeWire lists the new
-                // stream: a second's worth of retries.
-                let mut r = output_level(change);
-                for _ in 0..10 {
-                    if change.is_some() || r.is_ok() {
-                        break;
-                    }
-                    thread::sleep(Duration::from_millis(100));
-                    r = output_level(change);
-                }
-                // The messages the mpv script shows for m, 9 and 0.
-                let message = match &r {
-                    Ok(v) if change.is_some() => Some((
-                        if v.mute { "Audio muted".to_string() } else { format!("Volume {}%", v.volume) },
-                        Duration::from_millis(1500),
-                    )),
-                    Ok(_) => None,
-                    Err(e) => {
-                        eprintln!("audio level: {e}");
-                        Some((format!("Audio: {e}"), Duration::from_secs(3)))
-                    }
-                };
-                *l.lock().expect("the level's lock is never poisoned") = Some(r);
-                if let Some(notify) = n.lock().expect("the notify lock is never poisoned").as_ref() {
-                    notify(message);
-                }
-            }
-        });
-        // What WirePlumber restored for the stream, for the panel.
-        let _ = tx.send(None);
-        Controls { counters: self.counters.clone(), tx, level, notify }
+        Controls::new(self.counters.clone(), self.notify.clone(), Arc::new(output_level))
     }
 
     /// The ring's fill as a delay.
@@ -409,6 +416,13 @@ impl Audio {
     }
 }
 
+/// The last level read or set, or why it could not be.
+pub type LevelSlot = Arc<Mutex<Option<Result<Level, String>>>>;
+
+/// Reads (None) or changes the output stream's level: `output_level`, or
+/// a stand-in in tests.
+type LevelFn = Arc<dyn Fn(Option<LevelChange>) -> Result<Level, String> + Send + Sync>;
+
 /// The audio keys' side of the audio: the delay target, read by the
 /// output callback (a change plays faster or slower until the ring gets
 /// there, never a restart), and the output stream's level.
@@ -416,12 +430,66 @@ pub struct Controls {
     counters: Arc<Counters>,
     tx: mpsc::Sender<Option<LevelChange>>,
     /// The last level read or set, or why it could not be.
-    pub level: Arc<Mutex<Option<Result<Level, String>>>>,
-    /// Told when the level changes (the window, once it runs).
-    notify: Arc<Mutex<Option<Notify>>>,
+    pub level: LevelSlot,
+    /// Told when the level changes, or the loopback dies (the window, once
+    /// it runs).
+    notify: NotifySlot,
 }
 
 impl Controls {
+    /// The keys' handle on a loopback's numbers; the level is read and set
+    /// through `level`, on a thread of its own.
+    fn new(counters: Arc<Counters>, notify: NotifySlot, level_fn: LevelFn) -> Self {
+        let (tx, rx) = mpsc::channel::<Option<LevelChange>>();
+        let level = LevelSlot::default();
+        let (l, n) = (level.clone(), notify.clone());
+        // PipeWire round trips off the window's thread, one change at a
+        // time (lib/audio.sh serialises them with a lock); the thread ends
+        // with the last sender.
+        thread::spawn(move || {
+            for change in rx {
+                // The first read, and a restarted loopback's level, can come
+                // before PipeWire lists the new stream: a second's worth of
+                // retries. A key's change is not repeated.
+                let retries = matches!(change, None | Some(LevelChange::Set(_)));
+                let mut r = level_fn(change);
+                for _ in 0..10 {
+                    if !retries || r.is_ok() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                    r = level_fn(change);
+                }
+                // The messages the mpv script shows for m, 9 and 0.
+                let message = match &r {
+                    Ok(v) if matches!(change, Some(LevelChange::Mute | LevelChange::Volume(_))) => Some((
+                        if v.mute { "Audio muted".to_string() } else { format!("Volume {}%", v.volume) },
+                        Duration::from_millis(1500),
+                    )),
+                    Ok(_) => None,
+                    Err(e) => {
+                        eprintln!("audio level: {e}");
+                        Some((format!("Audio: {e}"), Duration::from_secs(3)))
+                    }
+                };
+                *l.lock().expect("the level's lock is never poisoned") = Some(r);
+                if let Some(notify) = n.lock().expect("the notify lock is never poisoned").as_ref() {
+                    notify(message);
+                }
+            }
+        });
+        // What WirePlumber restored for the stream, for the panel. The
+        // thread holds the receiver until this handle goes, so the send
+        // cannot fail.
+        tx.send(None).expect("the level thread runs while its sender lives");
+        Controls { counters, tx, level, notify }
+    }
+
+    /// Why the loopback stopped mid-feed, if it did (#29).
+    pub fn dead(&self) -> Option<String> {
+        self.counters.dead()
+    }
+
     pub fn delay_ms(&self) -> u32 {
         self.counters.target_ms.load(Ordering::Relaxed)
     }
@@ -443,14 +511,256 @@ impl Controls {
         self.level.lock().expect("the level's lock is never poisoned").clone()
     }
 
-    /// m, 9 and 0: done on the controls' thread.
+    /// m, 9 and 0, and a restarted loopback's level: done on the
+    /// controls' thread, in the order asked.
     pub fn change_level(&self, change: LevelChange) {
-        let _ = self.tx.send(Some(change));
+        // The thread holds the receiver while this handle lives.
+        self.tx.send(Some(change)).expect("the level thread runs while its sender lives");
     }
 }
 
-fn nudged(ms: u32, by_ms: i32) -> u32 {
+/// One running loopback, as `Loopback` holds it (#29): `Audio` on the
+/// platform's host, a stand-in in tests.
+pub trait Running {
+    fn controls(&self) -> Controls;
+    fn counters(&self) -> &Arc<Counters>;
+    /// The source and sink linked, and the buffer asked for in ms.
+    fn link(&self) -> (&str, &str, u32);
+    fn describe(&self) -> String;
+    fn granted(&self) -> String;
+    fn status(&self) -> String;
+}
+
+impl Running for Audio {
+    fn controls(&self) -> Controls {
+        Audio::controls(self)
+    }
+
+    fn counters(&self) -> &Arc<Counters> {
+        &self.counters
+    }
+
+    fn link(&self) -> (&str, &str, u32) {
+        Audio::link(self)
+    }
+
+    fn describe(&self) -> String {
+        Audio::describe(self)
+    }
+
+    fn granted(&self) -> String {
+        Audio::granted(self)
+    }
+
+    fn status(&self) -> String {
+        Audio::status(self)
+    }
+}
+
+/// Starts a loopback at a delay in ms, from the settings (SRC or the card's
+/// own source, SINK, LAT_MS): what a restart repeats.
+pub type Start = Box<dyn Fn(u32) -> Result<Box<dyn Running>, String>>;
+
+struct Shared {
+    start: Start,
+    running: RefCell<Option<Box<dyn Running>>>,
+    /// The delay last asked for: the next start's, while none runs.
+    delay_ms: Cell<u32>,
+    /// The running loopback's level, as its controls last read or set it.
+    level: RefCell<Option<LevelSlot>>,
+    /// The last level known, given to the next loopback (view.sh's
+    /// `audio.state`).
+    last_level: Cell<Option<Level>>,
+    /// The feed ended it: no more starts.
+    stopped: Cell<bool>,
+}
+
+/// The session's audio loopback, AUDIO=loopback (#29): the one running, if
+/// any, and how to start another. The feed owner holds it and stops it in
+/// its order (feed.rs) by dropping it; the window holds a `LoopbackKeys`,
+/// whose keys start a new one when it is not running.
+pub struct Loopback(Rc<Shared>);
+
+/// The window's handle on the session's loopback.
+#[derive(Clone)]
+pub struct LoopbackKeys(Rc<Shared>);
+
+impl Loopback {
+    /// Nothing runs yet: `LoopbackKeys::start` starts it.
+    pub fn new(start: Start, delay_ms: u32) -> Self {
+        Self(Rc::new(Shared {
+            start,
+            running: RefCell::default(),
+            delay_ms: Cell::new(delay_ms),
+            level: RefCell::default(),
+            last_level: Cell::default(),
+            stopped: Cell::new(false),
+        }))
+    }
+
+    pub fn keys(&self) -> LoopbackKeys {
+        LoopbackKeys(self.0.clone())
+    }
+
+    /// The running loopback's buffer sizes and status (`--stats`), or that
+    /// none runs.
+    pub fn summary(&self) -> [String; 2] {
+        match self.0.running.borrow().as_ref() {
+            Some(r) => [r.granted(), r.status()],
+            None => ["not running".into(), "not running".into()],
+        }
+    }
+}
+
+impl Drop for Loopback {
+    fn drop(&mut self) {
+        self.0.stopped.set(true);
+        drop(self.0.running.borrow_mut().take());
+    }
+}
+
+impl LoopbackKeys {
+    /// Starts the loopback at `delay_ms`, the running one stopped first
+    /// (dead or not: one loopback at a time). The new one gets the last
+    /// level known, before any key's change. Err: why it did not start;
+    /// none runs then.
+    pub fn start(&self, delay_ms: u32) -> Result<Controls, String> {
+        let s = &self.0;
+        if s.stopped.get() {
+            return Err("the feed is ending".into());
+        }
+        let delay_ms = check_delay(delay_ms)?;
+        if let Some(slot) = s.level.borrow_mut().take()
+            && let Some(Ok(level)) = slot.lock().expect("the level's lock is never poisoned").clone()
+        {
+            s.last_level.set(Some(level));
+        }
+        drop(s.running.borrow_mut().take());
+        s.delay_ms.set(delay_ms);
+        let running = (s.start)(delay_ms)?;
+        let controls = running.controls();
+        if let Some(level) = s.last_level.get() {
+            controls.change_level(LevelChange::Set(level));
+        }
+        *s.level.borrow_mut() = Some(controls.level.clone());
+        *s.running.borrow_mut() = Some(running);
+        Ok(controls)
+    }
+
+    /// The delay: the running loopback's, else the one last asked for.
+    pub fn delay_ms(&self) -> u32 {
+        match self.0.running.borrow().as_ref() {
+            Some(r) => r.counters().target_ms.load(Ordering::Relaxed),
+            None => self.0.delay_ms.get(),
+        }
+    }
+
+    /// The running loopback's source, sink, buffer in ms and numbers, for
+    /// the dashboard.
+    pub fn link(&self) -> Option<(String, String, u32, Arc<Counters>)> {
+        let running = self.0.running.borrow();
+        let r = running.as_ref()?;
+        let (source, sink, buffer_ms) = r.link();
+        Some((source.into(), sink.into(), buffer_ms, r.counters().clone()))
+    }
+
+    pub fn describe(&self) -> Option<String> {
+        self.0.running.borrow().as_ref().map(|r| r.describe())
+    }
+}
+
+/// A delay moved by `by_ms`, clamped to DELAY's range.
+pub fn nudged(ms: u32, by_ms: i32) -> u32 {
     (i64::from(ms) + i64::from(by_ms)).clamp(0, i64::from(MAX_DELAY_MS)) as u32
+}
+
+/// A stand-in loopback for tests (#29): no PipeWire, a level kept in
+/// memory, a new stream at 100 % unmuted as WirePlumber's default, and a
+/// death on demand.
+#[cfg(test)]
+pub mod fake {
+    use super::*;
+
+    struct Fake {
+        counters: Arc<Counters>,
+        notify: NotifySlot,
+        level: Arc<Mutex<Level>>,
+    }
+
+    impl Running for Fake {
+        fn controls(&self) -> Controls {
+            let level = self.level.clone();
+            let level_fn: LevelFn = Arc::new(move |change| {
+                let mut l = level.lock().unwrap();
+                if let Some(c) = change {
+                    *l = l.changed(c);
+                }
+                Ok(*l)
+            });
+            Controls::new(self.counters.clone(), self.notify.clone(), level_fn)
+        }
+
+        fn counters(&self) -> &Arc<Counters> {
+            &self.counters
+        }
+
+        fn link(&self) -> (&str, &str, u32) {
+            ("card-in", "speakers", 10)
+        }
+
+        fn describe(&self) -> String {
+            "audio: card-in -> speakers".into()
+        }
+
+        fn granted(&self) -> String {
+            "granted: none".into()
+        }
+
+        fn status(&self) -> String {
+            "status: none".into()
+        }
+    }
+
+    /// The delays each start was asked for; set `fail` for the next starts
+    /// to fail with it.
+    #[derive(Clone, Default)]
+    pub struct Script {
+        pub starts: Rc<RefCell<Vec<u32>>>,
+        pub fail: Rc<RefCell<Option<String>>>,
+    }
+
+    pub fn loopback(delay_ms: u32) -> (Loopback, Script) {
+        let script = Script::default();
+        let s = script.clone();
+        let start: Start = Box::new(move |delay_ms| {
+            s.starts.borrow_mut().push(delay_ms);
+            if let Some(e) = s.fail.borrow().clone() {
+                return Err(e);
+            }
+            let counters = Arc::new(Counters { target_ms: AtomicU32::new(delay_ms), ..Default::default() });
+            Ok(Box::new(Fake { counters, notify: NotifySlot::default(), level: Arc::new(Mutex::new(Level { volume: 100, mute: false })) }))
+        });
+        (Loopback::new(start, delay_ms), script)
+    }
+
+    /// The running loopback's stream goes away, as cpal reports it.
+    pub fn kill(keys: &LoopbackKeys) {
+        let (_, _, _, counters) = keys.link().expect("a loopback runs");
+        died(&counters, &NotifySlot::default(), "output: Device disconnected".into());
+    }
+
+    /// The level once the controls' thread has done what was asked: `want`
+    /// within a second, or what it is then.
+    pub fn level_settles(c: &Controls, want: Level) -> Option<Result<Level, String>> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            let now = c.current_level();
+            if now == Some(Ok(want)) || std::time::Instant::now() >= deadline {
+                return now;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -496,6 +806,64 @@ mod tests {
         let back = level(Some(LevelChange::Volume(start.volume as i32 - down.volume as i32))).unwrap();
         assert_eq!(back, start);
         assert_eq!(pactl(), (start.volume, start.mute));
+    }
+
+    #[test]
+    fn a_stream_gone_is_a_dead_loopback_said_once() {
+        let counters = Arc::new(Counters::default());
+        let said: Arc<Mutex<Vec<String>>> = Arc::default();
+        let notify = NotifySlot::default();
+        let s = said.clone();
+        *notify.lock().unwrap() = Some(Arc::new(move |m: Option<(String, Duration)>| s.lock().unwrap().extend(m.map(|m| m.0))));
+        let mut output = on_error(&counters, &notify, "output");
+        let mut input = on_error(&counters, &notify, "input");
+        output(cpal::ErrorKind::Xrun.into());
+        assert_eq!((counters.xruns.load(Ordering::Relaxed), counters.dead()), (1, None), "an xrun is not a death");
+        output(cpal::Error::with_message(ErrorKind::DeviceNotAvailable, "Device disconnected"));
+        input(cpal::Error::with_message(ErrorKind::StreamInvalidated, "error"));
+        assert_eq!(counters.dead().as_deref(), Some("output: Device disconnected"), "the first one says why");
+        assert_eq!(*said.lock().unwrap(), ["Audio stopped (output: Device disconnected): ctrl -/+ or m starts it again"]);
+        // Torn down on purpose: PipeWire reports that as a disconnect too.
+        let closing = Arc::new(Counters::default());
+        closing.closing.store(true, Ordering::Relaxed);
+        on_error(&closing, &notify, "output")(cpal::Error::with_message(ErrorKind::DeviceNotAvailable, "Device disconnected"));
+        assert_eq!(closing.dead(), None);
+    }
+
+    #[test]
+    fn a_new_loopback_gets_the_last_ones_level_and_the_delay_asked_for() {
+        let (loopback, script) = fake::loopback(50);
+        let keys = loopback.keys();
+        let first = keys.start(keys.delay_ms()).unwrap();
+        first.change_level(LevelChange::Volume(-30));
+        first.change_level(LevelChange::Mute);
+        let was = Level { volume: 70, mute: true };
+        assert_eq!(fake::level_settles(&first, was), Some(Ok(was)));
+        fake::kill(&keys);
+        assert!(first.dead().is_some());
+
+        let second = keys.start(60).unwrap();
+        assert_eq!(*script.starts.borrow(), [50, 60]);
+        assert_eq!(keys.delay_ms(), 60);
+        assert_eq!(second.dead(), None, "a new stream, not the dead one");
+        // The new stream starts at 100 %, unmuted, and gets the last level.
+        assert_eq!(fake::level_settles(&second, was), Some(Ok(was)));
+    }
+
+    #[test]
+    fn a_start_that_fails_runs_nothing_and_keeps_the_delay() {
+        let (loopback, script) = fake::loopback(50);
+        let keys = loopback.keys();
+        *script.fail.borrow_mut() = Some("no PipeWire source card-in (SRC)".into());
+        assert_eq!(keys.start(80).err().as_deref(), Some("no PipeWire source card-in (SRC)"));
+        assert!(keys.link().is_none());
+        assert_eq!(keys.delay_ms(), 80, "the next start's");
+        assert!(keys.start(MAX_DELAY_MS + 1).is_err(), "over DELAY's range");
+        // The feed ended it: the keys start nothing more.
+        drop(loopback);
+        *script.fail.borrow_mut() = None;
+        assert_eq!(keys.start(50).err().as_deref(), Some("the feed is ending"));
+        assert_eq!(*script.starts.borrow(), [80]);
     }
 
     #[test]

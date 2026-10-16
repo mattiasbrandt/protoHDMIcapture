@@ -14,7 +14,7 @@
 //! failures. Dropping the owner finishes it, so an early return keeps the
 //! order. The setup wizard's feed windows hold only the session.
 
-use crate::audio::Audio;
+use crate::audio::Loopback;
 use crate::dashboard::Server;
 
 /// The session part: `Session` on Linux; nothing yet on Windows (#18).
@@ -25,7 +25,7 @@ pub type SessionPart = ();
 
 /// What a feed holds besides its window, ended by `finish`. The parts are
 /// type parameters so that tests can record the order.
-pub struct Feed<A = Audio, D = Server, S = SessionPart> {
+pub struct Feed<A = Loopback, D = Server, S = SessionPart> {
     // Not in the finish order, on purpose: `finish` is the one place that
     // states it, and a test fails if the fields' own drop order is relied on.
     session: Option<S>,

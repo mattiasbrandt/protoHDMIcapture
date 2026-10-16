@@ -23,7 +23,7 @@ use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
 use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Fullscreen, Window, WindowId};
 
-use crate::audio::Controls;
+use crate::audio::{Controls, LoopbackKeys};
 use crate::capture::{Format, FrameSource, now_monotonic};
 use crate::desktop::Desktop;
 use crate::gputime::GpuTimer;
@@ -104,9 +104,44 @@ pub struct Options {
 pub enum AudioSetup {
     /// AUDIO is not loopback: its value.
     Off(String),
-    /// The loopback did not start: why.
-    Failed(String),
-    Running(Controls),
+    /// AUDIO=loopback: its controls while it runs, else why it does not
+    /// (it did not start, or stopped mid-feed). The sync and volume keys
+    /// start it again (#29).
+    Loopback { keys: LoopbackKeys, now: Result<Controls, String> },
+}
+
+/// A loopback start's outcome, said where view.sh says it: the terminal,
+/// the dashboard and, for a failure, a desktop notification. The first
+/// start's (main.rs) and every restart's.
+pub fn audio_started(live: &crate::dashboard::Live, keys: &LoopbackKeys, started: Result<Controls, String>) -> Result<Controls, String> {
+    use crate::dashboard::AudioLive;
+    match (&started, keys.link()) {
+        (Ok(_), Some((source, sink, buffer_ms, counters))) => {
+            if let Some(d) = keys.describe() {
+                eprintln!("{d}");
+            }
+            live.set_audio(AudioLive::Running { source, sink, buffer_ms, counters });
+        }
+        (Ok(_), None) => unreachable!("a loopback that started runs"),
+        (Err(e), _) => audio_failed(live, e),
+    }
+    started
+}
+
+/// The loopback is not running (it did not start, or stopped mid-feed):
+/// the feed plays on without sound.
+fn audio_failed(live: &crate::dashboard::Live, why: &str) {
+    eprintln!("warning: no audio: {why}");
+    no_sound(why.to_string());
+    live.set_audio(crate::dashboard::AudioLive::Failed(why.to_string()));
+}
+
+/// The no-sound desktop notification (`desktop::Notice`); a test run
+/// would reach the desktop, so it sends none.
+fn no_sound(why: String) {
+    if !cfg!(test) {
+        crate::desktop::Notice::NoSound(why).send();
+    }
 }
 
 impl WindowMode {
@@ -431,7 +466,7 @@ impl Host for Winit {
                 let _ = p.send_event(UserEvent { window: window_no, what: What::Notice });
             })
         };
-        if let AudioSetup::Running(c) = &opts.audio {
+        if let AudioSetup::Loopback { now: Ok(c), .. } = &opts.audio {
             c.set_notify(notify.clone());
         }
         let start = now_monotonic();
@@ -841,21 +876,91 @@ impl App {
                     eprintln!("screenshot: the last one is still being saved");
                 }
             }
-            // The audio keys act only with AUDIO=loopback running.
+            // The audio keys act only with AUDIO=loopback; with the
+            // loopback not running, they start it again (#29).
             Action::Sync(by) => {
-                let AudioSetup::Running(audio) = &self.opts.audio else { return false };
-                let ms = audio.nudge_delay(by);
+                let AudioSetup::Loopback { keys, now } = &self.opts.audio else { return false };
+                let ms = match now {
+                    Ok(c) if c.dead().is_none() => c.nudge_delay(by),
+                    _ => {
+                        let ms = crate::audio::nudged(keys.delay_ms(), by);
+                        if self.restart_audio(ms).is_none() {
+                            self.repaint = true;
+                            return false;
+                        }
+                        ms
+                    }
+                };
                 self.overlay.message(format!("Audio sync {ms} ms"), Duration::from_millis(1500), Instant::now());
             }
             // Its message comes from the controls' thread (Notify).
             Action::Level(change) => {
-                let AudioSetup::Running(audio) = &self.opts.audio else { return false };
-                audio.change_level(change);
+                let AudioSetup::Loopback { keys, now } = &self.opts.audio else { return false };
+                let controls = match now {
+                    Ok(c) if c.dead().is_none() => c,
+                    _ => {
+                        let delay_ms = keys.delay_ms();
+                        let Some(c) = self.restart_audio(delay_ms) else {
+                            self.repaint = true;
+                            return false;
+                        };
+                        c
+                    }
+                };
+                controls.change_level(change);
             }
             Action::Picture(colour, by) => self.adjust_colour(colour, by),
         }
         self.repaint = true;
         false
+    }
+
+    /// A new loopback at `delay_ms`, in place of one that is not running
+    /// (#29), said in the overlay as view.sh's overlay says it; its
+    /// controls, or None when it did not start.
+    fn restart_audio(&mut self, delay_ms: u32) -> Option<&Controls> {
+        let AudioSetup::Loopback { keys, now } = &mut self.opts.audio else { return None };
+        let started = audio_started(&self.opts.live, keys, keys.start(delay_ms));
+        let message = match &started {
+            Ok(c) => {
+                c.set_notify(self.notify.clone());
+                self.opts.live.event(format!("audio back, sync {delay_ms} ms"));
+                ("Audio back".to_string(), Duration::from_millis(1500))
+            }
+            Err(e) => {
+                self.opts.live.event(format!("audio did not start again: {e}"));
+                (format!("Audio: {e}"), Duration::from_secs(3))
+            }
+        };
+        *now = started;
+        self.overlay.message(message.0, message.1, Instant::now());
+        match &self.opts.audio {
+            AudioSetup::Loopback { now: Ok(c), .. } => Some(c),
+            _ => None,
+        }
+    }
+
+    /// A loopback that stopped mid-feed (its controls say so, and wake the
+    /// window): no longer running, and said in the dashboard and as a
+    /// notification; the overlay's message and the terminal's came from
+    /// the audio's thread (audio.rs `died`).
+    fn audio_check(&mut self) {
+        let AudioSetup::Loopback { now, .. } = &mut self.opts.audio else { return };
+        let Some(why) = now.as_ref().ok().and_then(Controls::dead) else { return };
+        // The terminal has it already, from the audio's own thread.
+        let said = format!("the audio loopback stopped mid-feed ({why})");
+        no_sound(said.clone());
+        self.opts.live.event(said.clone());
+        self.opts.live.set_audio(crate::dashboard::AudioLive::Failed(said));
+        *now = Err(why);
+    }
+
+    /// The loopback runs: its controls.
+    fn loopback(&self) -> Option<&Controls> {
+        match &self.opts.audio {
+            AudioSetup::Loopback { now: Ok(c), .. } => Some(c),
+            _ => None,
+        }
     }
 
     /// d: the dashboard in a terminal of its own (#16).
@@ -932,11 +1037,7 @@ impl App {
     /// The saveable settings' live values, spelled as the settings file
     /// spells them (DELAY in seconds, as the mpv script writes it).
     fn values(&self) -> overlay::Values {
-        let delay = match &self.opts.audio {
-            AudioSetup::Running(a) => Some(a.delay_ms()),
-            _ => None,
-        };
-        self.values_with(delay)
+        self.values_with(self.loopback().map(Controls::delay_ms))
     }
 
     /// `values`, with the loopback's delay in ms while it runs.
@@ -960,7 +1061,7 @@ impl App {
 
     fn saveable(&self) -> Vec<&'static str> {
         let Some(s) = &self.opts.settings else { return Vec::new() };
-        saveable(&s.rows, &self.values(), matches!(self.opts.audio, AudioSetup::Running(_)))
+        saveable(&s.rows, &self.values(), self.loopback().is_some())
     }
 
     /// w: what changed since the start (or the last save), as `view.sh
@@ -968,7 +1069,7 @@ impl App {
     fn save(&mut self) {
         let now = Instant::now();
         let values = self.values();
-        let loopback = matches!(self.opts.audio, AudioSetup::Running(_));
+        let loopback = self.loopback().is_some();
         let changed = overlay::changes(&self.saveable(), &self.baseline, &values, loopback);
         if changed.is_empty() {
             self.overlay.message("Nothing changed since the feed started", Duration::from_secs(2), now);
@@ -1008,7 +1109,7 @@ impl App {
         if !self.overlay.visible(now) {
             return None;
         }
-        let loopback = matches!(self.opts.audio, AudioSetup::Running(_));
+        let loopback = self.loopback().is_some();
         let page = match self.overlay.page {
             None => None,
             Some(Page::Tips) => {
@@ -1027,10 +1128,12 @@ impl App {
                     colour: [p.contrast, p.brightness, p.gamma, p.saturation],
                     audio: match &self.opts.audio {
                         AudioSetup::Off(v) => overlay::Audio::Other(v.clone()),
-                        AudioSetup::Failed(why) => overlay::Audio::Failed(why.clone()),
-                        AudioSetup::Running(a) => {
-                            overlay::Audio::Running { level: a.current_level(), delay_ms: a.delay_ms() }
-                        }
+                        AudioSetup::Loopback { now: Err(why), .. } => overlay::Audio::Failed(why.clone()),
+                        // Dead, before its wake is handled.
+                        AudioSetup::Loopback { now: Ok(a), .. } => match a.dead() {
+                            Some(why) => overlay::Audio::Failed(why),
+                            None => overlay::Audio::Running { level: a.current_level(), delay_ms: a.delay_ms() },
+                        },
                     },
                     tips_name: sources::get(id).map_or_else(|| id.clone(), |s| s.name),
                     changes: &changes,
@@ -1274,6 +1377,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.render()
             }
             What::Notice => {
+                self.audio_check();
                 let now = Instant::now();
                 for (text, for_) in self.notices.lock().expect("the notices' lock is never poisoned").drain(..) {
                     self.overlay.message(text, for_, now);
@@ -1389,6 +1493,8 @@ mod tests {
     use super::*;
     use winit::keyboard::{Key, NamedKey};
 
+    use crate::level::LevelChange;
+
     /// An app with no window, its settings in a temp file.
     fn app_with(config: &str) -> (App, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("phc-app-{}-{:p}", std::process::id(), config));
@@ -1456,6 +1562,86 @@ mod tests {
 
     fn panel(app: &App) -> Vec<String> {
         app.scene_text(Instant::now()).and_then(|t| t.page).expect("the panel is open")
+    }
+
+    /// The app with a stand-in loopback started at 50 ms (#29).
+    /// `config`: a different one per test, as each names its temp dir.
+    fn app_with_loopback(config: &'static str) -> (App, crate::audio::Loopback, crate::audio::fake::Script, std::path::PathBuf) {
+        let (mut app, file) = app_with(config);
+        let (loopback, script) = crate::audio::fake::loopback(50);
+        let keys = loopback.keys();
+        let now = audio_started(&app.opts.live, &keys, keys.start(50));
+        app.opts.audio = AudioSetup::Loopback { keys, now };
+        (app, loopback, script, file)
+    }
+
+    fn keys(app: &App) -> LoopbackKeys {
+        let AudioSetup::Loopback { keys, .. } = &app.opts.audio else { panic!("no loopback") };
+        keys.clone()
+    }
+
+    fn audio_line(app: &mut App) -> String {
+        if app.overlay.page.is_none() {
+            press(app, "Tab");
+        }
+        panel(app)[6].clone()
+    }
+
+    #[test]
+    fn a_dead_loopback_starts_again_on_a_sync_key_at_the_new_delay() {
+        let (mut app, _loopback, script, file) = app_with_loopback("DELAY=0.05\n# sync\n");
+        crate::audio::fake::kill(&keys(&app));
+        // Its wake: no longer running, in the panel and for w.
+        app.audio_check();
+        assert_eq!(audio_line(&mut app), "m 9 0 Audio        not running, see the log: output: Device disconnected");
+        assert!(app.loopback().is_none());
+        assert!(!app.apply(Action::Sync(10)));
+        assert_eq!(*script.starts.borrow(), [50, 60]);
+        assert_eq!(app.loopback().map(Controls::delay_ms), Some(60));
+        assert_eq!(app.overlay.current_message(Instant::now()), Some("Audio sync 60 ms"));
+        audio_line(&mut app);
+        assert_eq!(panel(&app)[7], "^-/^+ Audio sync   60 ms   (alt -/+: 50 ms steps)");
+        // A running one only moves its sync: no restart.
+        assert!(!app.apply(Action::Sync(-10)));
+        assert_eq!(script.starts.borrow().len(), 2);
+        // Dead again, the key before the death's wake: still a restart.
+        crate::audio::fake::kill(&keys(&app));
+        assert!(!app.apply(Action::Sync(10)));
+        assert_eq!(*script.starts.borrow(), [50, 60, 60]);
+        assert!(app.loopback().is_some_and(|c| c.dead().is_none()));
+        std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_dead_loopback_starts_again_on_m_with_its_level_carried_over() {
+        let (mut app, _loopback, script, file) = app_with_loopback("DELAY=0.05\n# m\n");
+        app.loopback().unwrap().change_level(LevelChange::Volume(-30));
+        let was = crate::level::Level { volume: 70, mute: false };
+        assert_eq!(crate::audio::fake::level_settles(app.loopback().unwrap(), was), Some(Ok(was)));
+        crate::audio::fake::kill(&keys(&app));
+        // m before the death's wake is handled: the dead one is not used.
+        assert!(!app.apply(Action::Level(LevelChange::Mute)));
+        assert_eq!(*script.starts.borrow(), [50, 50], "at the delay it had");
+        let want = crate::level::Level { volume: 70, mute: true };
+        assert_eq!(crate::audio::fake::level_settles(app.loopback().unwrap(), want), Some(Ok(want)), "70 % carried over, then muted");
+        std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_restart_that_fails_says_the_new_reason() {
+        let (mut app, _loopback, script, file) = app_with_loopback("DELAY=0.05\n# fails\n");
+        crate::audio::fake::kill(&keys(&app));
+        app.audio_check();
+        *script.fail.borrow_mut() = Some("no PipeWire source card-in (SRC)".into());
+        assert!(!app.apply(Action::Sync(10)));
+        assert_eq!(app.overlay.current_message(Instant::now()), Some("Audio: no PipeWire source card-in (SRC)"));
+        assert_eq!(audio_line(&mut app), "m 9 0 Audio        not running, see the log: no PipeWire source card-in (SRC)");
+        // The next key tries again, at the delay asked for last.
+        *script.fail.borrow_mut() = None;
+        assert!(!app.apply(Action::Level(LevelChange::Volume(5))));
+        assert_eq!(*script.starts.borrow(), [50, 60, 60]);
+        assert!(app.loopback().is_some());
+        std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 
     #[test]

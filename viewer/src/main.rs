@@ -66,27 +66,29 @@ fn environment() {
     }
 }
 
-/// The audio loopback the settings ask for: None for AUDIO=none, Err with
-/// why it could not start. A failed start is reported and the feed goes on
-/// without sound, as in view.sh.
+/// The audio loopback the settings ask for, not started yet: None for
+/// AUDIO=none. Each start (the first, and the keys' restarts, #29) finds
+/// the source again and starts it at the delay asked for; a failed one is
+/// reported and the feed goes on without sound, as in view.sh.
 /// `card`: None with `--test-pattern`, where only SRC can name an input.
-fn audio(s: &Settings, card: Option<&card::Node>) -> Result<Option<audio::Audio>, String> {
+fn audio(s: &Settings, card: Option<&card::Node>) -> Option<audio::Loopback> {
     match s.get("AUDIO") {
-        "none" => return Ok(None),
+        "none" => return None,
         "mpv" => eprintln!("note: AUDIO=mpv means mpv's own audio in view.sh; the Rust viewer uses its loopback"),
         _ => {}
     }
-    let source = match s.get("SRC") {
-        "" => card_audio_input(card)?,
-        src => src.to_string(),
-    };
-    let sink = Some(s.get("SINK")).filter(|v| !v.is_empty());
+    let src = s.get("SRC").to_string();
+    let sink = Some(s.get("SINK").to_string()).filter(|v| !v.is_empty());
     // Validated: DELAY is 0..1 s, LAT_MS 1..1000.
     let delay_ms = (s.get("DELAY").parse::<f64>().unwrap_or(0.05) * 1000.0).round() as u32;
     let buffer_ms = s.get("LAT_MS").parse().unwrap_or(10);
-    let a = audio::Audio::start(&source, sink, delay_ms, buffer_ms)?;
-    eprintln!("{}", a.describe());
-    Ok(Some(a))
+    let card = card.cloned();
+    let start: audio::Start = Box::new(move |delay_ms| {
+        let source = if src.is_empty() { card_audio_input(card.as_ref())? } else { src.clone() };
+        let a = audio::Audio::start(&source, sink.as_deref(), delay_ms, buffer_ms)?;
+        Ok(Box::new(a))
+    });
+    Some(audio::Loopback::new(start, delay_ms))
 }
 
 /// The card's own audio input, found as view.sh finds it: the PipeWire
@@ -435,26 +437,14 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
         }
     }
     match audio(&s, node.as_ref()) {
-        Ok(Some(a)) => {
-            let a = feed.set_audio(a);
-            opts.audio = app::AudioSetup::Running(a.controls());
-            let (source, sink, buffer_ms) = a.link();
-            live.set_audio(dashboard::AudioLive::Running {
-                source: source.into(),
-                sink: sink.into(),
-                buffer_ms,
-                counters: a.counters.clone(),
-            });
+        Some(loopback) => {
+            let keys = feed.set_audio(loopback).keys();
+            let now = app::audio_started(&live, &keys, keys.start(keys.delay_ms()));
+            opts.audio = app::AudioSetup::Loopback { keys, now };
         }
-        Ok(None) => {
+        None => {
             opts.audio = app::AudioSetup::Off("none".into());
             live.set_audio(dashboard::AudioLive::Off("AUDIO=none".into()));
-        }
-        Err(e) => {
-            eprintln!("warning: no audio: {e}");
-            desktop::Notice::NoSound(e.clone()).send();
-            live.set_audio(dashboard::AudioLive::Failed(e.clone()));
-            opts.audio = app::AudioSetup::Failed(e);
         }
     }
     opts.source = s.get("SOURCE").to_string();
@@ -503,8 +493,9 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
     }
     let outcome = app::run(source, opts, quit);
     if let (true, Some(a)) = (stats, feed.audio()) {
-        eprintln!("summary: audio {}", a.granted());
-        eprintln!("summary: audio {}", a.status());
+        for line in a.summary() {
+            eprintln!("summary: audio {line}");
+        }
     }
     feed.finish();
     // Every way the viewer's window ends is the end of the viewer.

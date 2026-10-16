@@ -166,7 +166,8 @@ impl Live {
         *self.audio.lock().expect("the audio's lock is never poisoned") = audio;
     }
 
-    fn event(&self, text: String) {
+    /// A line in the events list, stamped with the run's uptime.
+    pub fn event(&self, text: String) {
         let mut e = self.events.lock().expect("the events' lock is never poisoned");
         if e.len() == EVENTS {
             e.pop_front();

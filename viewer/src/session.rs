@@ -14,10 +14,12 @@
 //! - A player a killed view.sh left running (it keeps the card busy) is
 //!   stopped under the lock, as view.sh's `kill_orphan` does.
 //!
-//! Not taken over (yet): `audio.lock` and its files (the viewer runs its
-//! own loopback; a killed view.sh's orphan loopback is not stopped). The
-//! files only view.sh's dashboard reads are not written: the Rust
-//! viewer's dashboard reads `dashboard.sock` (dashboard.rs).
+//! Not taken over: `audio.lock` and its files. The viewer runs its own
+//! loopback and keeps its state in-process (audio.rs `Loopback`, #29);
+//! `video.lock` already keeps the two viewers apart. A killed view.sh's
+//! orphan loopback is not stopped. The files only view.sh's dashboard
+//! reads are not written: the Rust viewer's dashboard reads
+//! `dashboard.sock` (dashboard.rs).
 
 #[cfg(target_os = "linux")]
 use std::fs::{self, File, OpenOptions};
