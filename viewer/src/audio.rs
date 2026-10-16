@@ -170,6 +170,12 @@ fn died(counters: &Counters, notify: &NotifySlot, why: String) {
 #[cfg(target_os = "linux")]
 const LINK_WAIT: Duration = Duration::from_secs(2);
 
+/// How often `verify_linked` looks: WirePlumber links within a few ms, a
+/// look costs about 2 ms, and a restart from a sync key waits on it in the
+/// window (every 100 ms froze the picture for about 110 ms, 2026-10-16).
+#[cfg(target_os = "linux")]
+const LINK_POLL: Duration = Duration::from_millis(5);
+
 /// Fails unless the source linked into our capture stream is `want`, and
 /// only it, within LINK_WAIT.
 #[cfg(target_os = "linux")]
@@ -186,7 +192,7 @@ fn verify_linked(want: &str) -> Result<(), String> {
         if std::time::Instant::now() >= deadline {
             return Err(format!("the audio input ({want}) was not linked within {} s", LINK_WAIT.as_secs()));
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(LINK_POLL);
     }
 }
 
