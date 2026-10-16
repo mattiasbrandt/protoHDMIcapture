@@ -15,7 +15,7 @@ under and what is known about them. The setup wizard reads the same files.
 
 | Chip | USB id | Link | Best mode | Status | Date | Notes |
 |---|---|---|---|---|---|---|
-| [MacroSilicon MS2109](../capture-cards/ms2109.md) | `534d:2109` | 480 Mbit/s | MJPEG 1280x720 @ 60 | Probed | 2026-10-13 | no source yet; modes and frame rates measured |
+| [MacroSilicon MS2109](../capture-cards/ms2109.md) | `534d:2109` | 480 Mbit/s | MJPEG 1280x720 @ 60 | Tested | 2026-10-16 | PS5: picture and audio at MJPEG 720p60 in the Rust viewer |
 | [MacroSilicon MS2130](../capture-cards/ms2130.md) | `1e4e:7016` | 5000 Mbit/s | YUYV 1920x1080 @ 60 | Tested | 2026-09-06 | PS5: picture, audio and sync at YUYV 1080p60 |
 | [MacroSilicon MS2130](../capture-cards/ms2130.md) | `345f:2130` | 5000 Mbit/s | YUYV 1920x1080 @ 60 | Reported |  | common id for MS2130 boards |
 | [MacroSilicon MS2130](../capture-cards/ms2130.md) | `534d:2130` | 5000 Mbit/s | YUYV 1920x1080 @ 60 | Reported |  | MacroSilicon's own vendor id |
