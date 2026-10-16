@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Process-global state in the Rust viewer (#25): a static item, a
+# thread_local!, or a LazyLock, OnceLock, OnceCell or lazy_static! is
+# shared by every window run in the process, as the dashboard's numbers
+# once were (#21). Each one carries `// process-global: <reason>` on its
+# line or the line above; a marked thread_local! covers the statics inside
+# it. Prints each unmarked one and exits 1.
+# Usage: tools/process-globals [DIR]     (default: viewer/src)
+set -uo pipefail
+cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
+
+dir=${1:-viewer/src}
+[ -d "$dir" ] || { echo "process-globals: no directory $dir" >&2; exit 2; }
+mapfile -t RS < <(find "$dir" -name '*.rs' -type f | sort)
+[ "${#RS[@]}" -gt 0 ] || exit 0
+
+awk '
+function marked(s) { return s ~ /\/\/[ \t]*process-global:[ \t]*[^ \t]/ }
+FNR == 1 { prev = ""; depth = 0 }
+{
+    line = $0
+    t = line; sub(/^[ \t]+/, "", t)
+    # Inside a marked thread_local! block: covered, until its braces close.
+    if (depth > 0) {
+        depth += gsub(/\{/, "{", line) - gsub(/\}/, "}", line)
+        prev = line
+        next
+    }
+    code = line; sub(/\/\/.*/, "", code)
+    flagged = 0
+    if (t !~ /^\/\// && t !~ /^use[ \t]/) {
+        if (code ~ /^[ \t]*(pub(\([^)]*\))?[ \t]+)?static[ \t]/) flagged = 1
+        if (code ~ /thread_local!|LazyLock|OnceLock|OnceCell|lazy_static!/) flagged = 1
+    }
+    if (flagged) {
+        if (marked(line) || marked(prev)) {
+            if (code ~ /thread_local!/)
+                depth = gsub(/\{/, "{", code) - gsub(/\}/, "}", code)
+        } else {
+            printf "%s:%d: %s\n", FILENAME, FNR, t
+            bad = 1
+        }
+    }
+    prev = line
+}
+END { exit bad }
+' "${RS[@]}"
+rc=$?
+case $rc in
+    0) exit 0 ;;
+    1) echo "process-globals: each needs \`// process-global: <reason>\` on its line or the line above (#25)" >&2
+       exit 1 ;;
+    *) echo "process-globals: awk failed (exit $rc)" >&2
+       exit "$rc" ;;
+esac

@@ -259,6 +259,7 @@ fn claim_name(dir: &Path, stamp: &str, tmp: &Path) -> std::io::Result<PathBuf> {
 }
 
 /// Temp files of this process, one per save.
+// process-global: unique temp-file names within the process
 static TEMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn encode(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {

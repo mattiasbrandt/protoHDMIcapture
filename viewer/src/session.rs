@@ -161,6 +161,7 @@ impl Drop for Session {
 
 #[cfg(target_os = "linux")]
 /// view.sh's players, as its kill_orphan matches them.
+// process-global: a compiled regex, immutable
 static PLAYER_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     regex::Regex::new(r"^(mpv .*--title=protoHDMIcapture|ffplay .*-window_title protoHDMIcapture|gst-launch-1\.0 .*v4l2src device=)")
         .expect("a valid pattern")

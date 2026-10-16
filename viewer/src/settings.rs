@@ -578,6 +578,7 @@ mod tests {
     /// sourced (bash) or after `rust` ran (Rust), from the same start.
     fn both(start: Option<&str>, script: &str, rust: &dyn Fn(&Path) -> Result<(), String>) -> (Option<String>, Option<String>) {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        // process-global: unique temp names in tests
         static N: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!("phc-both-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
         let run = |which: &str| {

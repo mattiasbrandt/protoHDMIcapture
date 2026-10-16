@@ -168,6 +168,7 @@ enum What {
 }
 
 /// Numbers each window opens, for `UserEvent`.
+// process-global: window numbers across the runs of one process
 static WINDOWS: AtomicU64 = AtomicU64::new(0);
 
 struct Gfx {
@@ -368,6 +369,7 @@ pub(crate) fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+// process-global: winit allows one event loop per process
 thread_local! {
     /// The event loop between windows: one per process (winit cannot build
     /// a second on Linux), run once per window, as the wizard opens one
