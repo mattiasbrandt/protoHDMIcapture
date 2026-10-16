@@ -1,0 +1,53 @@
+# tools/check on every push and pull request to main (#25), on Arch, which
+# the project targets. The packages are exactly what tools/check calls:
+#   git                      tools/check's file lists (git ls-files)
+#   shellcheck, lua, python  the shell, Lua and Python checks
+#   rustup, gcc, clang, pkgconf
+#                            the viewer: cargo and clippy; cc for libspa-sys's
+#                            C wrappers, clang for bindgen (PipeWire), pkgconf
+#                            to find the libraries below
+#   libpipewire, alsa-lib, dbus, wayland
+#                            the libraries the viewer links (packaging/PKGBUILD)
+#   v4l-utils, mpv, libpulse, pipewire, pipewire-audio, util-linux
+#                            tools/harness/preflight.sh puts v4l2-ctl, mpv,
+#                            pactl, pw-link, pw-loopback and flock on a PATH
+# The Windows clippy step stays skipped: tools/check skips it where the
+# x86_64-pc-windows-msvc target is not installed.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      # Before the checkout, so that it is a git clone and not a tarball.
+      - name: Packages
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git shellcheck lua python \
+            rustup gcc clang pkgconf \
+            libpipewire alsa-lib dbus wayland \
+            v4l-utils mpv libpulse pipewire pipewire-audio util-linux
+
+      - uses: actions/checkout@v7
+
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            viewer/target
+          key: cargo-${{ hashFiles('viewer/Cargo.lock') }}-${{ hashFiles('viewer/vendor/**') }}
+          restore-keys: cargo-
+
+      - name: tools/check
+        run: tools/check
