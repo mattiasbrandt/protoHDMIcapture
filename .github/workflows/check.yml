@@ -1,6 +1,9 @@
 # tools/check on every push and pull request to main (#25), on Arch, which
 # the project targets. The packages are exactly what tools/check calls:
 #   git                      tools/check's file lists (git ls-files)
+#   diffutils, jq            tools/capture-cards-table --check (diff), and
+#                            lib/desktop.sh's refresh record (refresh-record
+#                            harness, preflight.sh)
 #   shellcheck, lua, python  the shell, Lua and Python checks
 #   rustup, gcc, clang, pkgconf
 #                            the viewer: cargo and clippy; cc for libspa-sys's
@@ -30,12 +33,18 @@ jobs:
       - name: Packages
         run: |
           pacman -Syu --noconfirm --needed \
-            git shellcheck lua python \
+            git diffutils jq shellcheck lua python \
             rustup gcc clang pkgconf \
             libpipewire alsa-lib dbus wayland \
             v4l-utils mpv libpulse pipewire pipewire-audio util-linux
 
       - uses: actions/checkout@v7
+
+      # The container runs as root over a workspace owned by the runner's
+      # user: without this, git refuses it ("dubious ownership") and
+      # tools/check's file lists come back empty.
+      - name: Git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Rust
         run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
