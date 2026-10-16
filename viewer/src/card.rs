@@ -210,6 +210,7 @@ pub fn holders(node: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn a_busy_card_says_who_holds_it() {
