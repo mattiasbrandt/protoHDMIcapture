@@ -473,7 +473,7 @@ shows the lot without starting anything.
 | `RES` | `1920x1080` | capture resolution; the wizard picks it from the card's own mode list |
 | `FPS` | `60` | capture frame rate; also what `REFRESH=match` matches |
 | `FMT` | `yuyv422` | capture format: `yuyv422` (uncompressed), `mjpeg`, `nv12`, `rawvideo`. Empty leaves the device as it was last set, which is luck, not a setting |
-| `DELAY` | `0.05` | audio sync in seconds, 0 to 1; **ctrl −/+** tunes it live and **w** saves it |
+| `DELAY` | `0.05` | audio sync in seconds, 0 to 1; **ctrl −/+** tunes it live and **w** saves it. The Rust viewer plays it one `LAT_MS` buffer later than before 2026-10-16 (its ring keeps that buffer, so 0 does not run dry): re-tune once |
 | `LAT_MS` | `10` | the audio loopback's buffer in ms; raise it if the sound crackles |
 | `BACKEND` | `mpv` | the player: `mpv`; `gst` and `ffplay` are for comparisons and have no overlay |
 | `AUDIO` | `loopback` | `loopback` (PipeWire, beside the player), `mpv` (inside mpv: one process, more latency), `none` |

@@ -21,6 +21,7 @@
 #IGNORE_CARDS_RE='OBSBOT|Integrated Camera'
 
 # Audio delay in seconds that lines audio up with video (tune with --tune).
+# The Rust viewer adds one LAT_MS buffer under it (since 2026-10-16): re-tune once.
 #DELAY=0.05
 
 # Display mode: fullscreen | borderless (maximized, no decorations) | windowed
