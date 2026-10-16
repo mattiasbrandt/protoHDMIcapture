@@ -1,0 +1,48 @@
+# The Linux release archive (#14): a v* tag builds
+# packaging/release-archive.sh on Arch and attaches its tar.gz to a new
+# GitHub release. The PKGBUILD and AUR half of #14 stays by hand
+# (updpkgsums, .SRCINFO, the AUR push).
+# Packages: the viewer's build (as check.yml), python3 for the script's
+# cargo-metadata parse, binutils for strip, github-cli for the release.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Packages
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git github-cli python binutils \
+            rustup gcc clang pkgconf \
+            libpipewire alsa-lib dbus wayland
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # As in check.yml: the container's root over the runner's checkout.
+      - name: Git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Archive
+        run: packaging/release-archive.sh dist
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes dist/*.tar.gz

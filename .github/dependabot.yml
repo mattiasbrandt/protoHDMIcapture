@@ -1,0 +1,8 @@
+# The workflows' actions are pinned to commit SHAs; this moves the pins.
+# Cargo stays manual: egui, wgpu and winit move together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

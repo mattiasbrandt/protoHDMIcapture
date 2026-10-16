@@ -14,8 +14,10 @@
 #   v4l-utils, mpv, libpulse, pipewire, pipewire-audio, util-linux
 #                            tools/harness/preflight.sh puts v4l2-ctl, mpv,
 #                            pactl, pw-link, pw-loopback and flock on a PATH
-# The Windows clippy step stays skipped: tools/check skips it where the
-# x86_64-pc-windows-msvc target is not installed.
+# The Windows clippy step runs too: the x86_64-pc-windows-msvc target is
+# added, and clippy links nothing, so no Windows SDK is needed (#18).
+# Actions are pinned to commit SHAs; Dependabot moves them
+# (.github/dependabot.yml).
 name: check
 
 on:
@@ -24,10 +26,20 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+# A newer push to the same ref makes the older run moot.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
     container: archlinux:latest
+    # The repo is private, so minutes are metered; a cold run takes ~5.5 min.
+    timeout-minutes: 20
     steps:
       # Before the checkout, so that it is a git clone and not a tarball.
       - name: Packages
@@ -38,7 +50,7 @@ jobs:
             libpipewire alsa-lib dbus wayland \
             v4l-utils mpv libpulse pipewire pipewire-audio util-linux
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The container runs as root over a workspace owned by the runner's
       # user: without this, git refuses it ("dubious ownership") and
@@ -47,16 +59,23 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Rust
-        run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
 
-      - uses: actions/cache@v6
+      # Its key includes rustc's version, so a new stable does not restore a
+      # target it then rebuilds and never saves; saved after a red run too.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            viewer/target
-          key: cargo-${{ hashFiles('viewer/Cargo.lock') }}-${{ hashFiles('viewer/vendor/**') }}
-          restore-keys: cargo-
+          workspaces: viewer -> target
+          cache-on-failure: true
 
       - name: tools/check
         run: tools/check
+
+      # tools/check runs the tests quietly ("rerun it to see which"); here
+      # nobody can rerun them, so a red run shows them in full.
+      - name: Failing tests, in full
+        if: failure()
+        run: cargo test --manifest-path viewer/Cargo.toml --no-fail-fast
