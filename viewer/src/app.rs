@@ -261,6 +261,8 @@ struct App {
     notify: Notify,
     /// Draw again without a new frame (the overlay changed).
     repaint: bool,
+    /// A card frame came on this wake (`about_to_wait` sends it).
+    arrived: bool,
     /// LEVELS or a colour value changed: convert the last frame again on a
     /// repaint, so a frozen feed shows it too.
     reconvert: bool,
@@ -481,6 +483,7 @@ impl Host for Winit {
             notices,
             notify,
             repaint: false,
+            arrived: false,
             reconvert: false,
             deadline: None,
             placer: None,
@@ -1148,6 +1151,15 @@ impl App {
         })
     }
 
+    /// Whether `about_to_wait` sends now: a frame came on this wake, the
+    /// overlay changed, or a held frame is overdue (held for longer than
+    /// one and a half frame times: the next one is late).
+    fn send_now(&self) -> bool {
+        let slot = self.slot.lock().expect("the slot's lock is never poisoned");
+        let overdue = slot.tag.is_some_and(|t| now_monotonic().saturating_sub(t.dequeued) > Duration::from_secs_f64(1.5 / self.format.fps.max(1.0)));
+        self.arrived || self.repaint || overdue
+    }
+
     fn drain(&mut self) -> Result<(), String> {
         let Some(gfx) = self.gfx.as_mut() else { return Ok(()) };
         // Runs the readbacks' callbacks (screenshot, pass times).
@@ -1366,6 +1378,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(w) = &self.opts.wizard {
                     w.borrow_mut().frame(Instant::now());
                 }
+                self.arrived = true;
                 self.render()
             }
             What::Run(Wake::Signal(s)) => {
@@ -1443,8 +1456,15 @@ impl ApplicationHandler<UserEvent> for App {
         {
             self.repaint = true;
         }
-        // Feedback may have freed the way for a frame that had to wait.
-        if let Err(e) = self.drain().and_then(|()| self.render()) {
+        // Feedback may have freed the way for a frame that had to wait: one
+        // that came on this wake, or one overdue (the card stopped). Not on
+        // the compositor's frame callback alone: the next card frame
+        // replaces a held one. Sent on the callback, every later frame
+        // waited a refresh behind it (kernel -> presented 55 ms, not 41;
+        // the wake comes here under WaitUntil, 2026-10-16).
+        let send = self.send_now();
+        self.arrived = false;
+        if let Err(e) = self.drain().and_then(|()| if send { self.render() } else { Ok(()) }) {
             self.fail(event_loop, e);
         }
         // Wake for the next change, and while a repaint waits on pacing
@@ -1520,6 +1540,7 @@ mod tests {
             notices: Arc::default(),
             notify: Arc::new(|_| {}),
             repaint: false,
+            arrived: false,
             reconvert: false,
             deadline: None,
             placer: None,
@@ -1585,6 +1606,28 @@ mod tests {
             press(app, "Tab");
         }
         panel(app)[6].clone()
+    }
+
+    #[test]
+    fn a_held_frame_waits_for_the_next_one_unless_it_is_overdue() {
+        // Sent on the compositor's frame callback alone, a held frame kept
+        // every later one a refresh behind (55 ms kernel -> presented, not
+        // 41, on the MS2130 2026-10-16): the next card frame replaces it.
+        let (mut app, _) = app_with("");
+        let held = |app: &App, ago: Duration| {
+            let at = now_monotonic().saturating_sub(ago);
+            app.slot.lock().unwrap().tag = Some(Tag { captured: at, dequeued: at, repaint: false });
+        };
+        held(&app, Duration::from_millis(5));
+        assert!(!app.send_now(), "a fresh held frame waits for the next");
+        app.arrived = true;
+        assert!(app.send_now(), "a frame that came on this wake goes out");
+        app.arrived = false;
+        app.repaint = true;
+        assert!(app.send_now(), "an overlay change goes out");
+        app.repaint = false;
+        held(&app, Duration::from_millis(30));
+        assert!(app.send_now(), "past 1.5 frame times (25 ms at 60 fps) the card has stopped: sent alone");
     }
 
     #[test]
