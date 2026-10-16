@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -283,6 +283,8 @@ struct Gfx {
 struct App {
     /// This window's number (`WINDOWS`).
     window_no: u64,
+    /// A frame wake is posted and not yet taken (`Winit::open`).
+    frame_wake: Arc<AtomicBool>,
     opts: Options,
     format: Format,
     slot: Arc<Mutex<Slot>>,
@@ -452,6 +454,12 @@ thread_local! {
     static EVENT_LOOP: RefCell<Option<EventLoop<UserEvent>>> = const { RefCell::new(None) };
 }
 
+/// Whether a wake is posted: a frame wake only when none waits (`pending`,
+/// cleared as the window takes it); the others always.
+fn posts(pending: &AtomicBool, w: &Wake) -> bool {
+    !matches!(w, Wake::Frame) || !pending.swap(true, Ordering::AcqRel)
+}
+
 /// One window over `source` (run.rs), on winit: until it ends, and why.
 pub fn run(source: Box<dyn FrameSource>, opts: Options, quit: &Quit) -> Outcome {
     let plan = Plan {
@@ -461,7 +469,7 @@ pub fn run(source: Box<dyn FrameSource>, opts: Options, quit: &Quit) -> Outcome 
         log_signal: opts.wizard.is_none(),
         stats: opts.stats,
     };
-    let mut host = Winit { opts: Some(opts), event_loop: None, window_no: 0 };
+    let mut host = Winit { opts: Some(opts), event_loop: None, window_no: 0, frame_wake: Arc::default() };
     crate::run::run(&mut host, source, plan, quit)
 }
 
@@ -473,6 +481,7 @@ struct Winit {
     opts: Option<Options>,
     event_loop: Option<EventLoop<UserEvent>>,
     window_no: u64,
+    frame_wake: Arc<AtomicBool>,
 }
 
 impl Host for Winit {
@@ -485,8 +494,14 @@ impl Host for Winit {
         self.event_loop = Some(event_loop);
         let window = WINDOWS.fetch_add(1, Ordering::Relaxed);
         self.window_no = window;
+        // At most one frame wake waits: the slot holds only the newest
+        // frame. A wake per frame, while each draw took longer than a frame
+        // (#18, WARP), queued thousands of them.
+        let pending = self.frame_wake.clone();
         Ok(Arc::new(move |w| {
-            let _ = proxy.send_event(UserEvent { window, what: What::Run(w) });
+            if posts(&pending, &w) {
+                let _ = proxy.send_event(UserEvent { window, what: What::Run(w) });
+            }
         }))
     }
 
@@ -512,6 +527,7 @@ impl Host for Winit {
         let start = now_monotonic();
         let mut app = App {
             window_no,
+            frame_wake: self.frame_wake.clone(),
             format,
             stats: Stats::new(start, opts.stats, opts.live.clone()),
             picture: opts.picture,
@@ -1468,6 +1484,11 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
+    /// Marks what came; `about_to_wait` draws it. Not drawn here: winit
+    /// calls `about_to_wait` once the queued events are taken, input
+    /// included, while on Windows a wake is a posted message, which comes
+    /// before any input. A draw here outlasting a frame (WARP: 0.9 s) left
+    /// a wake always queued ahead of the keys (#18).
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         // An earlier window's, sent as it ended.
         if event.window != self.window_no {
@@ -1475,11 +1496,12 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let result = match event.what {
             What::Run(Wake::Frame) => {
+                self.frame_wake.store(false, Ordering::Release);
                 if let Some(w) = &self.opts.wizard {
                     w.borrow_mut().frame(Instant::now());
                 }
                 self.arrived = true;
-                self.render()
+                Ok(())
             }
             What::Run(Wake::Signal(s)) => {
                 if let Some(w) = &self.opts.wizard {
@@ -1487,7 +1509,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.overlay.signal = s;
                 self.repaint = true;
-                self.render()
+                Ok(())
             }
             What::Notice => {
                 self.audio_check();
@@ -1496,7 +1518,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.overlay.message(text, for_, now);
                 }
                 self.repaint = true;
-                self.render()
+                Ok(())
             }
             What::Run(Wake::End) => {
                 if self.end.is_set() {
@@ -1630,6 +1652,7 @@ mod tests {
         let format = Format { width: 1920, height: 1080, fps: 60.0, pixels: crate::capture::Pixels::Yuyv };
         let mut app = App {
             window_no: 0,
+            frame_wake: Arc::default(),
             format,
             slot: Arc::new(Mutex::new(Slot { data: Vec::new(), tag: None, superseded: 0 })),
             gfx: None,
@@ -1920,5 +1943,16 @@ mod tests {
             Ok(WindowMode::Windowed { width: 1280, height: 720 })
         );
         assert!(WindowMode::from_settings("windowed", "big").is_err());
+    }
+
+    #[test]
+    fn one_frame_wake_waits_at_a_time() {
+        let pending = AtomicBool::new(false);
+        assert!(posts(&pending, &Wake::Frame));
+        assert!(!posts(&pending, &Wake::Frame), "a second frame before the first is taken: no wake");
+        assert!(posts(&pending, &Wake::End), "other wakes always go");
+        assert!(posts(&pending, &Wake::Signal(crate::capture::Signal::Picture)));
+        pending.store(false, Ordering::Release);
+        assert!(posts(&pending, &Wake::Frame), "taken: the next frame wakes again");
     }
 }
