@@ -44,6 +44,14 @@ use crate::wizard::Wizard;
 
 /// A frame callback this late counts as lost: pacing stops waiting for it.
 const PACE_TIMEOUT: Duration = Duration::from_millis(100);
+/// A held frame this fresh goes out on the compositor's frame callback
+/// instead of waiting to be replaced: it came within the capture's jitter
+/// of the callback. With none, every phase crossing of the capture and
+/// display clocks (one each ~37 s at 60.00 against 59.97 Hz) dropped
+/// frames in bursts, about 4.7 % of them; 5 ms leaves about one per two
+/// minutes for 3.5 ms more latency (MS2130, 2026-10-16, decided with the
+/// user).
+const HOLD: Duration = Duration::from_millis(5);
 /// How often the device is polled while a screenshot comes back.
 const READBACK_POLL: Duration = Duration::from_millis(10);
 
@@ -1199,12 +1207,14 @@ impl App {
     }
 
     /// Whether `about_to_wait` sends now: a frame came on this wake, the
-    /// overlay changed, or a held frame is overdue (held for longer than
-    /// one and a half frame times: the next one is late).
+    /// overlay changed, or a held frame is fresh (`HOLD`) or overdue (held
+    /// for longer than one and a half frame times: the next one is late).
+    /// One in between waits for the next card frame to replace it.
     fn send_now(&self) -> bool {
         let slot = self.slot.lock().expect("the slot's lock is never poisoned");
-        let overdue = slot.tag.is_some_and(|t| now_monotonic().saturating_sub(t.dequeued) > Duration::from_secs_f64(1.5 / self.format.fps.max(1.0)));
-        self.arrived || self.repaint || overdue
+        let held = slot.tag.map(|t| now_monotonic().saturating_sub(t.dequeued));
+        let overdue = Duration::from_secs_f64(1.5 / self.format.fps.max(1.0));
+        self.arrived || self.repaint || held.is_some_and(|age| age < HOLD || age > overdue)
     }
 
     fn drain(&mut self) -> Result<(), String> {
@@ -1504,11 +1514,11 @@ impl ApplicationHandler<UserEvent> for App {
             self.repaint = true;
         }
         // Feedback may have freed the way for a frame that had to wait: one
-        // that came on this wake, or one overdue (the card stopped). Not on
-        // the compositor's frame callback alone: the next card frame
-        // replaces a held one. Sent on the callback, every later frame
-        // waited a refresh behind it (kernel -> presented 55 ms, not 41;
-        // the wake comes here under WaitUntil, 2026-10-16).
+        // that came on this wake, a fresh one, or one overdue (the card
+        // stopped). Not any held frame on the compositor's frame callback:
+        // the next card frame replaces a stale one. Sending every one there
+        // kept each later frame a refresh behind (kernel -> presented 55 ms,
+        // not 41; the wake comes here under WaitUntil, 2026-10-16).
         let send = self.send_now();
         self.arrived = false;
         if let Err(e) = self.drain().and_then(|()| if send { self.render() } else { Ok(()) }) {
@@ -1667,7 +1677,7 @@ mod tests {
     }
 
     #[test]
-    fn a_held_frame_waits_for_the_next_one_unless_it_is_overdue() {
+    fn a_held_frame_waits_for_the_next_one_unless_it_is_fresh_or_overdue() {
         // Sent on the compositor's frame callback alone, a held frame kept
         // every later one a refresh behind (55 ms kernel -> presented, not
         // 41, on the MS2130 2026-10-16): the next card frame replaces it.
@@ -1676,8 +1686,10 @@ mod tests {
             let at = now_monotonic().saturating_sub(ago);
             app.slot.lock().unwrap().tag = Some(Tag { captured: at, dequeued: at, repaint: false });
         };
-        held(&app, Duration::from_millis(5));
-        assert!(!app.send_now(), "a fresh held frame waits for the next");
+        held(&app, Duration::from_millis(2));
+        assert!(app.send_now(), "within HOLD of the callback: sent, not dropped");
+        held(&app, Duration::from_millis(10));
+        assert!(!app.send_now(), "a stale held frame waits for the next");
         app.arrived = true;
         assert!(app.send_now(), "a frame that came on this wake goes out");
         app.arrived = false;
