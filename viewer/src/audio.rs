@@ -6,10 +6,10 @@
 //! the host is WASAPI and SRC/SINK name endpoints; the output's level keys
 //! are not there yet.
 //!
-//! The delay is the ring's fill. Changing it live never inserts silence or
-//! drops a block: the output plays faster or slower (linear interpolation),
-//! in proportion to how far the fill is from the target and at most
-//! `CATCH_UP`, until it gets there.
+//! The delay is the ring's fill over one buffer (`target_frames`).
+//! Changing it live never inserts silence or drops a block: the output
+//! plays faster or slower (linear interpolation), in proportion to how far
+//! the fill is from the target and at most `CATCH_UP`, until it gets there.
 //!
 //! A loopback whose stream goes away mid-feed (the card's audio unplugged,
 //! the node removed) is dead: said once, and the next sync or volume key
@@ -44,6 +44,15 @@ pub const MAX_DELAY_MS: u32 = 1000;
 /// cannot hold would never prime (silence).
 const fn ring_frames(buffer_frames: u32) -> usize {
     frames_for(MAX_DELAY_MS) + 2 * buffer_frames as usize + RATE as usize / 4
+}
+
+/// The ring's fill the output steers to: DELAY over one buffer (LAT_MS).
+/// The input arrives a block at a time, so a fill of DELAY alone runs dry
+/// between blocks at small delays (DELAY=0: about a third of the output
+/// callbacks found the ring empty); pw-loopback likewise keeps its
+/// graph's latency under `--delay`.
+const fn target_frames(delay_ms: u32, buffer_frames: u32) -> usize {
+    frames_for(delay_ms) + buffer_frames as usize
 }
 
 const fn frames_for(ms: u32) -> usize {
@@ -300,7 +309,7 @@ impl Audio {
                     move |out, _| {
                         let n = out.len() / CHANNELS as usize;
                         seen(&c.out_min, &c.out_max, n as u32);
-                        let target = frames_for(c.target_ms.load(Ordering::Relaxed));
+                        let target = target_frames(c.target_ms.load(Ordering::Relaxed), buffer_frames);
                         let mut r = ring.lock().unwrap();
                         c.fill.store(r.frames.len() as u32, Ordering::Relaxed);
                         if !r.primed {
@@ -886,7 +895,18 @@ mod tests {
         for buffer_ms in [1, 10, 1000] {
             let buffer = buffer_ms * RATE / 1000;
             assert!(ring_frames(buffer) >= frames_for(MAX_DELAY_MS) + 2 * buffer as usize, "LAT_MS={buffer_ms}");
+            // The largest target plus an input block still fits.
+            assert!(ring_frames(buffer) >= target_frames(MAX_DELAY_MS, buffer) + buffer as usize, "LAT_MS={buffer_ms}");
         }
+    }
+
+    #[test]
+    fn a_zero_delay_still_keeps_a_buffer_in_the_ring() {
+        // DELAY=0 steered the fill to nothing: 890 underruns in 25 s on
+        // the MS2130 (2026-10-16), none at 10 ms.
+        let buffer = 10 * RATE / 1000;
+        assert_eq!(target_frames(0, buffer), buffer as usize);
+        assert_eq!(target_frames(50, buffer), frames_for(50) + buffer as usize);
     }
 
     #[test]
