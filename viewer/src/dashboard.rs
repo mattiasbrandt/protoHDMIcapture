@@ -29,6 +29,7 @@ use serde_json::{Value, json};
 
 use crate::audio::{Counters, RATE};
 use crate::capture::{Dropped, Reason, Since, Signal};
+use crate::desktop::{Desktop, fmt_g};
 use crate::overlay::Notify;
 use crate::stats::percentiles;
 
@@ -50,6 +51,9 @@ const SAMPLES: usize = 4096;
 const CONNECT_WAIT: Duration = Duration::from_secs(5);
 /// No line for this long: the viewer is shown as not answering.
 const STALE: Duration = Duration::from_secs(3);
+/// The Display section reads the monitors at most this often: each read is
+/// a `hyprctl` call.
+const DISPLAY_EVERY: Duration = Duration::from_secs(5);
 
 /// The socket in the run directory.
 pub fn socket_path(run_dir: &Path) -> PathBuf {
@@ -169,6 +173,70 @@ impl Live {
         }
         e.push_back(format!("{:7.1} s  {text}", self.up().as_secs_f64()));
     }
+}
+
+/// The Display section (#30), as view.sh's dashboard has it: the monitors
+/// and which one the viewer is on, from the desktop adapter, and whether
+/// REFRESH=match switched one, from its record in the run dir
+/// (`refresh.restore`, docs/run-dir.md).
+pub struct Display {
+    desktop: Desktop,
+    record: PathBuf,
+    /// The last section, when it was read, and the record it was read with.
+    last: Option<(Instant, Option<String>, Value)>,
+}
+
+impl Display {
+    pub fn new(desktop: Desktop, record: PathBuf) -> Self {
+        Self { desktop, record, last: None }
+    }
+
+    /// The section: read again once `DISPLAY_EVERY` has passed, or at once
+    /// when the refresh record changed (a switch, or its restore).
+    fn json(&mut self, now: Instant) -> Value {
+        let record = match std::fs::read_to_string(&self.record) {
+            Ok(text) => Ok(Some(text)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("cannot read {}: {e}", self.record.display())),
+        };
+        let seen = record.clone().unwrap_or_else(Some);
+        if let Some((at, was, v)) = &self.last
+            && now.duration_since(*at) < DISPLAY_EVERY
+            && *was == seen
+        {
+            return v.clone();
+        }
+        let v = display_json(self.desktop.monitors(std::process::id()), record);
+        self.last = Some((now, seen, v.clone()));
+        v
+    }
+}
+
+/// The Display section's JSON: the monitors, or why they are not known;
+/// the refresh switch, if REFRESH=match made one.
+fn display_json(monitors: Result<Vec<crate::desktop::Monitor>, String>, record: Result<Option<String>, String>) -> Value {
+    let (monitors, why) = match monitors {
+        Ok(m) => (
+            json!(
+                m.iter()
+                    .map(|m| json!({ "name": m.name, "width": m.width, "height": m.height,
+                                     "refresh_hz": m.refresh_hz, "focused": m.focused, "viewer": m.viewer }))
+                    .collect::<Vec<_>>()
+            ),
+            Value::Null,
+        ),
+        Err(why) => (Value::Null, json!(why)),
+    };
+    // `monitor|rate set|original rate|restore command`.
+    let refresh = match record {
+        Ok(None) => Value::Null,
+        Ok(Some(text)) => match text.lines().next().unwrap_or("").splitn(4, '|').collect::<Vec<_>>()[..] {
+            [monitor, set, was, _] => json!({ "monitor": monitor, "set_hz": set, "was_hz": was }),
+            _ => json!({ "unreadable": format!("unreadable refresh record: {}", text.trim()) }),
+        },
+        Err(why) => json!({ "unreadable": why }),
+    };
+    json!({ "monitors": monitors, "why": why, "refresh": refresh })
 }
 
 /// What a snapshot needs from the previous ones: rates and the window.
@@ -446,22 +514,23 @@ pub struct Server {
 }
 
 impl Server {
-    /// Listens on `path` and sends `live` to each dashboard every `tick`.
-    pub fn start(path: &Path, live: Arc<Live>, tick: Duration) -> Result<Self, String> {
+    /// Listens on `path` and sends `live` to each dashboard every `tick`,
+    /// with the Display section when there is a `display`.
+    pub fn start(path: &Path, live: Arc<Live>, display: Option<Display>, tick: Duration) -> Result<Self, String> {
         let (listener, inode) = transport::listen(path).map_err(|e| format!("dashboard socket {}: {e}", path.display()))?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let stop = stop.clone();
             thread::Builder::new()
                 .name("dashboard".into())
-                .spawn(move || serve(listener, &live, tick, &stop))
+                .spawn(move || serve(listener, &live, display, tick, &stop))
                 .map_err(|e| format!("dashboard thread: {e}"))?
         };
         Ok(Self { path: path.to_path_buf(), inode, stop, thread: Some(thread) })
     }
 }
 
-fn serve(listener: transport::Listener, live: &Live, tick: Duration, stop: &AtomicBool) {
+fn serve(listener: transport::Listener, live: &Live, mut display: Option<Display>, tick: Duration, stop: &AtomicBool) {
     let mut clients: Vec<Client> = Vec::new();
     let mut rolling = Rolling::new(live);
     let slice = Duration::from_millis(50).min(tick);
@@ -490,7 +559,14 @@ fn serve(listener: transport::Listener, live: &Live, tick: Duration, stop: &Atom
         }
         // Computed with no dashboard too: the rates and the window stay
         // right for the next one to connect.
-        let mut line = rolling.snapshot(live).to_string().into_bytes();
+        let mut snap = rolling.snapshot(live);
+        // Read only for a dashboard to show it to: it costs a hyprctl call.
+        if !clients.is_empty()
+            && let Some(d) = display.as_mut()
+        {
+            snap["display"] = d.json(now);
+        }
+        let mut line = snap.to_string().into_bytes();
         line.push(b'\n');
         clients.retain_mut(|c| c.send(&line));
     }
@@ -657,6 +733,47 @@ fn render(s: &Value, p: &Paint) -> String {
         }
         Some("failed") => row(&mut out, "loopback", p.red(&format!("failed: {}", a["why"].as_str().unwrap_or("?")))),
         _ => row(&mut out, "loopback", format!("not running ({})", a["why"].as_str().unwrap_or("?"))),
+    }
+
+    // Not in a snapshot from a viewer with no Display section to send.
+    let d = &s["display"];
+    if d.is_object() {
+        out.push(String::new());
+        out.push(format!("  {}", p.head("Display")));
+        match d["monitors"].as_array() {
+            // lib/desktop.sh desktop_outputs: "name WxH@HzHz [focused]".
+            Some(ms) => {
+                for m in ms {
+                    let rate = num(&m["refresh_hz"]).map_or("?".to_string(), |r| fmt_g((r * 100.0).round() / 100.0));
+                    let mut line = format!("{} {}x{}@{rate}Hz", m["name"].as_str().unwrap_or("?"), int(&m["width"]), int(&m["height"]));
+                    if m["focused"].as_bool() == Some(true) {
+                        line.push_str(" focused");
+                    }
+                    if m["viewer"].as_bool() == Some(true) {
+                        line.push_str(&p.dim(" · the viewer's"));
+                    }
+                    row(&mut out, "monitor", line);
+                }
+            }
+            None => row(&mut out, "monitors", p.dim(&format!("not known: {}", d["why"].as_str().unwrap_or("?")))),
+        }
+        let r = &d["refresh"];
+        row(
+            &mut out,
+            "refresh",
+            if r.is_null() {
+                p.dim("not switched")
+            } else if let Some(why) = r["unreadable"].as_str() {
+                p.red(why)
+            } else {
+                format!(
+                    "{} at {} Hz by REFRESH=match {}",
+                    r["monitor"].as_str().unwrap_or("?"),
+                    r["set_hz"].as_str().unwrap_or("?"),
+                    p.dim(&format!("(back to {} Hz on exit)", r["was_hz"].as_str().unwrap_or("?")))
+                )
+            },
+        );
     }
 
     out.push(String::new());
@@ -913,7 +1030,7 @@ mod tests {
         let dir = tmp("given");
         let viewer = Arc::new(Live::new());
         let wizard = Live::new();
-        let server = Server::start(&socket_path(&dir), viewer.clone(), Duration::from_millis(20)).unwrap();
+        let server = Server::start(&socket_path(&dir), viewer.clone(), None, Duration::from_millis(20)).unwrap();
         let s = transport::connect(&socket_path(&dir)).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut r = Lines { reader: BufReader::new(s), buf: Vec::new() };
@@ -934,7 +1051,7 @@ mod tests {
     fn a_dashboard_gets_the_live_numbers() {
         let dir = tmp("numbers");
         let live = Arc::new(Live::new());
-        let server = Server::start(&socket_path(&dir), live.clone(), Duration::from_millis(100)).unwrap();
+        let server = Server::start(&socket_path(&dir), live.clone(), None, Duration::from_millis(100)).unwrap();
         let s = transport::connect(&socket_path(&dir)).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let mut r = Lines { reader: BufReader::new(s), buf: Vec::new() };
@@ -999,7 +1116,7 @@ mod tests {
     #[cfg(unix)]
     fn a_dashboard_that_stops_reading_never_holds_the_viewer() {
         let dir = tmp("slow");
-        let server = Server::start(&socket_path(&dir), Arc::new(Live::new()), Duration::from_millis(1)).unwrap();
+        let server = Server::start(&socket_path(&dir), Arc::new(Live::new()), None, Duration::from_millis(1)).unwrap();
         // Connected, never read: the server must keep its pace and drop it.
         let stuck = transport::connect(&socket_path(&dir)).unwrap();
         let healthy = transport::connect(&socket_path(&dir)).unwrap();
@@ -1031,7 +1148,7 @@ mod tests {
         // A killed viewer's socket: nobody listens on it.
         drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
         assert!(path.exists());
-        let server = Server::start(&path, Arc::new(Live::new()), Duration::from_millis(50)).unwrap();
+        let server = Server::start(&path, Arc::new(Live::new()), None, Duration::from_millis(50)).unwrap();
         transport::connect(&path).expect("the new one listens");
         // Replaced under us (it cannot be, with video.lock held; checked anyway).
         std::fs::remove_file(&path).unwrap();
@@ -1141,6 +1258,78 @@ mod tests {
         let c = terminal_command(&args, Some("nope"), |n| n == "x-terminal-emulator").unwrap();
         assert_eq!(argv(c), "x-terminal-emulator -e /x/protohdmicapture --dashboard");
         assert!(terminal_command(&args, None, |_| false).is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_dashboard_gets_the_display_section() {
+        let dir = tmp("display");
+        let display = Display::new(Desktop::Generic, dir.join("refresh.restore"));
+        let server = Server::start(&socket_path(&dir), Arc::new(Live::new()), Some(display), Duration::from_millis(20)).unwrap();
+        let s = transport::connect(&socket_path(&dir)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut r = Lines { reader: BufReader::new(s), buf: Vec::new() };
+        // The first snapshot may have gone out before this dashboard was
+        // accepted; the next ones carry the section.
+        let d = (0..50).map(|_| read_line(&mut r)).find(|v| v["display"].is_object()).expect("a Display section")["display"].clone();
+        assert_eq!(d, json!({ "monitors": null, "why": "the monitors are known on Hyprland only", "refresh": null }));
+        drop(server);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_display_section_is_read_again_on_a_switch_or_after_a_while() {
+        let dir = tmp("display-cache");
+        let record = dir.join("refresh.restore");
+        let mut d = Display::new(Desktop::Generic, record.clone());
+        let t0 = Instant::now();
+        let read_at = |d: &Display| d.last.as_ref().map(|(at, _, _)| *at);
+        assert!(d.json(t0)["refresh"].is_null());
+        d.json(t0 + Duration::from_secs(1));
+        assert_eq!(read_at(&d), Some(t0), "not read again within DISPLAY_EVERY");
+        // A switch: read at once.
+        std::fs::write(&record, "DP-2|60|59.95|hl.monitor({})\n").unwrap();
+        let v = d.json(t0 + Duration::from_secs(2));
+        assert_eq!(read_at(&d), Some(t0 + Duration::from_secs(2)));
+        assert_eq!(v["refresh"], json!({ "monitor": "DP-2", "set_hz": "60", "was_hz": "59.95" }));
+        d.json(t0 + Duration::from_secs(3));
+        assert_eq!(read_at(&d), Some(t0 + Duration::from_secs(2)));
+        d.json(t0 + Duration::from_secs(7));
+        assert_eq!(read_at(&d), Some(t0 + Duration::from_secs(7)), "read again after DISPLAY_EVERY");
+        std::fs::write(&record, "nonsense\n").unwrap();
+        assert_eq!(d.json(t0 + Duration::from_secs(8))["refresh"], json!({ "unreadable": "unreadable refresh record: nonsense" }));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_display_sections_text() {
+        let monitors = vec![
+            crate::desktop::Monitor { name: "DP-1".into(), width: 3440, height: 1440, refresh_hz: 100.0, focused: false, viewer: false },
+            crate::desktop::Monitor { name: "DP-2".into(), width: 1920, height: 1200, refresh_hz: 59.950001, focused: true, viewer: true },
+            crate::desktop::Monitor { name: "HDMI-A-1".into(), width: 2560, height: 720, refresh_hz: 60.266, focused: false, viewer: false },
+        ];
+        let mut s = sample();
+        s["display"] = display_json(Ok(monitors), Ok(Some("DP-2|60|59.95|hl.monitor({})\n".into())));
+        let text = render(&s, &Paint { on: false });
+        for w in [
+            "  monitor           DP-1 3440x1440@100Hz",
+            "  monitor           DP-2 1920x1200@59.95Hz focused · the viewer's",
+            "  monitor           HDMI-A-1 2560x720@60.27Hz",
+            "  refresh           DP-2 at 60 Hz by REFRESH=match (back to 59.95 Hz on exit)",
+        ] {
+            assert!(text.lines().any(|l| l == w), "no line {w:?} in\n{text}");
+        }
+        // After Audio, before the events, as view.sh's.
+        let at = |h: &str| text.find(h).unwrap_or_else(|| panic!("no {h} in {text}"));
+        assert!(at("  Audio") < at("  Display") && at("  Display") < at("  Recent events"));
+
+        s["display"] = display_json(Err("the monitors are known on Hyprland only".into()), Ok(None));
+        let text = render(&s, &Paint { on: false });
+        for w in ["  monitors          not known: the monitors are known on Hyprland only", "  refresh           not switched"] {
+            assert!(text.lines().any(|l| l == w), "no line {w:?} in\n{text}");
+        }
+        // No section from a viewer that sends none.
+        assert!(!render(&sample(), &Paint { on: false }).contains("Display"));
     }
 
     #[test]

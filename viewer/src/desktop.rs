@@ -88,6 +88,53 @@ impl Desktop {
             }
         }
     }
+
+    /// The monitors (lib/desktop.sh `desktop_outputs`), each marked when
+    /// the window of `pid` is on it; Err where this desktop cannot say.
+    pub fn monitors(&self, pid: u32) -> Result<Vec<Monitor>, String> {
+        match self {
+            Self::Hyprland(h) => h.monitors(pid),
+            Self::Generic => Err("the monitors are known on Hyprland only".into()),
+        }
+    }
+}
+
+/// A monitor, as the dashboard's Display section shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Monitor {
+    pub name: String,
+    pub width: u64,
+    pub height: u64,
+    pub refresh_hz: f64,
+    pub focused: bool,
+    /// The viewer's window is on it.
+    pub viewer: bool,
+}
+
+/// `hyprctl monitors -j`, each marked when it has the id `viewer_on` (the
+/// window's monitor, from `hyprctl clients -j`).
+pub fn parse_monitors(monitors: &Value, viewer_on: Option<i64>) -> Result<Vec<Monitor>, String> {
+    let list = monitors.as_array().ok_or("hyprctl monitors: not a list")?;
+    list.iter()
+        .map(|m| {
+            let name = m["name"].as_str().ok_or("hyprctl monitors: a monitor with no name")?;
+            let field = |k: &str| m[k].as_u64().ok_or(format!("hyprctl monitors: {name} has no {k}"));
+            Ok(Monitor {
+                name: name.to_string(),
+                width: field("width")?,
+                height: field("height")?,
+                refresh_hz: m["refreshRate"].as_f64().ok_or(format!("hyprctl monitors: {name} has no refreshRate"))?,
+                focused: m["focused"].as_bool() == Some(true),
+                viewer: viewer_on.is_some() && m["id"].as_i64() == viewer_on,
+            })
+        })
+        .collect()
+}
+
+/// The monitor id the window of `pid` is on, from `hyprctl clients -j`;
+/// None before it maps.
+pub fn window_monitor(clients: &Value, pid: u32) -> Option<i64> {
+    clients.as_array()?.iter().find(|c| c["pid"].as_u64() == Some(u64::from(pid)))?["monitor"].as_i64()
 }
 
 #[derive(Clone)]
@@ -126,6 +173,17 @@ impl Hyprland {
 
     fn json(&self, what: &str) -> Option<Value> {
         serde_json::from_str(&self.run(&[what, "-j"]).ok()?).ok()
+    }
+
+    /// `json`, saying why it failed.
+    fn json_or_why(&self, what: &str) -> Result<Value, String> {
+        serde_json::from_str(&self.run(&[what, "-j"])?).map_err(|e| format!("hyprctl {what} -j: {e}"))
+    }
+
+    fn monitors(&self, pid: u32) -> Result<Vec<Monitor>, String> {
+        let monitors = self.json_or_why("monitors")?;
+        let clients = self.json_or_why("clients")?;
+        parse_monitors(&monitors, window_monitor(&clients, pid))
     }
 
     /// desktop_place_window: each mode first undoes what the others set,
@@ -573,5 +631,45 @@ mod tests {
         assert_eq!(send("true", "normal", "s", "b"), Ok(()));
         let e = send("false", "normal", "s", "b").unwrap_err();
         assert!(e.starts_with("false exit status: 1"), "{e}");
+    }
+
+    /// A recorded `hyprctl monitors -j` (three monitors, serials left out).
+    const MONITORS: &str = include_str!("../../tools/fixtures/hyprctl/monitors.json");
+
+    #[test]
+    fn the_monitors_as_hyprctl_reports_them() {
+        let m: Value = serde_json::from_str(MONITORS).unwrap();
+        let clients = serde_json::json!([{ "pid": 7, "monitor": 0 }, { "pid": 4242, "monitor": 2 }]);
+        let got = parse_monitors(&m, window_monitor(&clients, 4242)).unwrap();
+        let line = |m: &Monitor| format!("{} {}x{}@{} {} {}", m.name, m.width, m.height, fmt_g(m.refresh_hz), m.focused, m.viewer);
+        assert_eq!(
+            got.iter().map(line).collect::<Vec<_>>(),
+            ["DP-1 3440x1440@100 false false", "HDMI-A-1 2560x720@60.266 false true", "DP-2 1920x1200@59.95 true false"]
+        );
+        // Not mapped yet: no monitor is the viewer's.
+        assert_eq!(window_monitor(&clients, 99), None);
+        assert!(parse_monitors(&m, None).unwrap().iter().all(|m| !m.viewer));
+        assert_eq!(parse_monitors(&serde_json::json!({}), None).unwrap_err(), "hyprctl monitors: not a list");
+        assert_eq!(parse_monitors(&serde_json::json!([{ "name": "X" }]), None).unwrap_err(), "hyprctl monitors: X has no width");
+    }
+
+    #[test]
+    fn the_monitors_through_hyprctl() {
+        let dir = tmp("monitors");
+        fs::create_dir_all(&dir).unwrap();
+        let script = format!(
+            "#!/bin/sh\ncase \"$1\" in\nmonitors) cat '{m}' ;;\nclients) echo '[{{\"pid\": {pid}, \"monitor\": 1}}]' ;;\n*) exit 1 ;;\nesac\n",
+            m = concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/fixtures/hyprctl/monitors.json"),
+            pid = std::process::id()
+        );
+        fs::write(dir.join("hyprctl"), script).unwrap();
+        let h = Desktop::Hyprland(Hyprland { hyprctl: vec!["sh".into(), dir.join("hyprctl")] });
+        let got = h.monitors(std::process::id()).unwrap();
+        assert_eq!(got.iter().filter(|m| m.viewer).map(|m| m.name.as_str()).collect::<Vec<_>>(), ["DP-2"]);
+        // hyprctl failing: its words, not an empty list.
+        fs::write(dir.join("hyprctl"), "#!/bin/sh\necho 'HYPRLAND_INSTANCE_SIGNATURE not set' >&2\nexit 1\n").unwrap();
+        assert_eq!(h.monitors(1).unwrap_err(), "HYPRLAND_INSTANCE_SIGNATURE not set");
+        assert_eq!(Desktop::Generic.monitors(1).unwrap_err(), "the monitors are known on Hyprland only");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

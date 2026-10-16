@@ -490,7 +490,9 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
     }
     // The dashboard's socket, with the video lock held; a failure costs
     // only the dashboard.
-    match dashboard::Server::start(&dashboard::socket_path(&session::run_dir()), live, dashboard::TICK) {
+    // Its Display section reads the monitors and REFRESH=match's record.
+    let display = dashboard::Display::new(opts.desktop.clone(), session::run_dir().join("refresh.restore"));
+    match dashboard::Server::start(&dashboard::socket_path(&session::run_dir()), live, Some(display), dashboard::TICK) {
         Ok(server) => {
             feed.set_dashboard(server);
             if debug_window && let Err(e) = dashboard::open(None) {
