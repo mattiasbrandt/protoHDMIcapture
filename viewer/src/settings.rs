@@ -65,6 +65,8 @@ pub fn rows() -> Vec<Row> {
 pub enum From {
     Env,
     Saved,
+    /// A menu launch's default (`with_menu_defaults`).
+    Menu,
     Default,
 }
 
@@ -73,6 +75,7 @@ impl From {
         match self {
             From::Env => "env",
             From::Saved => "saved",
+            From::Menu => "menu",
             From::Default => "default",
         }
     }
@@ -220,6 +223,18 @@ impl Settings {
         Self { rows, values, from, notes, config_file }
     }
 
+    /// A menu launch's defaults (launch.sh): REFRESH=match unless the
+    /// environment or the settings file sets REFRESH, since a menu has
+    /// nowhere to type it. A 60 fps feed on a faster fixed-refresh panel
+    /// judders unless the panel drops to its nearest mode.
+    pub fn with_menu_defaults(mut self) -> Self {
+        if self.from("REFRESH") == From::Default {
+            self.values.insert("REFRESH".into(), "match".into());
+            self.from.insert("REFRESH".into(), From::Menu);
+        }
+        self
+    }
+
     pub fn get(&self, name: &str) -> &str {
         self.values.get(name).map(String::as_str).unwrap_or("")
     }
@@ -237,6 +252,7 @@ impl Settings {
                 let src = match self.from(&r.name) {
                     From::Env => "environment".to_string(),
                     From::Saved => self.config_file.display().to_string(),
+                    From::Menu => "menu default".to_string(),
                     From::Default => "default".to_string(),
                 };
                 out.push(format!("{}={v} ({src}) is not {why}", r.name));
@@ -516,6 +532,26 @@ mod tests {
         let s = with("DELAY=0.08 \n", &[]);
         assert_eq!(s.get("DELAY"), "0.08 ");
         assert_eq!(s.errors().len(), 1);
+    }
+
+    #[test]
+    fn a_menu_launch_matches_the_refresh_unless_it_is_set() {
+        // Nothing sets it: the menu's default, said as such.
+        let s = with("LEVELS=full\n", &[]).with_menu_defaults();
+        assert_eq!((s.get("REFRESH"), s.from("REFRESH")), ("match", From::Menu));
+        assert!(s.report().0.lines().any(|l| l.starts_with("REFRESH") && l.ends_with(" menu")), "{}", s.report().0);
+        // The file sets it: the file wins, as launch.sh leaves it alone.
+        let s = with("REFRESH=keep\n", &[]).with_menu_defaults();
+        assert_eq!((s.get("REFRESH"), s.from("REFRESH")), ("keep", From::Saved));
+        // The environment sets it: the environment wins.
+        let s = with("REFRESH=match\nLEVELS=limited\n", &[("REFRESH", "keep")]).with_menu_defaults();
+        assert_eq!((s.get("REFRESH"), s.from("REFRESH")), ("keep", From::Env));
+        // An empty one sets nothing (`[ -n "${REFRESH:-}" ]`).
+        let s = with("REFRESH=\n", &[("REFRESH", "")]).with_menu_defaults();
+        assert_eq!((s.get("REFRESH"), s.from("REFRESH")), ("match", From::Menu));
+        // Without a menu launch, the table's default.
+        let s = with("SCALING=fast\n", &[]);
+        assert_eq!((s.get("REFRESH"), s.from("REFRESH")), ("keep", From::Default));
     }
 
     /// `config_write` from lib/card.sh on a copy of `start` (None: no file).

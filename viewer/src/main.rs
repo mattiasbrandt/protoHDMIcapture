@@ -276,7 +276,13 @@ fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::
     Ok((Box::new(source), picked.node))
 }
 
-fn view(args: &[String], quit: &run::Quit) -> Result<(), String> {
+/// The settings; with `menu`, a menu launch's defaults (`--menu`, #28).
+fn settings(menu: bool) -> Settings {
+    let s = Settings::resolve();
+    if menu { s.with_menu_defaults() } else { s }
+}
+
+fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
     // First run: no settings file, so the wizard, as view.sh offers it
     // (not for a measurement run, nor for the wizard's own children). On
     // Windows there is no wizard yet: the defaults, said once.
@@ -326,7 +332,7 @@ fn view(args: &[String], quit: &run::Quit) -> Result<(), String> {
         }
     }
 
-    let s = Settings::resolve();
+    let s = settings(menu);
     for n in &s.notes {
         eprintln!("note: {n}");
     }
@@ -364,7 +370,7 @@ fn view(args: &[String], quit: &run::Quit) -> Result<(), String> {
                 eprintln!("already running (pid {pid})");
                 // Started from a launcher: say so on the desktop, as view.sh.
                 if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-                    desktop::notify("normal", "protoHDMIcapture is already running");
+                    desktop::notify("normal", "protoHDMIcapture is already running", "");
                 }
             }
             return Ok(());
@@ -401,6 +407,7 @@ fn view(args: &[String], quit: &run::Quit) -> Result<(), String> {
         }
         Err(e) => {
             eprintln!("warning: no audio: {e}");
+            desktop::Notice::NoSound(e.clone()).send();
             live.set_audio(dashboard::AudioLive::Failed(e.clone()));
             opts.audio = app::AudioSetup::Failed(e);
         }
@@ -463,7 +470,11 @@ fn view(args: &[String], quit: &run::Quit) -> Result<(), String> {
 
 fn main() -> ExitCode {
     environment();
-    let args: Vec<String> = env::args().skip(1).collect();
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    // --menu: started from the desktop entry, which has nowhere to type a
+    // setting (launch.sh's defaults, #28); with any other flag.
+    let menu = args.iter().any(|a| a == "--menu");
+    args.retain(|a| a != "--menu");
     if args.first().map(String::as_str) == Some("--settings") {
         if args.len() > 1 {
             eprintln!("{USAGE}");
@@ -471,7 +482,7 @@ fn main() -> ExitCode {
         }
         // Each setting, its value and where it came from, then whether they
         // are all valid: the same output as `view.sh --settings`.
-        let (text, code) = Settings::resolve().report();
+        let (text, code) = settings(menu).report();
         print!("{text}");
         return ExitCode::from(code as u8);
     }
@@ -495,6 +506,7 @@ fn main() -> ExitCode {
         Ok(q) => q,
         Err(e) => {
             eprintln!("protohdmicapture: {e}");
+            desktop::Notice::Failed(e).send();
             return ExitCode::FAILURE;
         }
     };
@@ -503,14 +515,16 @@ fn main() -> ExitCode {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
         }
-        setup(false, &quit).and_then(|play| if play { view(&[], &quit) } else { Ok(()) })
+        setup(false, &quit).and_then(|play| if play { view(&[], &quit, menu) } else { Ok(()) })
     } else {
-        view(&args, &quit)
+        view(&args, &quit, menu)
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("protohdmicapture: {e}");
+            // Started from a menu: nobody reads stderr (view.sh's die).
+            desktop::Notice::Failed(e).send();
             ExitCode::FAILURE
         }
     }

@@ -30,7 +30,7 @@ for f in "${files[@]}"; do
 done
 # The menu runs it by full path: a desktop session's PATH often lacks
 # ~/.local/bin.
-sed -i "s|^Exec=protohdmicapture\$|Exec=$prefix/bin/protohdmicapture|" "$prefix/share/applications/protohdmicapture.desktop"
+sed -i "s|^Exec=protohdmicapture |Exec=$prefix/bin/protohdmicapture |" "$prefix/share/applications/protohdmicapture.desktop"
 for d in "${dirs[@]}"; do
     mkdir -p "$prefix/$d"
     cp -r "$here/$d/." "$prefix/$d/"

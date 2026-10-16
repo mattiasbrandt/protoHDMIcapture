@@ -264,9 +264,52 @@ fn settled(said: String, record: &Path) -> Report {
 }
 
 /// `notify-send`, where there is one: a launcher has no terminal to show
-/// a message in (lib/desktop.sh desktop_notify).
-pub fn notify(urgency: &str, summary: &str) {
-    let _ = Command::new("notify-send").args(["-a", "protoHDMIcapture", "-u", urgency, "--", summary]).status();
+/// a message in (lib/desktop.sh desktop_notify). No notify-send is no
+/// notification, as there; any other failure is said on stderr.
+pub fn notify(urgency: &str, summary: &str, body: &str) {
+    if let Err(e) = send("notify-send", urgency, summary, body) {
+        eprintln!("warning: desktop notification \"{summary}\": {e}");
+    }
+}
+
+fn send(program: &str, urgency: &str, summary: &str, body: &str) -> Result<(), String> {
+    // --: a message starting with "-" is text, not an option.
+    match Command::new(program).args(["-a", "protoHDMIcapture", "-u", urgency, "--", summary, body]).status() {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("{program} {s}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("{program}: {e}")),
+    }
+}
+
+/// What the desktop is told when there is no terminal to read stderr in
+/// (started from a menu): view.sh's `die` and `audio_failed`.
+#[derive(Debug, PartialEq)]
+pub enum Notice {
+    /// The viewer could not start or went down: why.
+    Failed(String),
+    /// The feed plays without sound: why.
+    NoSound(String),
+}
+
+impl Notice {
+    /// Urgency, summary and body; none on a terminal, where stderr has it.
+    pub fn for_desktop(&self, terminal: bool) -> Option<(&'static str, &'static str, &str)> {
+        if terminal {
+            return None;
+        }
+        Some(match self {
+            Notice::Failed(why) => ("critical", "protoHDMIcapture failed", why),
+            Notice::NoSound(why) => ("normal", "protoHDMIcapture: no sound", why),
+        })
+    }
+
+    /// Sent unless stderr is a terminal.
+    pub fn send(&self) {
+        if let Some((urgency, summary, body)) = self.for_desktop(std::io::IsTerminal::is_terminal(&std::io::stderr())) {
+            notify(urgency, summary, body);
+        }
+    }
 }
 
 /// pick-refresh-mode.py's answer.
@@ -508,5 +551,27 @@ mod tests {
 
     fn rec_in(dir: &Path) -> PathBuf {
         dir.join("refresh.restore")
+    }
+
+    #[test]
+    fn the_desktop_is_told_only_without_a_terminal() {
+        let failed = Notice::Failed("no capture card found".into());
+        let no_sound = Notice::NoSound("the card's audio input is not there".into());
+        assert_eq!(failed.for_desktop(true), None, "stderr has it");
+        assert_eq!(no_sound.for_desktop(true), None);
+        assert_eq!(failed.for_desktop(false), Some(("critical", "protoHDMIcapture failed", "no capture card found")));
+        assert_eq!(
+            no_sound.for_desktop(false),
+            Some(("normal", "protoHDMIcapture: no sound", "the card's audio input is not there"))
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn no_notify_send_is_no_notification_and_a_failing_one_says_so() {
+        assert_eq!(send("/nonexistent/notify-send", "normal", "s", "b"), Ok(()));
+        assert_eq!(send("true", "normal", "s", "b"), Ok(()));
+        let e = send("false", "normal", "s", "b").unwrap_err();
+        assert!(e.starts_with("false exit status: 1"), "{e}");
     }
 }
