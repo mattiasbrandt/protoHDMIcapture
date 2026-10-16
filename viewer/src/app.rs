@@ -679,6 +679,8 @@ impl App {
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
         if self.opts.stats {
+            let info = adapter.get_info();
+            eprintln!("adapter: {} ({:?}, {:?})", info.name, info.backend, info.device_type);
             eprintln!(
                 "surface: {}x{} {:?}, present mode {:?}, paced {}",
                 config.width,
