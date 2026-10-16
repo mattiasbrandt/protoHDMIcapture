@@ -48,6 +48,11 @@ VERIFICATION
   touch a monitor, or start the Windows VM, Docker or RDP. Verify with unit
   tests, offscreen or fake stand-ins, a pty (`script`) for terminal parts, and
   a scratch `CONFIG_FILE`, never the real config.
+- The built binary runs only with `--help`, `--settings` or `--dashboard`.
+  Any other run opens the card and a window, even with a setting meant to
+  refuse it: `cargo test` does not rebuild `target/debug/protohdmicapture`,
+  so the binary can predate your change (#26's worker opened the card this
+  way).
 - Each test that guards a fix fails with the bug put back; say that you checked.
 - `tools/check` passes in the worktree before you report. The pre-commit hook
   runs it on every commit.
