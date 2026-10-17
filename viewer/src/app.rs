@@ -257,19 +257,7 @@ struct Gfx {
     screenshot: Screenshot,
     scale_pipeline: wgpu::RenderPipeline,
     scale_bind_group: wgpu::BindGroup,
-    /// A filter's pass into the viewport: the polar one from the frame,
-    /// an orthogonal one's second pass from the intermediate texture.
-    filter_pipeline: wgpu::RenderPipeline,
-    /// An orthogonal filter's first pass, into the intermediate texture.
-    filter_x_pipeline: wgpu::RenderPipeline,
-    filter_layout: wgpu::BindGroupLayout,
-    /// The frame and `filter_buffer`: the polar pass, or the first pass.
-    filter_bind_group: wgpu::BindGroup,
-    filter_buffer: wgpu::Buffer,
-    filter_y_buffer: wgpu::Buffer,
-    /// An orthogonal filter's intermediate texture and its second pass's
-    /// bind group, made for the viewport's width in `relayout`.
-    filter_y: Option<(wgpu::TextureView, wgpu::BindGroup)>,
+    filters: FilterPasses,
     /// The scaler in use: None is the bilinear sampler.
     filter: Option<Filter>,
     /// Where the frame lands on the surface: x, y, width, height.
@@ -628,6 +616,25 @@ fn feedback(_: &Window) -> Result<Option<Box<dyn Feedback>>, String> {
     Ok(None)
 }
 
+/// The filter scalers' passes (scale.rs): a polar filter's one, or an
+/// orthogonal filter's two, across the rows into an intermediate texture
+/// and then down the columns into the viewport.
+struct FilterPasses {
+    /// Into the viewport: the polar pass from the frame, or an orthogonal
+    /// filter's second pass from the intermediate texture.
+    into_viewport: wgpu::RenderPipeline,
+    /// An orthogonal filter's first pass, into the intermediate texture.
+    across: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    /// The frame and `buffer`: the polar pass, or the first pass.
+    bind_group: wgpu::BindGroup,
+    buffer: wgpu::Buffer,
+    down_buffer: wgpu::Buffer,
+    /// An orthogonal filter's intermediate texture and its second pass's
+    /// bind group, made for the viewport's width in `relayout`.
+    down: Option<(wgpu::TextureView, wgpu::BindGroup)>,
+}
+
 impl App {
     fn init(&mut self, event_loop: &ActiveEventLoop) -> Result<Gfx, String> {
         let (w, h) = (self.format.width, self.format.height);
@@ -841,13 +848,15 @@ impl App {
             rgb_view,
             scale_pipeline,
             scale_bind_group,
-            filter_pipeline,
-            filter_x_pipeline,
-            filter_layout,
-            filter_bind_group,
-            filter_buffer,
-            filter_y_buffer,
-            filter_y: None,
+            filters: FilterPasses {
+                into_viewport: filter_pipeline,
+                across: filter_x_pipeline,
+                layout: filter_layout,
+                bind_group: filter_bind_group,
+                buffer: filter_buffer,
+                down_buffer: filter_y_buffer,
+                down: None,
+            },
             filter: None,
             viewport: [0, 0, 1, 1],
             timer,
@@ -868,9 +877,9 @@ impl App {
         gfx.viewport = letterbox((gfx.config.width, gfx.config.height), frame);
         let [_, _, vw, vh] = gfx.viewport;
         gfx.filter = scale::filter(self.scaling, frame, (vw, vh));
-        gfx.filter_y = None;
+        gfx.filters.down = None;
         if let Some(f) = &gfx.filter {
-            gfx.queue.write_buffer(&gfx.filter_buffer, 0, &f.bytes(frame, Axis::X));
+            gfx.queue.write_buffer(&gfx.filters.buffer, 0, &f.bytes(frame, Axis::X));
             if !f.polar {
                 let between = (vw, frame.1);
                 let view = gfx
@@ -886,16 +895,16 @@ impl App {
                         view_formats: &[],
                     })
                     .create_view(&Default::default());
-                gfx.queue.write_buffer(&gfx.filter_y_buffer, 0, &f.bytes(between, Axis::Y));
+                gfx.queue.write_buffer(&gfx.filters.down_buffer, 0, &f.bytes(between, Axis::Y));
                 let bind = gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("filter y"),
-                    layout: &gfx.filter_layout,
+                    layout: &gfx.filters.layout,
                     entries: &[
                         wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                        wgpu::BindGroupEntry { binding: 1, resource: gfx.filter_y_buffer.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: gfx.filters.down_buffer.as_entire_binding() },
                     ],
                 });
-                gfx.filter_y = Some((view, bind));
+                gfx.filters.down = Some((view, bind));
             }
         }
         if self.opts.stats {
@@ -1455,13 +1464,13 @@ impl App {
         gfx.screenshot.copy(&mut encoder, &gfx.rgb);
         {
             // An orthogonal filter: its first pass, across the rows.
-            let timestamps = match (&gfx.timer, &gfx.filter_y) {
+            let timestamps = match (&gfx.timer, &gfx.filters.down) {
                 (Some(t), Some(_)) => t.writes_split(1),
                 (Some(t), None) => [None, t.writes(1)],
                 (None, _) => [None, None],
             };
             let [first, last] = timestamps;
-            if let Some((between, _)) = &gfx.filter_y {
+            if let Some((between, _)) = &gfx.filters.down {
                 let attachments = target(between);
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("filter x"),
@@ -1471,8 +1480,8 @@ impl App {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_pipeline(&gfx.filter_x_pipeline);
-                pass.set_bind_group(0, &gfx.filter_bind_group, &[]);
+                pass.set_pipeline(&gfx.filters.across);
+                pass.set_bind_group(0, &gfx.filters.bind_group, &[]);
                 pass.draw(0..3, 0..1);
             }
             let attachments = target(&view);
@@ -1486,12 +1495,12 @@ impl App {
             });
             let [x, y, vw, vh] = gfx.viewport.map(|v| v as f32);
             pass.set_viewport(x, y, vw, vh, 0.0, 1.0);
-            if let Some((_, bind)) = &gfx.filter_y {
-                pass.set_pipeline(&gfx.filter_pipeline);
+            if let Some((_, bind)) = &gfx.filters.down {
+                pass.set_pipeline(&gfx.filters.into_viewport);
                 pass.set_bind_group(0, bind, &[]);
             } else if gfx.filter.is_some() {
-                pass.set_pipeline(&gfx.filter_pipeline);
-                pass.set_bind_group(0, &gfx.filter_bind_group, &[]);
+                pass.set_pipeline(&gfx.filters.into_viewport);
+                pass.set_bind_group(0, &gfx.filters.bind_group, &[]);
             } else {
                 pass.set_pipeline(&gfx.scale_pipeline);
                 pass.set_bind_group(0, &gfx.scale_bind_group, &[]);
