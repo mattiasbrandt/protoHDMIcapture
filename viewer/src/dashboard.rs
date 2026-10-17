@@ -13,9 +13,9 @@
 //!   goes, as view.sh's dashboard does. Quitting it touches nothing.
 //! - `open`: the d key, a new terminal running `--dashboard`.
 //!
-//! The transport is a Unix socket; on Windows (#9) a named pipe
-//! (`\\.\pipe\protohdmicapture-dashboard`) takes `transport`'s place, and
-//! the lines stay the same.
+//! The transport is a Unix socket; on Windows (#19) a named pipe
+//! (`\\.\pipe\protohdmicapture-dashboard-<run dir>`, `socket_path`) takes
+//! its place, and the lines stay the same.
 
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -56,8 +56,16 @@ const STALE: Duration = Duration::from_secs(3);
 const DISPLAY_EVERY: Duration = Duration::from_secs(5);
 
 /// The socket in the run directory.
+#[cfg(unix)]
 pub fn socket_path(run_dir: &Path) -> PathBuf {
     run_dir.join("dashboard.sock")
+}
+
+/// The named pipe on Windows (#19): one per run directory, so one per user
+/// (and per test), named after it.
+#[cfg(windows)]
+pub fn socket_path(run_dir: &Path) -> PathBuf {
+    PathBuf::from(format!(r"\\.\pipe\protohdmicapture-dashboard-{}", run_dir.display().to_string().replace(['\\', ':'], "-")))
 }
 
 /// The audio, as the dashboard shows it.
@@ -399,25 +407,33 @@ pub(crate) fn rss_mb() -> Option<f64> {
     Some(pages as f64 * unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as f64 / 1048576.0)
 }
 
-/// No CPU and memory figures off Linux yet (they read /proc).
-#[cfg(not(target_os = "linux"))]
-fn cpu_ticks() -> Option<u64> {
-    None
-}
-
-#[cfg(not(target_os = "linux"))]
-fn clock_ticks_per_s() -> f64 {
-    1.0
-}
-
-#[cfg(not(target_os = "linux"))]
-fn rss_mb() -> Option<f64> {
-    None
-}
-
-/// Why the dashboard does not run on Windows yet (#18).
+/// This process's user and system CPU time on Windows, in 100 ns ticks.
 #[cfg(windows)]
-const NOT_ON_WINDOWS: &str = "the dashboard is not on Windows yet: its named pipe is still to come (#18)";
+fn cpu_ticks() -> Option<u64> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let ticks = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
+    let (mut created, mut exited, mut kernel, mut user) = Default::default();
+    // Safety: this process's pseudo-handle and four out-pointers.
+    unsafe { GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user) }.ok()?;
+    Some(ticks(kernel) + ticks(user))
+}
+
+#[cfg(windows)]
+fn clock_ticks_per_s() -> f64 {
+    1e7
+}
+
+/// The working set, Windows' resident memory.
+#[cfg(windows)]
+fn rss_mb() -> Option<f64> {
+    use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    let mut c = PROCESS_MEMORY_COUNTERS { cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32, ..Default::default() };
+    // Safety: this process's pseudo-handle and a sized out-struct.
+    unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) }.ok().ok()?;
+    Some(c.WorkingSetSize as f64 / 1048576.0)
+}
 
 /// The Unix socket.
 #[cfg(unix)]
@@ -450,33 +466,202 @@ mod transport {
     pub fn connect(path: &Path) -> std::io::Result<Stream> {
         UnixStream::connect(path)
     }
+
+    pub fn set_read_timeout(s: &mut Stream, t: Option<std::time::Duration>) -> std::io::Result<()> {
+        s.set_read_timeout(t)
+    }
 }
 
-/// Windows: the named pipe is still to come (#18), so listening and
-/// connecting fail and nothing else here runs. The stream types only give
-/// the server and client code the same shape on both platforms; no TCP
-/// socket is ever opened.
+/// The named pipe (Windows, #19), shaped as the Unix socket is for the
+/// server and the client: a listener whose `accept` never waits, streams
+/// whose writes never wait, and a read timeout for the client.
+///
+/// - The server's instances are `PIPE_NOWAIT`: `ConnectNamedPipe` says at
+///   once whether a dashboard came, and a write puts what fits in the
+///   pipe's buffer. Each connection gets a fresh instance to listen on.
+/// - The access list grants the owner and SYSTEM only (the socket's 0600);
+///   remote clients are refused. The pipe goes with the last handle, so
+///   nothing is left behind and `inode` has nothing to compare.
+/// - The client reads in wait mode, after `PeekNamedPipe` says bytes are
+///   there, so a read timeout is a poll.
 #[cfg(windows)]
 mod transport {
+    use std::cell::RefCell;
+    use std::fs::File;
+    use std::io::{self, Read, Write};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use std::path::Path;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
-    pub type Listener = std::net::TcpListener;
-    pub type Stream = std::net::TcpStream;
+    use windows::Win32::Foundation::{
+        ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_LISTENING, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree,
+    };
+    use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+    use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_SHARE_NONE, OPEN_EXISTING,
+        PIPE_ACCESS_OUTBOUND,
+    };
+    use windows::Win32::System::Pipes::{
+        ConnectNamedPipe, CreateNamedPipeW, PIPE_NOWAIT, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PeekNamedPipe,
+        WaitNamedPipeW,
+    };
+    use windows::core::{HRESULT, HSTRING, w};
 
-    fn not_yet() -> std::io::Error {
-        std::io::Error::new(std::io::ErrorKind::Unsupported, super::NOT_ON_WINDOWS)
+    /// The pipe's buffer: a minute of lines is the server's own limit.
+    const BUFFER: u32 = 64 * 1024;
+    /// How often a client read looks for bytes.
+    const POLL: Duration = Duration::from_millis(20);
+    /// How long a client waits for a free instance: over a server tick.
+    const BUSY_WAIT_MS: u32 = 2000;
+
+    fn is(e: &windows::core::Error, code: windows::Win32::Foundation::WIN32_ERROR) -> bool {
+        e.code() == HRESULT::from_win32(code.0)
     }
 
-    pub fn listen(_: &Path) -> std::io::Result<(Listener, u64)> {
-        Err(not_yet())
+    /// The owner and SYSTEM, nobody else: a security descriptor from SDDL,
+    /// freed with the listener.
+    struct OwnerOnly(PSECURITY_DESCRIPTOR);
+
+    // Safety: the descriptor is plain memory, read by CreateNamedPipeW only.
+    unsafe impl Send for OwnerOnly {}
+
+    impl Drop for OwnerOnly {
+        fn drop(&mut self) {
+            // Safety: LocalAlloc'd by ConvertStringSecurityDescriptor..., freed once.
+            unsafe { LocalFree(Some(HLOCAL(self.0.0))) };
+        }
+    }
+
+    pub struct Listener {
+        name: HSTRING,
+        security: OwnerOnly,
+        /// The instance waiting for the next dashboard.
+        next: RefCell<File>,
+    }
+
+    fn instance(name: &HSTRING, security: &OwnerOnly, first: bool) -> io::Result<File> {
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: security.0.0,
+            bInheritHandle: false.into(),
+        };
+        let mode = if first { PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE } else { PIPE_ACCESS_OUTBOUND };
+        // Safety: a NUL-terminated name and attributes that outlive the call.
+        let h = unsafe {
+            CreateNamedPipeW(name, mode, PIPE_TYPE_BYTE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, BUFFER, 0, 0, Some(&sa))
+        };
+        if h == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        // Safety: a fresh handle this File now owns.
+        Ok(unsafe { File::from_raw_handle(h.0) })
+    }
+
+    /// The pipe at `path`, its first instance ours alone (another process
+    /// with it fails this).
+    pub fn listen(path: &Path) -> io::Result<(Listener, u64)> {
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        // Safety: an out-pointer; the descriptor is freed by OwnerOnly.
+        unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(w!("D:P(A;;GA;;;OW)(A;;GA;;;SY)"), SDDL_REVISION_1, &mut sd, None) }
+            .map_err(io::Error::from)?;
+        let security = OwnerOnly(sd);
+        let name = HSTRING::from(path.as_os_str());
+        let next = RefCell::new(instance(&name, &security, true)?);
+        Ok((Listener { name, security, next }, 0))
+    }
+
+    impl Listener {
+        /// A dashboard that has connected, or WouldBlock.
+        pub fn accept(&self) -> io::Result<(Stream, ())> {
+            let handle = HANDLE(self.next.borrow().as_raw_handle());
+            // Safety: a live pipe instance; no overlapped I/O.
+            match unsafe { ConnectNamedPipe(handle, None) } {
+                // NO_DATA: it came and went already; its first write fails.
+                Err(e) if is(&e, ERROR_PIPE_CONNECTED) || is(&e, ERROR_NO_DATA) => {}
+                Err(e) if is(&e, ERROR_PIPE_LISTENING) => return Err(io::ErrorKind::WouldBlock.into()),
+                Err(e) => return Err(e.into()),
+                Ok(()) => {}
+            }
+            let fresh = instance(&self.name, &self.security, false)?;
+            Ok((Stream { file: self.next.replace(fresh), read_timeout: None }, ()))
+        }
     }
 
     pub fn inode(_: &Path) -> Option<u64> {
         None
     }
 
-    pub fn connect(_: &Path) -> std::io::Result<Stream> {
-        Err(not_yet())
+    pub struct Stream {
+        file: File,
+        read_timeout: Option<Duration>,
+    }
+
+    impl Stream {
+        /// The server's instances never wait already.
+        pub fn set_nonblocking(&self, _: bool) -> io::Result<()> {
+            Ok(())
+        }
+
+    }
+
+    pub fn set_read_timeout(s: &mut Stream, t: Option<Duration>) -> io::Result<()> {
+        s.read_timeout = t;
+        Ok(())
+    }
+
+    impl Write for Stream {
+        /// A full pipe takes nothing: WouldBlock, as a socket says it.
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            match self.file.write(buf)? {
+                0 if !buf.is_empty() => Err(io::ErrorKind::WouldBlock.into()),
+                n => Ok(n),
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Read for Stream {
+        /// Waits for bytes up to the read timeout; the server gone is the
+        /// end of the stream.
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let start = Instant::now();
+            loop {
+                let mut available = 0u32;
+                // Safety: a live pipe handle and an out-pointer.
+                match unsafe { PeekNamedPipe(HANDLE(self.file.as_raw_handle()), None, 0, None, Some(&mut available), None) } {
+                    Err(e) if is(&e, ERROR_BROKEN_PIPE) => return Ok(0),
+                    Err(e) => return Err(e.into()),
+                    Ok(()) if available > 0 => return self.file.read(buf),
+                    Ok(()) => {}
+                }
+                if self.read_timeout.is_some_and(|t| start.elapsed() >= t) {
+                    return Err(io::ErrorKind::TimedOut.into());
+                }
+                thread::sleep(POLL);
+            }
+        }
+    }
+
+    /// The viewer's pipe, read only. Every instance busy (the server makes
+    /// the next one as it accepts, once a tick) is waited out for a while;
+    /// not there is an error the client waits out.
+    pub fn connect(path: &Path) -> io::Result<Stream> {
+        let name = HSTRING::from(path.as_os_str());
+        loop {
+            // Safety: a NUL-terminated name; the handle goes to the File.
+            match unsafe { CreateFileW(&name, FILE_GENERIC_READ.0, FILE_SHARE_NONE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) } {
+                // Safety: a fresh handle this File now owns.
+                Ok(h) => return Ok(Stream { file: unsafe { File::from_raw_handle(h.0) }, read_timeout: None }),
+                // Safety: a NUL-terminated name.
+                Err(e) if is(&e, ERROR_PIPE_BUSY) => unsafe { WaitNamedPipeW(&name, BUSY_WAIT_MS) }.ok().map_err(io::Error::from)?,
+                Err(e) => return Err(e.into()),
+            }
+        }
     }
 }
 
@@ -792,14 +977,16 @@ fn render(s: &Value, p: &Paint) -> String {
 /// a few seconds for a viewer that is still starting, as view.sh's does.
 pub fn client(run_dir: &Path) -> Result<(), String> {
     let tty = io::IsTerminal::is_terminal(&io::stdout());
+    #[cfg(windows)]
+    if tty {
+        enable_vt();
+    }
     let paint = Paint { on: tty };
     let path = socket_path(run_dir);
     let deadline = Instant::now() + CONNECT_WAIT;
-    let stream = loop {
+    let mut stream = loop {
         match transport::connect(&path) {
             Ok(s) => break s,
-            // No transport on this platform (Windows, #18): no use waiting.
-            Err(e) if e.kind() == io::ErrorKind::Unsupported => return Err(e.to_string()),
             Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
             Err(e) => {
                 println!("No Rust viewer is running ({}: {e}).", path.display());
@@ -810,7 +997,7 @@ pub fn client(run_dir: &Path) -> Result<(), String> {
             }
         }
     };
-    stream.set_read_timeout(Some(STALE)).map_err(|e| format!("dashboard socket: {e}"))?;
+    transport::set_read_timeout(&mut stream, Some(STALE)).map_err(|e| format!("dashboard socket: {e}"))?;
     let mut lines = Lines { reader: BufReader::new(stream), buf: Vec::new() };
     let mut last: Option<Value> = None;
     let mut since = Instant::now();
@@ -847,6 +1034,21 @@ pub fn client(run_dir: &Path) -> Result<(), String> {
         // A closed terminal ends the dashboard, nothing else.
         if writeln!(out, "{clear}{text}{note}").and_then(|()| out.flush()).is_err() {
             return Ok(());
+        }
+    }
+}
+
+/// The console reads the escapes the drawing uses (colour, clear, title):
+/// Windows Terminal does already, conhost only when asked.
+#[cfg(windows)]
+fn enable_vt() {
+    use windows::Win32::System::Console::{ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_OUTPUT_HANDLE, SetConsoleMode};
+    // Safety: this process's own console handle, read then set.
+    unsafe {
+        let Ok(out) = GetStdHandle(STD_OUTPUT_HANDLE) else { return };
+        let mut mode = Default::default();
+        if GetConsoleMode(out, &mut mode).is_ok() {
+            let _ = SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
         }
     }
 }
@@ -910,12 +1112,10 @@ fn on_path(name: &str) -> bool {
 /// A terminal that exits within this of its start failed to show the
 /// dashboard; a later exit is the user closing it (Ctrl-C, the window's
 /// close button), whatever status the terminal passes on.
-#[cfg(unix)]
 const TERMINAL_START: Duration = Duration::from_secs(1);
 
 /// Why the dashboard's terminal failed, from how long it ran and how it
 /// ended; None for a terminal that ran and was closed.
-#[cfg(unix)]
 fn terminal_failed(ran: Duration, status: io::Result<std::process::ExitStatus>) -> Option<String> {
     match status {
         Ok(s) if s.success() || ran >= TERMINAL_START => None,
@@ -924,10 +1124,37 @@ fn terminal_failed(ran: Duration, status: io::Result<std::process::ExitStatus>) 
     }
 }
 
-/// The d key on Windows: not yet (#18).
+/// Reaps the terminal `child`; one that fails to start says so on the window.
+fn reap(mut child: std::process::Child, name: String, notify: Option<Notify>) {
+    let started = Instant::now();
+    thread::spawn(move || {
+        let status = child.wait();
+        if let Some(why) = terminal_failed(started.elapsed(), status) {
+            eprintln!("warning: the dashboard's terminal ({name}) failed: {why}");
+            if let Some(n) = notify {
+                n(Some((format!("Dashboard: {name} failed ({why})"), Duration::from_secs(3))));
+            }
+        }
+    });
+}
+
+/// The d key on Windows (#19): `--dashboard` of this binary in a console
+/// of its own, through cmd's `start` (the desktop's terminal, Windows
+/// Terminal or conhost). Started directly, the child would get the
+/// viewer's own standard handles and draw into its terminal; cmd itself
+/// gets no window, and its exit is `start`'s, at once.
 #[cfg(windows)]
-pub fn open(_: Option<Notify>) -> Result<(), String> {
-    Err(NOT_ON_WINDOWS.into())
+pub fn open(notify: Option<Notify>) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+    let exe = std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;
+    let mut cmd = std::process::Command::new("cmd");
+    cmd.args(["/c", "start", crate::desktop::DASHBOARD_TITLE]).arg(exe).arg("--dashboard");
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    cmd.creation_flags(CREATE_NO_WINDOW.0);
+    let child = cmd.spawn().map_err(|e| format!("cannot start a console for the dashboard: {e}"))?;
+    reap(child, "cmd /c start".into(), notify);
+    Ok(())
 }
 
 /// The d key: `--dashboard` of this binary in a new terminal, in its own
@@ -951,19 +1178,8 @@ pub fn open(notify: Option<Notify>) -> Result<(), String> {
             Ok(())
         });
     }
-    let mut child = cmd.spawn().map_err(|e| format!("cannot start a terminal for the dashboard: {e}"))?;
-    let started = Instant::now();
-    let name = cmd.get_program().to_string_lossy().into_owned();
-    // Reaped here; a terminal that fails to start says so on the window.
-    thread::spawn(move || {
-        let status = child.wait();
-        if let Some(why) = terminal_failed(started.elapsed(), status) {
-            eprintln!("warning: the dashboard's terminal ({name}) failed: {why}");
-            if let Some(n) = notify {
-                n(Some((format!("Dashboard: {name} failed ({why})"), Duration::from_secs(3))));
-            }
-        }
-    });
+    let child = cmd.spawn().map_err(|e| format!("cannot start a terminal for the dashboard: {e}"))?;
+    reap(child, cmd.get_program().to_string_lossy().into_owned(), notify);
     Ok(())
 }
 
@@ -990,6 +1206,33 @@ mod tests {
         }
         assert_eq!(live.samples.lock().unwrap().len(), SAMPLES);
         assert_eq!(live.presented.load(Ordering::Relaxed), (SAMPLES + 100) as u64, "every present still counted");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn the_named_pipe_carries_lines_and_its_end() {
+        let dir = tmp("pipe");
+        let path = socket_path(&dir);
+        assert!(path.to_string_lossy().starts_with(r"\\.\pipe\protohdmicapture-dashboard-"), "{}", path.display());
+        let (listener, _) = transport::listen(&path).unwrap();
+        // Ours alone: a second first instance of the same name fails.
+        assert!(transport::listen(&path).is_err());
+        assert_eq!(listener.accept().err().map(|e| e.kind()), Some(io::ErrorKind::WouldBlock), "nobody yet");
+        let mut client = transport::connect(&path).unwrap();
+        transport::set_read_timeout(&mut client, Some(Duration::from_millis(200))).unwrap();
+        let (mut server, ()) = listener.accept().unwrap();
+        let mut r = Lines { reader: BufReader::new(client), buf: Vec::new() };
+        let e = r.next().unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut, "nothing sent yet");
+        server.write_all(b"{\"v\":1}\n").unwrap();
+        assert_eq!(r.next().unwrap().unwrap(), b"{\"v\":1}");
+        // The next dashboard gets an instance of its own.
+        let second = transport::connect(&path).unwrap();
+        assert!(listener.accept().is_ok());
+        drop(second);
+        drop(server);
+        assert_eq!(r.next().unwrap(), None, "the viewer gone is the end");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1028,14 +1271,13 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn a_dashboard_gets_only_the_runs_it_was_given() {
         let dir = tmp("given");
         let viewer = Arc::new(Live::new());
         let wizard = Live::new();
         let server = Server::start(&socket_path(&dir), viewer.clone(), None, Duration::from_millis(20)).unwrap();
-        let s = transport::connect(&socket_path(&dir)).unwrap();
-        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut s = transport::connect(&socket_path(&dir)).unwrap();
+        transport::set_read_timeout(&mut s, Some(Duration::from_secs(5))).unwrap();
         let mut r = Lines { reader: BufReader::new(s), buf: Vec::new() };
         for _ in 0..5 {
             wizard.frame();
@@ -1050,13 +1292,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn a_dashboard_gets_the_live_numbers() {
         let dir = tmp("numbers");
         let live = Arc::new(Live::new());
         let server = Server::start(&socket_path(&dir), live.clone(), None, Duration::from_millis(100)).unwrap();
-        let s = transport::connect(&socket_path(&dir)).unwrap();
-        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut s = transport::connect(&socket_path(&dir)).unwrap();
+        transport::set_read_timeout(&mut s, Some(Duration::from_secs(5))).unwrap();
         let mut r = Lines { reader: BufReader::new(s), buf: Vec::new() };
         let first = read_line(&mut r);
         assert_eq!(first["v"], VERSION);
@@ -1116,14 +1357,13 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn a_dashboard_that_stops_reading_never_holds_the_viewer() {
         let dir = tmp("slow");
         let server = Server::start(&socket_path(&dir), Arc::new(Live::new()), None, Duration::from_millis(1)).unwrap();
         // Connected, never read: the server must keep its pace and drop it.
-        let stuck = transport::connect(&socket_path(&dir)).unwrap();
-        let healthy = transport::connect(&socket_path(&dir)).unwrap();
-        healthy.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut stuck = transport::connect(&socket_path(&dir)).unwrap();
+        let mut healthy = transport::connect(&socket_path(&dir)).unwrap();
+        transport::set_read_timeout(&mut healthy, Some(Duration::from_secs(5))).unwrap();
         let mut r = Lines { reader: BufReader::new(healthy), buf: Vec::new() };
         // Thousands of ~1 KB lines: far past the socket buffer and BACKLOG.
         let mut got = 0;
@@ -1135,10 +1375,9 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(20), "the server kept going");
         // The stuck one was dropped: its socket reads to an end once drained.
         stuck.set_nonblocking(false).unwrap();
-        stuck.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        transport::set_read_timeout(&mut stuck, Some(Duration::from_secs(5))).unwrap();
         let mut sink = Vec::new();
-        let mut s = stuck;
-        s.read_to_end(&mut sink).expect("the server closed it");
+        stuck.read_to_end(&mut sink).expect("the server closed it");
         drop(server);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1264,13 +1503,12 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn a_dashboard_gets_the_display_section() {
         let dir = tmp("display");
         let display = Display::new(Desktop::Generic, dir.join("refresh.restore"));
         let server = Server::start(&socket_path(&dir), Arc::new(Live::new()), Some(display), Duration::from_millis(20)).unwrap();
-        let s = transport::connect(&socket_path(&dir)).unwrap();
-        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut s = transport::connect(&socket_path(&dir)).unwrap();
+        transport::set_read_timeout(&mut s, Some(Duration::from_secs(5))).unwrap();
         let mut r = Lines { reader: BufReader::new(s), buf: Vec::new() };
         // The first snapshot may have gone out before this dashboard was
         // accepted; the next ones carry the section.
