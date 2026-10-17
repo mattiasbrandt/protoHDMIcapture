@@ -460,6 +460,39 @@ impl Drop for Audio {
     }
 }
 
+/// The default output, as the host names it.
+#[cfg(not(windows))]
+fn default_output(host: &cpal::Host) -> Result<cpal::Device, String> {
+    host.default_output_device().ok_or_else(|| "no default output device".to_string())
+}
+
+/// The default output as the specific device it is now (#40). cpal's
+/// default-device handle activates through ActivateAudioInterfaceAsync,
+/// which fails with RPC_E_CHANGED_MODE on the window's thread (winit's
+/// OLE): every restart from the keys (#29) or with the card back lost its
+/// sound. A specific device activates through IMMDevice::Activate, as the
+/// card's input always did. A default changed later is not followed: the
+/// next start takes the new one.
+#[cfg(windows)]
+fn default_output(host: &cpal::Host) -> Result<cpal::Device, String> {
+    let default = host.default_output_device().ok_or("no default output device")?;
+    let want = default.id().map_err(|e| format!("the default output's id: {e}"))?;
+    let outputs = host.output_devices().map_err(|e| format!("audio outputs: {e}"))?;
+    let mut found = None;
+    for d in outputs {
+        match d.id() {
+            Ok(id) if id == want => {
+                found = Some(d);
+                break;
+            }
+            Ok(_) => {}
+            // An output that cannot say its id is not the one: said, and passed over.
+            Err(e) => eprintln!("warning: an audio output without an id ({e}); passed over"),
+        }
+    }
+    found.ok_or_else(|| format!("the default output ({want}) is not among the outputs"))
+}
+
 impl Audio {
     /// `source` and `sink` are PipeWire node names (no sink: the default);
     /// on Windows, endpoint names or ids (`inputs`). `buffer_ms` is
@@ -479,7 +512,7 @@ impl Audio {
         let in_name = source.to_string();
         let (out_dev, out_name) = match sink {
             Some(sink) => (by_name(sink)?.ok_or_else(|| format!("no {HOST} sink {sink} (SINK)"))?, sink.to_string()),
-            None => (host.default_output_device().ok_or("no default output device")?, "the default output".to_string()),
+            None => (default_output(&host)?, "the default output".to_string()),
         };
 
         let buffer_frames = (buffer_ms * RATE / 1000).max(1);
@@ -1036,6 +1069,35 @@ mod tests {
     /// plays: `cargo test --release -- --ignored level_on_wasapi --nocapture`.
     /// Needs an audio input, SRC or else the first; leaves the session at
     /// 100 %, unmuted.
+    /// #40: a start on a thread where OLE is initialised, as winit does on
+    /// the window's thread, with no SINK. Before the default output was
+    /// resolved to its device, the second start failed with
+    /// RPC_E_CHANGED_MODE on the output stream ("Failed to build audio
+    /// client: Cannot change thread mode after it is set").
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "needs an audio input and an output"]
+    fn starts_again_on_an_ole_thread_with_the_default_output() {
+        std::thread::spawn(|| {
+            // Safety: this thread's own OLE, balanced below.
+            unsafe { windows::Win32::System::Ole::OleInitialize(None) }.expect("OLE");
+            let src = std::env::var("SRC")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| inputs().unwrap().into_iter().next().expect("an audio input").id);
+            let first = Audio::start(&src, None, 50, 10).expect("the first start");
+            eprintln!("{}", first.describe());
+            drop(first);
+            let again = Audio::start(&src, None, 50, 10).expect("a start again, as the keys or the card's return do");
+            eprintln!("{}", again.describe());
+            drop(again);
+            // Safety: this thread's OleInitialize, above.
+            unsafe { windows::Win32::System::Ole::OleUninitialize() };
+        })
+        .join()
+        .unwrap();
+    }
+
     #[test]
     #[cfg(windows)]
     #[ignore = "needs an audio input and an output"]
