@@ -36,12 +36,63 @@ pub struct Pins<'a> {
     pub serial: &'a str,
     pub port: &'a str,
     pub ignore: &'a str,
+    /// Where the pin in effect (CARD_SERIAL, else CARD_PORT) came from, as
+    /// the missing card's message says it: "in <config file>", or "from
+    /// the environment".
+    pub source: &'a str,
 }
 
 pub struct Picked {
     pub node: Node,
     /// A DEV set aside, said once.
     pub warning: Option<String>,
+}
+
+/// Why no card was picked.
+#[derive(Debug)]
+pub enum PickError {
+    /// The card the pins name is not plugged in (#39): the setup can
+    /// choose a card again.
+    Missing(Missing),
+    Other(String),
+}
+
+/// The pinned card not found (#39): what was found instead, what to
+/// check, and how to choose a card again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Missing {
+    pub headline: String,
+    /// "found instead: …", and the other hints.
+    pub details: Vec<String>,
+    /// "to choose a card again: …".
+    pub setup: String,
+}
+
+impl std::fmt::Display for Missing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.headline)?;
+        for d in self.details.iter().chain([&self.setup]) {
+            write!(f, "\n  {d}")?;
+        }
+        Ok(())
+    }
+}
+
+impl Missing {
+    /// A desktop notification's body (#28): the first line and how to
+    /// choose again; the details are on stderr and in the log.
+    pub fn notice(&self) -> String {
+        format!("{}\n{}", self.headline, self.setup)
+    }
+}
+
+impl std::fmt::Display for PickError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PickError::Missing(m) => m.fmt(f),
+            PickError::Other(e) => f.write_str(e),
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -107,11 +158,11 @@ fn ignored(ignore: &Option<Regex>, card_type: &str) -> bool {
 
 /// `resolve_card` over the given nodes; `dev_node` describes DEV when set
 /// (None: it does not exist).
-pub fn pick(nodes: &[Node], pins: &Pins, dev_node: Option<Option<(String, bool)>>, config: &str) -> Result<Picked, String> {
+pub fn pick(nodes: &[Node], pins: &Pins, dev_node: Option<Option<(String, bool)>>, config: &str) -> Result<Picked, PickError> {
     let ignore = if pins.ignore.is_empty() {
         None
     } else {
-        Some(Regex::new(pins.ignore).map_err(|e| format!("IGNORE_CARDS_RE={} is not a valid pattern: {e}", pins.ignore))?)
+        Some(Regex::new(pins.ignore).map_err(|e| PickError::Other(format!("IGNORE_CARDS_RE={} is not a valid pattern: {e}", pins.ignore)))?)
     };
     let mut warning = None;
     if !pins.dev.is_empty() {
@@ -132,9 +183,9 @@ pub fn pick(nodes: &[Node], pins: &Pins, dev_node: Option<Option<(String, bool)>
         // With no pin, a scan would open the first capture node left: a
         // webcam not on the ignore list, and its mic on the speakers.
         if pins.serial.is_empty() && pins.port.is_empty() {
-            return Err(format!(
+            return Err(PickError::Other(format!(
                 "{reason}; the card has no other pin, so it cannot be found again safely: plug it back in, or re-run the setup"
-            ));
+            )));
         }
         warning = Some(format!("{reason}; looking for the capture card instead"));
     }
@@ -160,16 +211,49 @@ pub fn pick(nodes: &[Node], pins: &Pins, dev_node: Option<Option<(String, bool)>
         return Ok(Picked { node: n.clone(), warning });
     }
     Err(if let Some(a) = at_pin {
-        format!(
+        PickError::Other(format!(
             "the device at the card pin, {a}, is an ignored device (IGNORE_CARDS_RE in {config}): if it is the capture card, take it off that list; if not, plug the card back in where it was"
-        )
-    } else if !pins.serial.is_empty() {
-        format!("no capture card with serial {} found; is it plugged in? (CARD_SERIAL in {config})", pins.serial)
-    } else if !pins.port.is_empty() {
-        format!("no capture card on USB port {}; is it plugged in, and into the same port? Re-run the setup if it moved", pins.port)
+        ))
+    } else if !pins.serial.is_empty() || !pins.port.is_empty() {
+        PickError::Missing(missing(nodes, pins, &ignore))
     } else {
-        "no capture device found; set DEV=/dev/videoN (or run the setup)".to_string()
+        PickError::Other("no capture device found; set DEV=/dev/videoN (or run the setup)".to_string())
     })
+}
+
+/// The pinned card not among `nodes` (#39), said with what is there.
+fn missing(nodes: &[Node], pins: &Pins, ignore: &Option<Regex>) -> Missing {
+    let headline = if !pins.serial.is_empty() {
+        format!("the capture card with serial {} is not plugged in (CARD_SERIAL {})", pins.serial, pins.source)
+    } else {
+        format!("the capture card on USB port {} is not plugged in (CARD_PORT {})", pins.port, pins.source)
+    };
+    let found: Vec<String> = nodes
+        .iter()
+        .map(|n| match (ignored(ignore, &n.card_type), n.serial.as_str(), n.port.as_str()) {
+            (true, _, _) => format!("{} (ignored)", n.card_type),
+            (false, "", "") => n.card_type.clone(),
+            (false, "", port) => format!("{} (port {port})", n.card_type),
+            (false, serial, _) => format!("{} (serial {serial})", n.card_type),
+        })
+        .collect();
+    let mut details = vec![format!("found instead: {}", if found.is_empty() { "none".to_string() } else { found.join(", ") })];
+    // A card pinned by its port has no serial to know it by elsewhere: a
+    // capture device on another port may be it, moved.
+    if pins.serial.is_empty()
+        && let Some(n) = nodes.iter().find(|n| !ignored(ignore, &n.card_type) && !n.port.is_empty())
+    {
+        details.push(format!("moved? {} is on USB port {}: if it is the card, the setup pins it there", n.card_type, n.port));
+    }
+    details.push("check: the card's USB cable, and that it is on a USB 3 port".into());
+    // view.sh's own wizard beside it where view.sh runs (wizard.rs
+    // `has_view_sh`: Linux).
+    let setup = if cfg!(target_os = "linux") {
+        "to choose a card again: protohdmicapture --setup (or ./view.sh --setup)"
+    } else {
+        "to choose a card again: protohdmicapture --setup"
+    };
+    Missing { headline, details, setup: setup.into() }
 }
 
 #[cfg(target_os = "linux")]
@@ -253,7 +337,20 @@ mod tests {
     }
 
     fn pins<'a>(dev: &'a str, serial: &'a str, port: &'a str, ignore: &'a str) -> Pins<'a> {
-        Pins { dev, serial, port, ignore }
+        Pins { dev, serial, port, ignore, source: "in cfg" }
+    }
+
+    /// The error's text, whichever kind.
+    fn err(r: Result<Picked, PickError>) -> String {
+        r.err().expect("an error").to_string()
+    }
+
+    fn missing_of(r: Result<Picked, PickError>) -> Missing {
+        match r {
+            Err(PickError::Missing(m)) => m,
+            Err(PickError::Other(e)) => panic!("not the missing card: {e}"),
+            Ok(p) => panic!("picked {}", p.node.path.display()),
+        }
     }
 
     #[test]
@@ -274,13 +371,16 @@ mod tests {
 
     #[test]
     fn an_ignored_device_at_the_pin_is_never_opened() {
-        let e = pick(&nodes(), &pins("", "CAM1", "", "OBSBOT"), None, "cfg").err().unwrap();
+        let r = pick(&nodes(), &pins("", "CAM1", "", "OBSBOT"), None, "cfg");
+        // Not the missing card: the setup's offer is not for this one.
+        assert!(matches!(r, Err(PickError::Other(_))));
+        let e = err(r);
         assert!(e.contains("/dev/video0 (OBSBOT Meet 2), is an ignored device"), "{e}");
     }
 
     #[test]
     fn a_missing_dev_without_a_pin_stops() {
-        let e = pick(&nodes(), &pins("/dev/video9", "", "", ""), Some(None), "cfg").err().unwrap();
+        let e = err(pick(&nodes(), &pins("/dev/video9", "", "", ""), Some(None), "cfg"));
         assert!(e.starts_with("DEV=/dev/video9 does not exist (any more); the card has no other pin"), "{e}");
         let p = pick(&nodes(), &pins("/dev/video9", "20000130041415", "", ""), Some(None), "cfg").unwrap();
         assert_eq!(p.node.path, Path::new("/dev/video2"));
@@ -289,15 +389,63 @@ mod tests {
 
     #[test]
     fn a_dev_that_is_a_metadata_node_is_set_aside() {
-        let e = pick(&nodes(), &pins("/dev/video3", "", "", ""), Some(Some(("UVC Camera".into(), false))), "cfg")
-            .err()
-            .unwrap();
+        let e = err(pick(&nodes(), &pins("/dev/video3", "", "", ""), Some(Some(("UVC Camera".into(), false))), "cfg"));
         assert!(e.contains("is UVC Camera now, not a video capture node"), "{e}");
     }
 
+    /// The setup line as this platform writes it.
+    fn setup_line() -> &'static str {
+        if cfg!(target_os = "linux") {
+            "to choose a card again: protohdmicapture --setup (or ./view.sh --setup)"
+        } else {
+            "to choose a card again: protohdmicapture --setup"
+        }
+    }
+
     #[test]
-    fn no_card_with_the_serial() {
-        let e = pick(&nodes(), &pins("", "NOPE", "", ""), None, "cfg").err().unwrap();
-        assert!(e.starts_with("no capture card with serial NOPE found"), "{e}");
+    fn the_missing_card_by_serial_says_what_is_there_and_how_to_choose_again() {
+        // The laptop (#39): the card unplugged, its serial from the file.
+        let laptop = [node(r"\\?\usb#vid_5986", "", r"PCIROOT(0)#USB(5)", "Integrated Camera")];
+        let p = Pins { source: r"in C:\Users\m\AppData\Roaming\protohdmicapture\config", ..pins("", "20000130041415", "", "Integrated Camera") };
+        let m = missing_of(pick(&laptop, &p, None, "cfg"));
+        assert_eq!(
+            m.to_string(),
+            format!(
+                "the capture card with serial 20000130041415 is not plugged in (CARD_SERIAL in C:\\Users\\m\\AppData\\Roaming\\protohdmicapture\\config)\n  found instead: Integrated Camera (ignored)\n  check: the card's USB cable, and that it is on a USB 3 port\n  {}",
+                setup_line()
+            )
+        );
+        // The notification: the first line and how to choose again.
+        assert_eq!(m.notice(), format!("{}\n{}", m.headline, setup_line()));
+        // From the environment, as `--settings` says CARD_SERIAL=…(env).
+        let m = missing_of(pick(&laptop, &Pins { source: "from the environment", ..pins("", "20000130041415", "", "") }, None, "cfg"));
+        assert_eq!(m.headline, "the capture card with serial 20000130041415 is not plugged in (CARD_SERIAL from the environment)");
+        // Not ignored: each device with its serial, or its port without one.
+        assert_eq!(m.details[0], "found instead: Integrated Camera (port PCIROOT(0)#USB(5))");
+        let m = missing_of(pick(&nodes(), &pins("", "NOPE", "", "OBSBOT"), None, "cfg"));
+        assert_eq!(m.details[0], "found instead: OBSBOT Meet 2 (ignored), UVC Camera (1e4e:7016) (serial 20000130041415), USB Video (port pci-c)");
+        // A serial pin: no "moved?" guess, the serial would have found it.
+        assert!(!m.details.iter().any(|d| d.starts_with("moved?")), "{:?}", m.details);
+        // Nothing plugged in at all.
+        let m = missing_of(pick(&[], &pins("", "NOPE", "", ""), None, "cfg"));
+        assert_eq!(m.details[0], "found instead: none");
+    }
+
+    #[test]
+    fn the_missing_card_by_port_names_a_capture_device_on_another_port() {
+        // No serial (the card is pinned by its port): one not ignored
+        // elsewhere may be it, moved.
+        let m = missing_of(pick(&nodes(), &pins("", "", "pci-z", "OBSBOT"), None, "cfg"));
+        assert_eq!(m.headline, "the capture card on USB port pci-z is not plugged in (CARD_PORT in cfg)");
+        assert_eq!(m.details[1], "moved? UVC Camera (1e4e:7016) is on USB port pci-b: if it is the card, the setup pins it there");
+        // Only ignored devices: no guess.
+        let m = missing_of(pick(&nodes()[..1], &pins("", "", "pci-z", "OBSBOT"), None, "cfg"));
+        assert_eq!(m.details, ["found instead: OBSBOT Meet 2 (ignored)", "check: the card's USB cable, and that it is on a USB 3 port"]);
+    }
+
+    #[test]
+    fn no_pin_and_no_device_is_not_the_missing_card() {
+        // Nothing saved to miss: the setup's offer is not for this one.
+        assert!(matches!(pick(&[], &pins("", "", "", ""), None, "cfg"), Err(PickError::Other(_))));
     }
 }

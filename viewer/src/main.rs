@@ -285,11 +285,78 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
     Ok(wiz.borrow().outcome() == Some(Outcome::Play) && !quit.requested())
 }
 
+/// Why the viewer ends in error. The saved card not plugged in is told
+/// apart (#39): a console held open offers the setup for it.
+#[derive(Debug)]
+enum Fatal {
+    CardMissing(card::Missing),
+    Other(String),
+}
+
+impl From<String> for Fatal {
+    fn from(e: String) -> Self {
+        Fatal::Other(e)
+    }
+}
+
+impl From<&str> for Fatal {
+    fn from(e: &str) -> Self {
+        Fatal::Other(e.to_string())
+    }
+}
+
+impl From<card::PickError> for Fatal {
+    fn from(e: card::PickError) -> Self {
+        match e {
+            card::PickError::Missing(m) => Fatal::CardMissing(m),
+            card::PickError::Other(e) => Fatal::Other(e),
+        }
+    }
+}
+
+impl std::fmt::Display for Fatal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Fatal::CardMissing(m) => m.fmt(f),
+            Fatal::Other(e) => f.write_str(e),
+        }
+    }
+}
+
+impl Fatal {
+    /// The desktop notification's body (#28).
+    fn notice(&self) -> String {
+        match self {
+            Fatal::CardMissing(m) => m.notice(),
+            Fatal::Other(e) => e.clone(),
+        }
+    }
+}
+
+/// Where the pin in effect came from, as the missing card's message says
+/// it (#39): CARD_SERIAL, else CARD_PORT.
+fn pin_source(s: &Settings) -> String {
+    let pin = if s.get("CARD_SERIAL").is_empty() { "CARD_PORT" } else { "CARD_SERIAL" };
+    match s.from(pin) {
+        settings::From::Env => "from the environment".into(),
+        settings::From::Saved => format!("in {}", s.config_file.display()),
+        settings::From::Menu => "from the menu's defaults".into(),
+        settings::From::Default => "by default".into(),
+    }
+}
+
 /// The card the settings pin, opened at `format`: V4L2 on Linux, Media
 /// Foundation on Windows (#18), where DEV may hold the device's friendly
 /// name or its symbolic link.
-fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::FrameSource>, card::Node), String> {
-    let pins = card::Pins { dev: s.get("DEV"), serial: s.get("CARD_SERIAL"), port: s.get("CARD_PORT"), ignore: s.get("IGNORE_CARDS_RE") };
+fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::FrameSource>, card::Node), Fatal> {
+    let source = pin_source(s);
+    let pins = card::Pins {
+        dev: s.get("DEV"),
+        serial: s.get("CARD_SERIAL"),
+        port: s.get("CARD_PORT"),
+        ignore: s.get("IGNORE_CARDS_RE"),
+        source: &source,
+    };
     let picked = card::pick(&card::list(), &pins, card::describe_dev(pins.dev), &s.config_file.display().to_string())?;
     if let Some(w) = &picked.warning {
         eprintln!("warning: {w}");
@@ -314,7 +381,7 @@ fn settings(menu: bool) -> Settings {
     if menu { s.with_menu_defaults() } else { s }
 }
 
-fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
+fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     // First run: no settings file, so the wizard, as view.sh offers it
     // (not for a measurement run, nor for the wizard's own children).
     let unset = |k: &str| env::var_os(k).is_none_or(|v| v.is_empty());
@@ -373,7 +440,7 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
     }
     let errors = s.errors();
     if !errors.is_empty() {
-        return Err(format!("settings:\n  {}", errors.join("\n  ")));
+        return Err(format!("settings:\n  {}", errors.join("\n  ")).into());
     }
     for n in view_sh_only::check(&s)? {
         eprintln!("note: {n}");
@@ -439,7 +506,7 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
     } else {
         let opened = open_card(&s, format);
         if let (Err(e), Some(log)) = (&opened, &debug_log) {
-            log.ended(&Err(e.clone()));
+            log.ended(&Err(e.to_string()));
         }
         let (source, node) = opened?;
         (source, Some(node))
@@ -539,7 +606,7 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
     if let Some(log) = &debug_log {
         log.ended(&result);
     }
-    result
+    result.map_err(Fatal::from)
 }
 
 /// Whether a fatal error waits for Enter before the viewer ends (#38): a
@@ -552,11 +619,29 @@ fn holds_console(processes: u32, stdin_is_console: bool) -> bool {
     processes == 1 && stdin_is_console
 }
 
+/// What a held console asks: with the setup offered (the saved card not
+/// plugged in, #39), S runs it; Enter closes.
+#[cfg(any(windows, test))]
+fn hold_prompt(offer_setup: bool) -> &'static str {
+    if offer_setup { "Press S to run the setup, Enter to close." } else { "Press Enter to close." }
+}
+
+/// The answer to `hold_prompt`, a line from `input`: true for the setup.
+/// S (either case) when it was offered; anything else, or the input's
+/// end, closes.
+#[cfg(any(windows, test))]
+fn wants_setup(input: &mut impl std::io::BufRead, offer_setup: bool) -> std::io::Result<bool> {
+    let mut line = String::new();
+    input.read_line(&mut line)?;
+    Ok(offer_setup && line.trim().eq_ignore_ascii_case("s"))
+}
+
 /// After a fatal error is printed: on Windows, a console that would close
-/// with the viewer stays open until Enter (`holds_console`). #28's desktop
-/// notification never fires there: stderr is a console.
+/// with the viewer stays open until Enter (`holds_console`), or S where the
+/// setup is offered. True: run the setup. #28's desktop notification never
+/// fires there: stderr is a console.
 #[cfg(windows)]
-fn hold_console() {
+fn hold_console(offer_setup: bool) -> bool {
     use std::io::IsTerminal;
     let mut pids = [0u32; 2];
     // Safety: a buffer it fills up to its length; the count is all the
@@ -564,19 +649,28 @@ fn hold_console() {
     let processes = unsafe { windows::Win32::System::Console::GetConsoleProcessList(&mut pids) };
     if processes == 0 {
         eprintln!("warning: the console's processes: {}", std::io::Error::last_os_error());
-        return;
+        return false;
     }
     if !holds_console(processes, std::io::stdin().is_terminal()) {
-        return;
+        return false;
     }
-    eprintln!("Press Enter to close.");
-    if let Err(e) = std::io::stdin().read_line(&mut String::new()) {
+    eprintln!("{}", hold_prompt(offer_setup));
+    wants_setup(&mut std::io::stdin().lock(), offer_setup).unwrap_or_else(|e| {
         eprintln!("warning: waiting for Enter: {e}");
-    }
+        false
+    })
 }
 
+/// No console is held on Linux: a terminal or a notification has the error.
 #[cfg(not(windows))]
-fn hold_console() {}
+fn hold_console(_offer_setup: bool) -> bool {
+    false
+}
+
+/// `--setup`: the wizard, then the feed if it was saved and asked for.
+fn setup_then_view(quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
+    if setup(false, quit)? { view(&[], quit, menu) } else { Ok(()) }
+}
 
 fn main() -> ExitCode {
     environment();
@@ -623,34 +717,83 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("protohdmicapture: {e}");
             desktop::Notice::Failed(e).send();
-            hold_console();
+            hold_console(false);
             return ExitCode::FAILURE;
         }
     };
-    let result = if args.first().map(String::as_str) == Some("--setup") {
+    let mut result = if args.first().map(String::as_str) == Some("--setup") {
         if args.len() > 1 {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
         }
-        setup(false, &quit).and_then(|play| if play { view(&[], &quit, menu) } else { Ok(()) })
+        setup_then_view(&quit, menu)
     } else {
         view(&args, &quit, menu)
     };
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("protohdmicapture: {e}");
-            // Started from a menu: nobody reads stderr (view.sh's die).
-            desktop::Notice::Failed(e).send();
-            hold_console();
-            ExitCode::FAILURE
+    loop {
+        let e = match result {
+            Ok(()) => return ExitCode::SUCCESS,
+            Err(e) => e,
+        };
+        eprintln!("protohdmicapture: {e}");
+        // Started from a menu: nobody reads stderr (view.sh's die).
+        desktop::Notice::Failed(e.notice()).send();
+        // The saved card not plugged in: a held console offers the setup
+        // (#39), and its end is said the same way.
+        if !hold_console(matches!(e, Fatal::CardMissing(_))) {
+            return ExitCode::FAILURE;
         }
+        result = setup_then_view(&quit, menu);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{card_input, holds_console};
+    use super::{Fatal, card, card_input, hold_prompt, holds_console, wants_setup};
+
+    #[test]
+    fn a_held_console_offers_the_setup_only_for_the_missing_card() {
+        assert_eq!(hold_prompt(true), "Press S to run the setup, Enter to close.");
+        assert_eq!(hold_prompt(false), "Press Enter to close.");
+        // S, either case, around spaces: the setup, when offered.
+        for line in ["s\r\n", "S\n", "  s \n"] {
+            assert!(wants_setup(&mut line.as_bytes(), true).unwrap(), "{line:?}");
+            assert!(!wants_setup(&mut line.as_bytes(), false).unwrap(), "{line:?}");
+        }
+        // Enter, anything else, or the input's end: close.
+        for line in ["\r\n", "\n", "setup\n", "q\n", ""] {
+            assert!(!wants_setup(&mut line.as_bytes(), true).unwrap(), "{line:?}");
+        }
+        // The offer follows the error's kind, not its text.
+        let missing = card::Missing { headline: "h".into(), details: vec![], setup: "s".into() };
+        assert!(matches!(Fatal::from(card::PickError::Missing(missing)), Fatal::CardMissing(_)));
+        let other = Fatal::from("the capture card with serial X is not plugged in".to_string());
+        assert!(matches!(other, Fatal::Other(_)));
+    }
+
+    #[test]
+    fn the_pin_is_said_where_it_came_from() {
+        // #39: CARD_SERIAL from the environment was said to be in the file.
+        let dir = std::env::temp_dir().join(format!("protohdmi-pin-source-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config");
+        std::fs::write(&file, "CARD_SERIAL=20000130041415\nCARD_PORT=pci-b\n").unwrap();
+        let config = file.display().to_string();
+        let resolve = |env: &[(&str, &str)]| {
+            let env: Vec<(String, String)> = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            super::Settings::resolve_with(&|k| {
+                if k == "CONFIG_FILE" {
+                    return Some(config.clone());
+                }
+                env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
+            })
+        };
+        assert_eq!(super::pin_source(&resolve(&[])), format!("in {config}"));
+        assert_eq!(super::pin_source(&resolve(&[("CARD_SERIAL", "20000130041415")])), "from the environment");
+        // No serial: the port is the pin, and its own source is said.
+        assert_eq!(super::pin_source(&resolve(&[("CARD_SERIAL", ""), ("CARD_PORT", "pci-c")])), "from the environment");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_fatal_error_holds_only_a_console_of_its_own() {
