@@ -139,13 +139,35 @@ pub fn run(
     Ok(())
 }
 
-/// Frames lost between two sample times (100 ns units) at `fps`, where a
-/// source has times but no sequence numbers (Media Foundation): the
-/// periods skipped when the step is over 1.5 periods.
-fn lost_between(prev: i64, now: i64, fps: f64) -> u32 {
-    let period = 1e7 / fps.max(1.0);
-    let step = (now - prev) as f64;
-    if step > 1.5 * period { ((step / period).round() as u32).saturating_sub(1) } else { 0 }
+/// How much of the carried lateness leaks away each frame: about two
+/// seconds at 60 fps, so a card a little off FPS (the MS2130 runs at
+/// 60.08 Hz by the PC's clock) never adds up to a frame.
+const LATE_LEAK: f64 = 1.0 / 120.0;
+
+/// Lost frames from sample times (100 ns units), where a source has times
+/// but no sequence numbers (Media Foundation). Each step's lateness against
+/// the period is carried to the next, so a frame late by one period at
+/// once is a lost frame, and times that wander are not: the MS2130's come
+/// 0.64 ms early 24 times, then 31.4 ms after the last (#19), which a step
+/// alone reads as a lost frame every 25.
+#[derive(Default)]
+struct TimeGaps {
+    prev: Option<i64>,
+    /// How late this frame is, in 100 ns units, on the grid the earlier
+    /// frames set (negative: early).
+    late: f64,
+}
+
+impl TimeGaps {
+    /// The frames lost before the sample at `now`.
+    fn lost(&mut self, now: i64, fps: f64) -> u32 {
+        let period = 1e7 / fps.max(1.0);
+        let Some(prev) = self.prev.replace(now) else { return 0 };
+        self.late = self.late * (1.0 - LATE_LEAK) + ((now - prev) as f64 - period);
+        let lost = (self.late / period).round().max(0.0);
+        self.late -= lost * period;
+        lost as u32
+    }
 }
 
 struct Policy {
@@ -159,6 +181,7 @@ struct Policy {
     /// The last mark seen, and the count `Mark::Time` gaps are numbered by.
     last_mark: Option<Mark>,
     counted: u32,
+    time_gaps: TimeGaps,
     decoder: Option<mjpeg::Decoder>,
     /// The frame decoded or packed into.
     out: Vec<u8>,
@@ -176,6 +199,7 @@ impl Policy {
             state: Signal::Picture,
             last_mark: None,
             counted: 0,
+            time_gaps: TimeGaps::default(),
             decoder,
             out: vec![0; format.frame_size()],
         }
@@ -233,8 +257,9 @@ impl Policy {
                 let step = seq.wrapping_sub(prev);
                 (step != 1).then(|| Event::Gap { from: prev, to: seq, lost: step.wrapping_sub(1) })
             }
-            (Some(Mark::Time(prev)), Mark::Time(t)) => {
-                let lost = lost_between(prev, t, self.format.fps);
+            // The first time too: it sets the grid.
+            (_, Mark::Time(t)) => {
+                let lost = self.time_gaps.lost(t, self.format.fps);
                 let from = self.counted;
                 self.counted = self.counted.wrapping_add(lost);
                 (lost > 0).then(|| Event::Gap { from, to: from.wrapping_add(lost + 1), lost })
@@ -476,13 +501,40 @@ mod tests {
         assert_eq!(gaps, [&Said::Gap(3, 6, 2)]);
     }
 
+    /// The lost frames `TimeGaps` finds in `times` (100 ns units) at 60 fps.
+    fn lost_in(times: impl IntoIterator<Item = i64>) -> Vec<u32> {
+        let mut g = TimeGaps::default();
+        times.into_iter().map(|t| g.lost(t, 60.0)).collect()
+    }
+
     #[test]
     fn lost_frames_from_sample_times() {
         let p = 166_667;
-        assert_eq!(lost_between(0, p, 60.0), 0);
-        assert_eq!(lost_between(0, p * 14 / 10, 60.0), 0, "jitter under 1.5 periods");
-        assert_eq!(lost_between(0, 2 * p, 60.0), 1);
-        assert_eq!(lost_between(0, 5 * p, 60.0), 4);
+        assert_eq!(lost_in([0, p, 2 * p]), [0, 0, 0]);
+        assert_eq!(lost_in([0, p * 14 / 10, 2 * p]), [0, 0, 0], "a late frame back on the grid");
+        assert_eq!(lost_in([0, 2 * p, 3 * p]), [0, 1, 0]);
+        assert_eq!(lost_in([0, 5 * p, 6 * p]), [0, 4, 0]);
+    }
+
+    #[test]
+    fn times_that_wander_lose_nothing_and_a_lost_frame_still_counts() {
+        // The MS2130 on Windows (#19): 16.03 ms 24 times, then 31.4 ms.
+        let mut t = 0i64;
+        let mut times = vec![t];
+        for i in 1..=25 * 40 {
+            t += if i % 25 == 0 { 314_000 } else { 160_300 };
+            times.push(t);
+        }
+        assert_eq!(lost_in(times.clone()).iter().sum::<u32>(), 0, "no frame lost in 1000");
+        // The same with one frame gone mid-run: one more period.
+        for x in &mut times[512..] {
+            *x += 166_667;
+        }
+        assert_eq!(lost_in(times).iter().sum::<u32>(), 1);
+        // A card a little off FPS never adds up to a lost frame: 59.94 Hz
+        // for an hour.
+        let slow = (0..216_000i64).map(|i| i * 166_833);
+        assert_eq!(lost_in(slow).iter().sum::<u32>(), 0);
     }
 
     #[test]
