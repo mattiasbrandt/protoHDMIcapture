@@ -643,6 +643,18 @@ impl App {
         {
             attrs = attrs.with_name("protohdmicapture", "protohdmicapture");
         }
+        // The exe's icon resource (build.rs, #35): winit's window class has
+        // none, so the title bar and the taskbar are given it. On Wayland the
+        // icon comes from the .desktop file, through the app id above.
+        #[cfg(windows)]
+        {
+            use winit::platform::windows::{IconExtWindows, WindowAttributesExtWindows};
+            let icon = |px| winit::window::Icon::from_resource(1, Some(PhysicalSize::new(px, px)));
+            match (icon(32), icon(256)) {
+                (Ok(small), Ok(big)) => attrs = attrs.with_window_icon(Some(small)).with_taskbar_icon(Some(big)),
+                (Err(e), _) | (_, Err(e)) => eprintln!("warning: the window's icon: {e}"),
+            }
+        }
         attrs = match self.opts.window {
             WindowMode::Fullscreen => {
                 let monitor = match &self.opts.monitor {
