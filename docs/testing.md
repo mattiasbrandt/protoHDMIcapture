@@ -109,7 +109,15 @@ trusting it. Below: the traps that produce false results on real runs.
   44.9 ms, p99 53.7 ms, 2 repeated refreshes. Re-measure against it after a
   change to pacing, the event loop or the present path; count the repeated
   refreshes too (they come in bursts every ~37 s at 60.00 against 59.97 Hz,
-  so run at least 2 minutes).
+  so run at least 2 minutes). `27c31d3` (draw in `about_to_wait`, two-pass
+  scalers) matched it on 2026-10-17, against `0251c13` on DP-2 at 59.95 Hz
+  (#19).
+- **Check that the scaler runs.** The `scaling:` line names the filter;
+  1080p fullscreen on a 1920x1200 monitor is 1:1, a bilinear sampler and
+  no filter. A windowed 1280x720 runs mitchell; an upscale needs a bigger
+  monitor, or `--test-pattern` with `RES=1280x720` fullscreen (spline36).
+- **`s` screenshots are taken before scaling**, at the capture's size: to
+  compare scalers, grab the window from the compositor (`grim`).
 - **The MS2109 sends about 7 s of black** after every stream start, with a
   source playing: a shorter probe sees only black.
 
