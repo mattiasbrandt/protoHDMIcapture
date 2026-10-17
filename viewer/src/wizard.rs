@@ -176,6 +176,21 @@ pub trait System {
     fn can_match_refresh(&self) -> bool;
     /// The loopback from `source`, held back by `delay_ms`.
     fn start_audio(&self, source: &str, delay_ms: u32) -> Result<Box<dyn Tuner>, String>;
+    /// How a node is named on the pages: its path (Windows shortens its
+    /// device links, which run to two lines).
+    fn label(&self, node: &Node) -> String {
+        node.path.display().to_string()
+    }
+    /// Why no USB link speed is known on this platform, when that is why
+    /// (said with the warning); None where the platform tells it.
+    fn no_link_speed(&self) -> Option<&'static str> {
+        None
+    }
+    /// view.sh runs here too (Linux): its player and its commands are named
+    /// on the pages. Windows has no view.sh.
+    fn has_view_sh(&self) -> bool {
+        true
+    }
 }
 
 /// A key, as the wizard reads them (app.rs maps the toolkit's).
@@ -673,7 +688,7 @@ impl Wizard {
         self.show(Step::Welcome, body, ask);
     }
 
-    fn node_label(n: &Node) -> String {
+    fn node_label(&self, n: &Node) -> String {
         let id = if !n.serial.is_empty() {
             format!(" · serial {}", n.serial)
         } else if !n.port.is_empty() {
@@ -681,7 +696,7 @@ impl Wizard {
         } else {
             String::new()
         };
-        format!("{}  {}{id}", n.card_type, n.path.display())
+        format!("{}  {}{id}", n.card_type, self.sys.label(n))
     }
 
     fn usb_known(&self, n: &Node) -> bool {
@@ -702,7 +717,7 @@ impl Wizard {
         let mut items = Vec::new();
         for (i, n) in self.nodes.iter().enumerate() {
             let tag = ignored(&ignore, &n.card_type).then_some("ignored");
-            items.push(Item { key: i.to_string(), label: Self::node_label(n), tag: tag.map(str::to_string) });
+            items.push(Item { key: i.to_string(), label: self.node_label(n), tag: tag.map(str::to_string) });
             let cur = |k: &str| self.cur.get(k).map(String::as_str).unwrap_or("");
             if !n.serial.is_empty() && n.serial == cur("CARD_SERIAL") {
                 def = def.or(Some(i));
@@ -745,7 +760,7 @@ impl Wizard {
             self.set("CARD_SERIAL", "");
             self.set("CARD_PORT", "");
             self.set("DEV", &node.path.display().to_string());
-            lines.push(format!("Warning: this card reports no serial, so it is pinned by node ({}).", node.path.display()));
+            lines.push(format!("Warning: this card reports no serial, so it is pinned by node ({}).", self.sys.label(&node)));
             lines.push("Node numbers can change when devices are replugged; re-run setup if it moves.".into());
         }
         // Ignored devices (IGNORE_CARDS_RE): the other video devices,
@@ -779,7 +794,7 @@ impl Wizard {
                 self.ignore_notes.push(format!(
                     "{} ({}) has the capture card's name, so it cannot be ignored by name.",
                     n.card_type,
-                    n.path.display()
+                    self.sys.label(&n)
                 ));
                 continue;
             }
@@ -788,10 +803,10 @@ impl Wizard {
                 body.push(String::new());
             }
             let ask = if self.usb_known(&n) {
-                body.push(format!("{} ({}) is a capture card too.", n.card_type, n.path.display()));
+                body.push(format!("{} ({}) is a capture card too.", n.card_type, self.sys.label(&n)));
                 yes_no("Ignore it from now on?", false)
             } else {
-                body.push(format!("{} ({}) is not the capture card.", n.card_type, n.path.display()));
+                body.push(format!("{} ({}) is not the capture card.", n.card_type, self.sys.label(&n)));
                 yes_no("Ignore it from now on (a camera)?", true)
             };
             return self.show(Step::CardIgnore(i), body, ask);
@@ -815,7 +830,7 @@ impl Wizard {
         let mut body = self.card_lines.clone();
         body.push(String::new());
         let Some(u) = self.usb.clone() else {
-            body.push(format!("Warning: {} is not on USB; nothing to check here.", card.path.display()));
+            body.push(format!("Warning: {} is not on USB; nothing to check here.", self.sys.label(&card)));
             return self.show(Step::CardDetails, body, Ask::Continue);
         };
         let (_, cc) = capture_cards::lookup(&u.id);
@@ -871,7 +886,11 @@ impl Wizard {
                 body.push("Failed: link 480 Mbit/s, a USB 2 port or hub".into());
                 body.push("Uncompressed 1080p60 needs USB 3: move the card to a rear USB 3 port.".into());
             }
-            (s, _) => body.push(format!("Warning: link {} Mbit/s", if s.is_empty() { "unknown" } else { s })),
+            ("", _) => body.push(match self.sys.no_link_speed() {
+                Some(why) => format!("Warning: link speed unknown: {why}"),
+                None => "Warning: link speed unknown".into(),
+            }),
+            (s, _) => body.push(format!("Warning: link {s} Mbit/s")),
         }
         self.show(Step::CardDetails, body, Ask::Continue);
     }
@@ -1131,7 +1150,7 @@ impl Wizard {
                 ),
                 Some(Reason::Unusable(why)) => (
                     format!("frames arrive but the viewer cannot use them ({why})."),
-                    "Go back and pick another mode, or use view.sh.",
+                    if self.sys.has_view_sh() { "Go back and pick another mode, or use view.sh." } else { "Go back and pick another mode." },
                 ),
                 Some(Reason::Nothing) | None => (
                     "no frames in 6 seconds: no signal, or HDCP is on at the source.".into(),
@@ -1288,19 +1307,22 @@ impl Wizard {
             self.set("SCALING", "");
             return self.next_stage();
         }
-        let items = vec![
+        let mut items = vec![
             tagged("balanced", "Balanced · sharp upscale, low GPU cost", "recommended"),
             item("fast", "Fast · bilinear, lowest GPU time, softer"),
             item("high-quality", "High quality · EWA Lanczos upscale, more GPU time"),
-            item("config", "Your mpv.conf · whatever it sets (may be expensive)"),
         ];
-        let ask = choose("Scaling", &self.cur("SCALING"), items);
-        let body = wrap(
+        let text = if self.sys.has_view_sh() {
+            items.push(item("config", "Your mpv.conf · whatever it sets (may be expensive)"));
             "How the picture is scaled to the window. view.sh's mpv reads it, and this viewer too (where \
              \"Your mpv.conf\" reads as balanced). The feed behind this page keeps the saved scaling; \
-             the choice shows from the next start.",
-            WIDTH,
-        );
+             the choice shows from the next start."
+        } else {
+            "How the picture is scaled to the window. The feed behind this page keeps the saved scaling; \
+             the choice shows from the next start."
+        };
+        let ask = choose("Scaling", &self.cur("SCALING"), items);
+        let body = wrap(text, WIDTH);
         self.show(Step::PlayerScaling, body, ask);
     }
 
@@ -1335,7 +1357,8 @@ impl Wizard {
         };
         // Audio::start: its PipeWire round trips give up after 2 s each.
         let started = match source {
-            None => Err("the card has no PipeWire source; pick one in the audio stage".to_string()),
+            None if self.sys.has_view_sh() => Err("the card has no PipeWire source; pick one in the audio stage".to_string()),
+            None => Err("the card has no audio input of its own; pick one in the audio stage".to_string()),
             Some(s) => self.sys.start_audio(&s, delay_ms),
         };
         match started {
@@ -1383,11 +1406,13 @@ impl Wizard {
     }
 
     fn debug_stage(&mut self) {
-        let body = wrap(
+        let text = if self.sys.has_view_sh() {
             "Normally off. Turn it on while chasing stutter, drops or audio drift; ./view.sh --debug does the same \
-             for a single run.",
-            WIDTH,
-        );
+             for a single run."
+        } else {
+            "Normally off. Turn it on while chasing stutter, drops or audio drift."
+        };
+        let body = wrap(text, WIDTH);
         let items = vec![
             tagged("off", "Off", "recommended"),
             item("log", "Log · every decision, verbose player output, a perf line every 5 s"),
@@ -1450,8 +1475,12 @@ impl Wizard {
         };
         let mut body = vec![title.to_string(), String::new()];
         if let Some(c) = &self.card {
-            let speed = self.usb.as_ref().map_or("?".to_string(), |u| if u.speed.is_empty() { "?".into() } else { u.speed.clone() });
-            body.push(format!("Card    : {} ({}) · {speed} Mbit/s", c.card_type, c.path.display()));
+            // An unknown link speed is said on the card's page, not here.
+            let speed = match self.usb.as_ref().map(|u| u.speed.as_str()) {
+                Some(s) if !s.is_empty() => format!(" · {s} Mbit/s"),
+                _ => String::new(),
+            };
+            body.push(format!("Card    : {} ({}){speed}", c.card_type, self.sys.label(c)));
             body.push(format!(
                 "Mode    : {} @ {} fps, {}{}",
                 self.cur("RES"),
@@ -1460,10 +1489,16 @@ impl Wizard {
                 if self.signal_result.is_empty() { String::new() } else { format!(" · {}", self.signal_result) }
             ));
             let size = if self.cur("WINDOW") == "windowed" { format!(" {}", self.cur("WINDOW_SIZE")) } else { String::new() };
-            body.push(format!("Display : {}{size} · player {}", self.cur("WINDOW"), self.cur("BACKEND")));
+            // BACKEND is view.sh's player.
+            let player = if self.sys.has_view_sh() { format!(" · player {}", self.cur("BACKEND")) } else { String::new() };
+            body.push(format!("Display : {}{size}{player}", self.cur("WINDOW")));
             body.push(String::new());
         }
-        body.push("Change any of this: protohdmicapture --setup (or ./view.sh --setup)".into());
+        body.push(if self.sys.has_view_sh() {
+            "Change any of this: protohdmicapture --setup (or ./view.sh --setup)".into()
+        } else {
+            "Change any of this: protohdmicapture --setup".into()
+        });
         let can_play = self.saved || (self.changed == 0 && !self.cancelled && self.card.is_some());
         let ask = if can_play {
             Ask::Choose {
@@ -2039,6 +2074,21 @@ impl System for Windows {
 
     fn start_audio(&self, source: &str, delay_ms: u32) -> Result<Box<dyn Tuner>, String> {
         Loopback::start(source, &self.sink, delay_ms, self.buffer_ms)
+    }
+
+    /// "USB 1e4e:7016" for Media Foundation's device link, which is a line
+    /// long; the link itself where it names no USB device.
+    fn label(&self, node: &Node) -> String {
+        let link = node.path.to_string_lossy();
+        crate::capture::mf::link_usb_id(&link).map_or_else(|| link.into_owned(), |id| format!("USB {id}"))
+    }
+
+    fn no_link_speed(&self) -> Option<&'static str> {
+        Some("Windows does not report it; check the card is on a USB 3 port")
+    }
+
+    fn has_view_sh(&self) -> bool {
+        false
     }
 }
 

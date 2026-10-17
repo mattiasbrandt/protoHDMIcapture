@@ -271,6 +271,15 @@ pub fn usb(node: &Path) -> Option<(String, String)> {
     Some((usb_id(&instance)?, port(usb, &link)))
 }
 
+/// "vid:pid" from a capture device's symbolic link
+/// (`\\?\usb#vid_1e4e&pid_7016&mi_00#...`), as the setup wizard names it.
+pub fn link_usb_id(link: &str) -> Option<String> {
+    let lower = link.to_ascii_lowercase();
+    let ids = lower.split('#').nth(1).filter(|_| lower.contains("\\usb#"))?;
+    let field = |key: &str| ids.split('&').find_map(|f| f.strip_prefix(key)).map(str::to_string);
+    Some(format!("{}:{}", field("vid_")?, field("pid_")?))
+}
+
 /// "vid:pid" from a USB instance id (`USB\VID_1E4E&PID_7016\...`).
 fn usb_id(instance: &str) -> Option<String> {
     let ids = instance.strip_prefix("USB\\")?.split('\\').next()?;
@@ -597,7 +606,17 @@ impl Drop for Running<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{usb_id, usb_serial};
+    use super::{link_usb_id, usb_id, usb_serial};
+
+    #[test]
+    fn the_usb_id_from_a_device_link() {
+        let card = r"\\?\usb#vid_1e4e&pid_7016&mi_00#6&18cd860d&0&0000#{e5323777-f976-4f5b-9b55-b94699c46e44}\global";
+        assert_eq!(link_usb_id(card).as_deref(), Some("1e4e:7016"));
+        assert_eq!(link_usb_id(r"\\?\USB#VID_5986&PID_2115&MI_00#6&1#{e5323777}\global").as_deref(), Some("5986:2115"));
+        // Not a USB device: no id, so the wizard shows the link.
+        assert_eq!(link_usb_id(r"\\?\swd#sgdevapi#{e5323777}\global"), None);
+        assert_eq!(link_usb_id("USB Video Device"), None);
+    }
 
     #[test]
     fn the_usb_id_from_an_instance_id() {
