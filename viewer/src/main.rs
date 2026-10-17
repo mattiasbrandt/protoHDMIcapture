@@ -52,8 +52,9 @@ const USAGE: &str = "usage: protohdmicapture [--setup | --settings | --dashboard
   --debug         DEBUG=window: the dashboard opens with the feed
   --menu          as started from the desktop entry: REFRESH=match
                   unless the environment or the settings file sets it
+                  (REFRESH=match works on Hyprland only)
   --seconds N     end the feed after N seconds
-  --monitor NAME  open the window on monitor NAME
+  --monitor NAME  open the window on monitor NAME (Hyprland only)
   --stats         print the latency numbers every 10 s, and a summary
   --test-pattern  colour bars instead of the card";
 
@@ -472,6 +473,11 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
         );
         opts.source.clear();
     }
+    // Monitors are known on Hyprland only; decided not on Windows (#38).
+    #[cfg(windows)]
+    if opts.monitor.take().is_some() {
+        eprintln!("note: --monitor is not on Windows; the window opens where Windows puts it");
+    }
     if let Some(name) = &opts.monitor {
         opts.refocus = opts.desktop.focused_monitor().filter(|m| m != name);
         opts.desktop.focus_monitor(name);
@@ -483,9 +489,10 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
     {
         session.match_refresh(format.fps, opts.monitor.as_deref());
     }
+    // Decided not on Windows (#38): the display's own rate stays.
     #[cfg(windows)]
     if s.get("REFRESH") == "match" {
-        eprintln!("note: REFRESH=match is not on Windows yet; the display's refresh rate is left as it is");
+        eprintln!("note: REFRESH=match is not on Windows; the display's refresh rate is left as it is");
     }
     // DEBUG=window opens the dashboard with the feed, as in view.sh.
     let debug_window = s.get("DEBUG") == "window";
@@ -535,6 +542,42 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
     result
 }
 
+/// Whether a fatal error waits for Enter before the viewer ends (#38): a
+/// console with this process alone on it was made for it (started from
+/// Explorer or a shortcut) and closes when it exits, taking the error
+/// with it. Not with a terminal that started it (more processes share the
+/// console), nor with stdin redirected (nobody can press Enter).
+#[cfg(any(windows, test))]
+fn holds_console(processes: u32, stdin_is_console: bool) -> bool {
+    processes == 1 && stdin_is_console
+}
+
+/// After a fatal error is printed: on Windows, a console that would close
+/// with the viewer stays open until Enter (`holds_console`). #28's desktop
+/// notification never fires there: stderr is a console.
+#[cfg(windows)]
+fn hold_console() {
+    use std::io::IsTerminal;
+    let mut pids = [0u32; 2];
+    // Safety: a buffer it fills up to its length; the count is all the
+    // processes on the console, even past the buffer. 0 is a failure.
+    let processes = unsafe { windows::Win32::System::Console::GetConsoleProcessList(&mut pids) };
+    if processes == 0 {
+        eprintln!("warning: the console's processes: {}", std::io::Error::last_os_error());
+        return;
+    }
+    if !holds_console(processes, std::io::stdin().is_terminal()) {
+        return;
+    }
+    eprintln!("Press Enter to close.");
+    if let Err(e) = std::io::stdin().read_line(&mut String::new()) {
+        eprintln!("warning: waiting for Enter: {e}");
+    }
+}
+
+#[cfg(not(windows))]
+fn hold_console() {}
+
 fn main() -> ExitCode {
     environment();
     let mut args: Vec<String> = env::args().skip(1).collect();
@@ -580,6 +623,7 @@ fn main() -> ExitCode {
         Err(e) => {
             eprintln!("protohdmicapture: {e}");
             desktop::Notice::Failed(e).send();
+            hold_console();
             return ExitCode::FAILURE;
         }
     };
@@ -598,6 +642,7 @@ fn main() -> ExitCode {
             eprintln!("protohdmicapture: {e}");
             // Started from a menu: nobody reads stderr (view.sh's die).
             desktop::Notice::Failed(e).send();
+            hold_console();
             ExitCode::FAILURE
         }
     }
@@ -605,7 +650,18 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::card_input;
+    use super::{card_input, holds_console};
+
+    #[test]
+    fn a_fatal_error_holds_only_a_console_of_its_own() {
+        // Started from Explorer or a shortcut: the console closes with it.
+        assert!(holds_console(1, true));
+        // A terminal started it: the terminal keeps the error.
+        assert!(!holds_console(2, true));
+        assert!(!holds_console(3, true));
+        // Its own console, but stdin redirected: nobody can press Enter.
+        assert!(!holds_console(1, false));
+    }
 
     fn input(name: &str, id: &str, container: Option<u128>) -> (String, String, Option<u128>) {
         (name.into(), id.into(), container)

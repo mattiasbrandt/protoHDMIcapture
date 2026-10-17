@@ -53,10 +53,13 @@ run yet (#18). `protohdmicapture --help` lists its flags:
   `--dashboard` and `--debug` do what view.sh's do.
 - `--menu` is what its desktop entry passes: `REFRESH=match` unless the
   environment or the file sets `REFRESH`, and a desktop notification
-  when it fails or has no sound.
+  when it fails or has no sound. On Windows, started from Explorer or a
+  shortcut, a fatal error keeps its console open instead, until Enter.
 - Measurements: `--stats`, `--seconds N`, `--test-pattern`, and
   `--monitor NAME` (the window and `REFRESH=match` use that monitor, and
   the focus goes back once the window is placed).
+- `REFRESH=match` and `--monitor` work on Hyprland only; on Windows the
+  viewer says so and leaves the display and the window's place to Windows.
 
 The keys are the overlay's. **d** opens the dashboard on another monitor
 (Hyprland); with one open, **d** raises it. **ctrl −/+** move the sync live,

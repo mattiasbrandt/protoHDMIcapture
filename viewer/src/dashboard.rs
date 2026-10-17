@@ -214,10 +214,20 @@ impl Display {
         {
             return v.clone();
         }
-        let v = display_json(self.desktop.monitors(std::process::id()), record);
+        // Decided not on Windows (#38): neither the monitors nor REFRESH=match.
+        let v = if cfg!(windows) { not_on_windows() } else { display_json(self.desktop.monitors(std::process::id()), record) };
         self.last = Some((now, seen, v.clone()));
         v
     }
+}
+
+/// The Display section on Windows: what it would show is not there (#38).
+fn not_on_windows() -> Value {
+    json!({
+        "monitors": null,
+        "why": "they are known on Hyprland only, not on Windows",
+        "refresh": { "unsupported": "REFRESH=match is not on Windows" },
+    })
 }
 
 /// The Display section's JSON: the monitors, or why they are not known;
@@ -948,6 +958,8 @@ fn render(s: &Value, p: &Paint) -> String {
             "refresh",
             if r.is_null() {
                 p.dim("not switched")
+            } else if let Some(why) = r["unsupported"].as_str() {
+                p.dim(why)
             } else if let Some(why) = r["unreadable"].as_str() {
                 p.red(why)
             } else {
@@ -1513,11 +1525,31 @@ mod tests {
         // The first snapshot may have gone out before this dashboard was
         // accepted; the next ones carry the section.
         let d = (0..50).map(|_| read_line(&mut r)).find(|v| v["display"].is_object()).expect("a Display section")["display"].clone();
-        assert_eq!(d, json!({ "monitors": null, "why": "the monitors are known on Hyprland only", "refresh": null }));
+        let want = if cfg!(windows) {
+            not_on_windows()
+        } else {
+            json!({ "monitors": null, "why": "the monitors are known on Hyprland only", "refresh": null })
+        };
+        assert_eq!(d, want);
         drop(server);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Windows has neither the monitors nor REFRESH=match (#38): the section
+    /// says so, whatever a record in the run dir holds.
+    #[cfg(windows)]
+    #[test]
+    fn the_display_section_on_windows_says_it_is_not_there() {
+        let dir = tmp("display-windows");
+        let record = dir.join("refresh.restore");
+        std::fs::write(&record, "DP-2|60|59.95|hl.monitor({})\n").unwrap();
+        let mut d = Display::new(Desktop::Generic, record);
+        assert_eq!(d.json(Instant::now()), not_on_windows());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The refresh record is read on Linux only: Windows has no REFRESH=match.
+    #[cfg(not(windows))]
     #[test]
     fn the_display_section_is_read_again_on_a_switch_or_after_a_while() {
         let dir = tmp("display-cache");
@@ -1567,6 +1599,11 @@ mod tests {
         s["display"] = display_json(Err("the monitors are known on Hyprland only".into()), Ok(None));
         let text = render(&s, &Paint { on: false });
         for w in ["  monitors          not known: the monitors are known on Hyprland only", "  refresh           not switched"] {
+            assert!(text.lines().any(|l| l == w), "no line {w:?} in\n{text}");
+        }
+        s["display"] = not_on_windows();
+        let text = render(&s, &Paint { on: false });
+        for w in ["  monitors          not known: they are known on Hyprland only, not on Windows", "  refresh           REFRESH=match is not on Windows"] {
             assert!(text.lines().any(|l| l == w), "no line {w:?} in\n{text}");
         }
         // No section from a viewer that sends none.
