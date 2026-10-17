@@ -13,6 +13,8 @@ use crate::picture::Coding;
 #[cfg(windows)]
 pub mod mf;
 mod policy;
+#[cfg(windows)]
+mod usb_hub;
 #[cfg(target_os = "linux")]
 mod v4l2;
 #[cfg(windows)]

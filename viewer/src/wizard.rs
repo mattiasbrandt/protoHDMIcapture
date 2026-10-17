@@ -144,6 +144,9 @@ pub struct Usb {
     pub version: String,
     /// The link speed in Mbit/s ("5000"); empty when unknown.
     pub speed: String,
+    /// Why the speed is unknown, where the platform says (Windows: the step
+    /// of asking the hub that failed); empty otherwise.
+    pub unknown: String,
 }
 
 /// The audio inputs the audio stage offers.
@@ -180,11 +183,6 @@ pub trait System {
     /// device links, which run to two lines).
     fn label(&self, node: &Node) -> String {
         node.path.display().to_string()
-    }
-    /// Why no USB link speed is known on this platform, when that is why
-    /// (said with the warning); None where the platform tells it.
-    fn no_link_speed(&self) -> Option<&'static str> {
-        None
     }
     /// view.sh runs here too (Linux): its player and its commands are named
     /// on the pages. Windows has no view.sh.
@@ -886,9 +884,9 @@ impl Wizard {
                 body.push("Failed: link 480 Mbit/s, a USB 2 port or hub".into());
                 body.push("Uncompressed 1080p60 needs USB 3: move the card to a rear USB 3 port.".into());
             }
-            ("", _) => body.push(match self.sys.no_link_speed() {
-                Some(why) => format!("Warning: link speed unknown: {why}"),
-                None => "Warning: link speed unknown".into(),
+            ("", _) => body.push(match u.unknown.as_str() {
+                "" => "Warning: link speed unknown".into(),
+                why => format!("Warning: link speed unknown: {why}"),
             }),
             (s, _) => body.push(format!("Warning: link {s} Mbit/s")),
         }
@@ -1970,6 +1968,7 @@ impl System for Linux {
             port: dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
             version: read("version"),
             speed: read("speed"),
+            unknown: String::new(),
         })
     }
 
@@ -2021,8 +2020,7 @@ impl System for Linux {
 
 #[cfg(windows)]
 /// The machine as the wizard sees it on Windows (#19): Media Foundation,
-/// the device tree, WASAPI. No link speed or bcdUSB (the USB stage says
-/// the link is unknown), and no refresh matching.
+/// the device tree and its USB hubs, WASAPI. No refresh matching.
 pub struct Windows {
     /// SINK and LAT_MS, for the sync stage's loopback.
     pub sink: String,
@@ -2036,8 +2034,12 @@ impl System for Windows {
     }
 
     fn usb(&self, node: &Node) -> Option<Usb> {
-        let (id, port) = crate::capture::mf::usb(&node.path)?;
-        Some(Usb { id, port, version: String::new(), speed: String::new() })
+        let d = crate::capture::mf::usb(&node.path)?;
+        let ((version, speed), unknown) = match d.link {
+            Ok(link) => (link, String::new()),
+            Err(why) => (Default::default(), why),
+        };
+        Some(Usb { id: d.id, port: d.port, version, speed, unknown })
     }
 
     fn modes(&self, node: &Node) -> Vec<Mode> {
@@ -2083,10 +2085,6 @@ impl System for Windows {
         crate::capture::mf::link_usb_id(&link).map_or_else(|| link.into_owned(), |id| format!("USB {id}"))
     }
 
-    fn no_link_speed(&self) -> Option<&'static str> {
-        Some("Windows does not report it; check the card is on a USB 3 port")
-    }
-
     fn has_view_sh(&self) -> bool {
         false
     }
@@ -2115,6 +2113,8 @@ mod tests {
         modes: Vec<Mode>,
         refresh: bool,
         delay: Rc<Cell<u32>>,
+        /// Why the card's link is not known; empty: a 5000 Mbit/s USB 3.20 link.
+        link_unknown: &'static str,
     }
 
     fn node(path: &str, serial: &str, port: &str, t: &str) -> Node {
@@ -2135,7 +2135,10 @@ mod tests {
                 "USB Video" => "534d:2109",
                 _ => "046d:0825",
             };
-            Some(Usb { id: id.into(), port: "3-2".into(), version: " 3.20".into(), speed: "5000".into() })
+            Some(match self.link_unknown {
+                "" => Usb { id: id.into(), port: "3-2".into(), version: " 3.20".into(), speed: "5000".into(), unknown: String::new() },
+                why => Usb { id: id.into(), port: "3-2".into(), version: String::new(), speed: String::new(), unknown: why.into() },
+            })
         }
         fn modes(&self, _: &Node) -> Vec<Mode> {
             self.modes.clone()
@@ -2161,6 +2164,7 @@ mod tests {
             modes: vec![mode("yuyv422", 1920, 1080, 60), mode("mjpeg", 1920, 1080, 60), mode("yuyv422", 1280, 720, 30)],
             refresh: true,
             delay: Rc::new(Cell::new(0)),
+            link_unknown: "",
         }
     }
 
@@ -2678,6 +2682,21 @@ mod tests {
             let b = bash(&format!("{without}\n_ignore_without \"$1\" \"$2\""), &[pattern, name]);
             assert_eq!(ignore_without(pattern, name), b, "{pattern} without {name}");
         }
+    }
+
+    #[test]
+    fn the_cards_link_or_why_it_is_unknown() {
+        let file = scratch("link", None);
+        let mut w = wizard(fake(), &file, false);
+        press(&mut w, &["Enter", "Enter"]);
+        assert_eq!(w.step, Step::CardDetails);
+        assert!(w.lines().iter().any(|l| l == "OK: link 5000 Mbit/s, enough for uncompressed 1080p60"), "{:#?}", w.lines());
+        // Windows, the hub not asked (#36): the page says the step that failed.
+        let mut w = wizard(Fake { link_unknown: "opening its hub: Access is denied.", ..fake() }, &file, false);
+        press(&mut w, &["Enter", "Enter"]);
+        assert!(w.lines().iter().any(|l| l == "Port    : 3-2"), "{:#?}", w.lines());
+        assert!(w.lines().iter().any(|l| l == "Warning: link speed unknown: opening its hub: Access is denied."), "{:#?}", w.lines());
+        std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 
     #[test]

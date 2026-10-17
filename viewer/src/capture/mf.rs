@@ -196,7 +196,7 @@ fn devnode(link: &HSTRING) -> Result<u32, String> {
 
 /// A string or string-list property of `devnode` (a list: its first
 /// entry); None when it has none.
-fn devnode_string(devnode: u32, key: &DEVPROPKEY) -> Result<Option<String>, String> {
+pub(super) fn devnode_string(devnode: u32, key: &DEVPROPKEY) -> Result<Option<String>, String> {
     let (mut kind, mut size) = (DEVPROPTYPE::default(), 0u32);
     // Safety: no buffer; asks only for the size.
     let r = unsafe { CM_Get_DevNode_PropertyW(devnode, key, &mut kind, None, &mut size, 0) };
@@ -262,13 +262,23 @@ fn usb_device(link: &str) -> Result<(u32, String), String> {
     Ok((usb, instance(usb)?))
 }
 
-/// The card's USB id ("1e4e:7016", as lsusb and capture-cards/ spell it)
-/// and port (its location path), as the setup wizard shows them; None when
-/// it is not on USB, or (said) when the device tree cannot be read.
-pub fn usb(node: &Path) -> Option<(String, String)> {
+/// The card's USB device as the setup wizard shows it.
+pub struct UsbDevice {
+    /// "1e4e:7016", as lsusb and capture-cards/ spell it.
+    pub id: String,
+    /// Its location path.
+    pub port: String,
+    /// bcdUSB (" 3.20") and the link in Mbit/s ("5000"), from its hub
+    /// (usb_hub.rs); Err: why they are not known.
+    pub link: Result<(String, String), String>,
+}
+
+/// The card's USB device; None when it is not on USB, or (said) when the
+/// device tree cannot be read.
+pub fn usb(node: &Path) -> Option<UsbDevice> {
     let found = link(node).and_then(|link| usb_device(&link).map(|d| (link, d)));
     let (link, (usb, instance)) = found.map_err(|e| eprintln!("warning: the card's USB device: {e}")).ok()?;
-    Some((usb_id(&instance)?, port(usb, &link)))
+    Some(UsbDevice { id: usb_id(&instance)?, port: port(usb, &link), link: super::usb_hub::link(usb) })
 }
 
 /// "vid:pid" from a capture device's symbolic link

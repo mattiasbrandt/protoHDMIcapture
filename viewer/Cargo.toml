@@ -42,6 +42,7 @@ windows = { version = "0.62.2", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Devices_FunctionDiscovery",
     "Win32_Devices_Properties",
+    "Win32_Devices_Usb",
     "Win32_Foundation",
     "Win32_Media_Audio",
     "Win32_Media_MediaFoundation",
