@@ -466,13 +466,15 @@ fn default_output(host: &cpal::Host) -> Result<cpal::Device, String> {
     host.default_output_device().ok_or_else(|| "no default output device".to_string())
 }
 
-/// The default output as the specific device it is now (#40). cpal's
-/// default-device handle activates through ActivateAudioInterfaceAsync,
-/// which fails with RPC_E_CHANGED_MODE on the window's thread (winit's
-/// OLE): every restart from the keys (#29) or with the card back lost its
-/// sound. A specific device activates through IMMDevice::Activate, as the
-/// card's input always did. A default changed later is not followed: the
-/// next start takes the new one.
+/// The default output as the specific device it is now (#40). On the
+/// laptop every restart in the running viewer (the keys, #29, or the card
+/// back) failed on the output stream only, with RPC_E_CHANGED_MODE, while
+/// the input on a specific device built. cpal activates a default-device
+/// handle through ActivateAudioInterfaceAsync and a specific one through
+/// IMMDevice::Activate, so the output now goes the input's way. Why the
+/// async path failed there is not proven: outside the viewer it does not
+/// (`starts_again_on_an_ole_thread_with_the_default_output`). A default
+/// changed later is not followed: the next start takes the new one.
 #[cfg(windows)]
 fn default_output(host: &cpal::Host) -> Result<cpal::Device, String> {
     let default = host.default_output_device().ok_or("no default output device")?;
@@ -1065,15 +1067,14 @@ mod tests {
         assert_eq!(session_scalar(250), 1.0);
     }
 
-    /// m, 9 and 0 on this process's WASAPI session while the card's loopback
-    /// plays: `cargo test --release -- --ignored level_on_wasapi --nocapture`.
-    /// Needs an audio input, SRC or else the first; leaves the session at
-    /// 100 %, unmuted.
-    /// #40: a start on a thread where OLE is initialised, as winit does on
-    /// the window's thread, with no SINK. Before the default output was
-    /// resolved to its device, the second start failed with
-    /// RPC_E_CHANGED_MODE on the output stream ("Failed to build audio
-    /// client: Cannot change thread mode after it is set").
+    /// #40, a smoke test: two starts with no SINK on a thread where OLE is
+    /// initialised, as winit does on the window's thread. It does NOT
+    /// reproduce the laptop's failure (a restart's output stream failing
+    /// with RPC_E_CHANGED_MODE, "Cannot change thread mode after it is
+    /// set"): it passes with the old default-device path too, with OLE
+    /// before or after the first start, and with an MTA held alive by
+    /// another thread. Only a card pulled and plugged back in the real
+    /// viewer shows that.
     #[test]
     #[cfg(windows)]
     #[ignore = "needs an audio input and an output"]
@@ -1098,6 +1099,10 @@ mod tests {
         .unwrap();
     }
 
+    /// m, 9 and 0 on this process's WASAPI session while the card's loopback
+    /// plays: `cargo test --release -- --ignored level_on_wasapi --nocapture`.
+    /// Needs an audio input, SRC or else the first; leaves the session at
+    /// 100 %, unmuted.
     #[test]
     #[cfg(windows)]
     #[ignore = "needs an audio input and an output"]
