@@ -11,7 +11,6 @@ mod capture;
 mod capture_cards;
 mod card;
 mod dashboard;
-#[cfg(target_os = "linux")]
 mod debuglog;
 mod desktop;
 mod feed;
@@ -415,7 +414,6 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
     // (a refused second launch must not truncate the running one's), as
     // view.sh's debug_tee. Declared before the feed, so it outlives the
     // feed's teardown. A log that cannot start costs only the log.
-    #[cfg(target_os = "linux")]
     let mut debug_log = match (s.get("DEBUG"), &session) {
         ("off", _) | (_, None) => None,
         (_, Some(_)) => match debuglog::DebugLog::start(&session::run_dir().join("debug.log")) {
@@ -439,14 +437,12 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
         (Box::new(pattern::Pattern::new(format)), None)
     } else {
         let opened = open_card(&s, format);
-        #[cfg(target_os = "linux")]
         if let (Err(e), Some(log)) = (&opened, &debug_log) {
             log.ended(&Err(e.clone()));
         }
         let (source, node) = opened?;
         (source, Some(node))
     };
-    #[cfg(target_os = "linux")]
     if let Some(log) = debug_log.as_mut() {
         log.format(format, test_pattern);
         match debuglog::perf_every(env::var("DEBUG_PERF_INTERVAL").ok().as_deref()) {
@@ -533,7 +529,6 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
         run::Outcome::CaptureEnded(e) => Err(format!("capture: {e}")),
         run::Outcome::Failed(e) => Err(e),
     };
-    #[cfg(target_os = "linux")]
     if let Some(log) = &debug_log {
         log.ended(&result);
     }

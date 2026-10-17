@@ -186,7 +186,8 @@ whatever the previous mode set.
 ### Debug mode
 
 `DEBUG=log` (or a saved preference from the wizard) records, on screen and in
-`$XDG_RUNTIME_DIR/protohdmicapture/debug.log`:
+`$XDG_RUNTIME_DIR/protohdmicapture/debug.log` (the Rust viewer on Windows:
+`%LOCALAPPDATA%\protohdmicapture\debug.log`):
 
 - every decision: each setting with where it came from (env, file, default),
   locks, the audio link, refresh and window placement, the player's PID and

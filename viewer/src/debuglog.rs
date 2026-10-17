@@ -11,18 +11,22 @@
 //! - how the run ended, in the file only (main prints the error itself)
 //!
 //! The log is started once `video.lock` is held: a refused second launch
-//! must not truncate the running session's log. Linux only for now: Windows
-//! has the run dir (session.rs) but not this log yet (#33).
+//! must not truncate the running session's log.
+//!
+//! The output is teed through a pipe per stream: on Linux the fd itself is
+//! swapped (`dup2`); on Windows (#33) the standard handle (`SetStdHandle`),
+//! which Rust's stdout and stderr read on every write. There only Rust's
+//! own output is teed: what a C library writes through the C runtime's
+//! descriptors still goes to the console alone.
 
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::{FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use crate::capture::Format;
 use crate::dashboard::Live;
@@ -52,10 +56,10 @@ pub struct Counts {
 pub struct DebugLog {
     path: PathBuf,
     file: Arc<Mutex<Option<File>>>,
-    /// Each teed fd with its original, to put back.
-    teed: Vec<(RawFd, RawFd)>,
-    /// The fd the `[dbg]` lines go to (stderr, teed).
-    out: RawFd,
+    /// Each teed stream with its original, to put back.
+    teed: Vec<sys::Restore>,
+    /// The stream the `[dbg]` lines go to (stderr, teed).
+    out: sys::Stream,
     copies: Vec<(JoinHandle<()>, mpsc::Receiver<()>)>,
     perf: Option<(Sender<()>, JoinHandle<()>)>,
 }
@@ -76,51 +80,20 @@ impl DebugLog {
     /// Truncates `path` and copies this process's stdout and stderr into it
     /// from here on, as `debug_tee`.
     pub fn start(path: &Path) -> io::Result<Self> {
-        Self::start_on(path, &[libc::STDOUT_FILENO, libc::STDERR_FILENO])
+        Self::start_on(path, &sys::standard())
     }
 
-    /// `start` over `fds` (tests use a pipe of their own); the `[dbg]`
-    /// lines go to the last one.
-    fn start_on(path: &Path, fds: &[RawFd]) -> io::Result<Self> {
+    /// `start` over `streams` (tests use stand-ins of their own); the
+    /// `[dbg]` lines go to the last one.
+    fn start_on(path: &Path, streams: &[sys::Stream]) -> io::Result<Self> {
         let file = Arc::new(Mutex::new(Some(File::create(path)?)));
         // Rust's stdout is buffered: what it holds belongs before the tee.
         io::stdout().flush()?;
-        let mut log = Self { path: path.to_path_buf(), file: file.clone(), teed: Vec::new(), out: *fds.last().expect("a fd to tee"), copies: Vec::new(), perf: None };
-        for &fd in fds {
-            // Safety: plain fd calls on fds this process owns; every result
-            // is checked.
-            let original = cvt(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) })?;
-            let mut pipe = [0; 2];
-            if let Err(e) = cvt(unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) }) {
-                unsafe { libc::close(original) };
-                return Err(e);
-            }
-            // The copy writes to its own duplicate, so putting `original`
-            // back never pulls the fd from under it.
-            let to_original = match cvt(unsafe { libc::fcntl(original, libc::F_DUPFD_CLOEXEC, 3) }) {
-                Ok(d) => d,
-                Err(e) => {
-                    unsafe {
-                        libc::close(original);
-                        libc::close(pipe[0]);
-                        libc::close(pipe[1]);
-                    }
-                    return Err(e);
-                }
-            };
-            if let Err(e) = cvt(unsafe { libc::dup2(pipe[1], fd) }) {
-                unsafe {
-                    libc::close(original);
-                    libc::close(to_original);
-                    libc::close(pipe[0]);
-                    libc::close(pipe[1]);
-                }
-                return Err(e);
-            }
-            unsafe { libc::close(pipe[1]) };
-            log.teed.push((fd, original));
-            // Safety: each fd is ours alone from here, and closed once.
-            let (from, to) = unsafe { (File::from_raw_fd(pipe[0]), File::from_raw_fd(to_original)) };
+        let mut log = Self { path: path.to_path_buf(), file: file.clone(), teed: Vec::new(), out: *streams.last().expect("a stream to tee"), copies: Vec::new(), perf: None };
+        for &stream in streams {
+            // A failure here drops `log`, which puts back those teed so far.
+            let sys::Teed { from, to, restore } = sys::tee(stream)?;
+            log.teed.push(restore);
             let (done_tx, done_rx) = mpsc::channel();
             let file = file.clone();
             let path = log.path.clone();
@@ -136,11 +109,9 @@ impl DebugLog {
 
     /// A `[dbg]` line, as lib/debug.sh's `dbg`: on stderr, so into the log.
     pub fn dbg(&self, msg: &str) {
-        let line = format!("\x1b[2m{} [dbg] {msg}\x1b[0m\n", clock());
-        // Safety: `out` is a teed fd, open while the log runs.
-        let mut out = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(self.out) });
+        let line = format!("\x1b[2m{} [dbg] {msg}\x1b[0m\n", sys::clock());
         // Nowhere else to say it: the log's own output is what failed.
-        if out.write_all(line.as_bytes()).is_err() {
+        if sys::write(self.out, line.as_bytes()).is_err() {
             self.to_file_only(&format!("[dbg] could not write to the output: {msg}"));
         }
     }
@@ -189,11 +160,9 @@ impl DebugLog {
                     (Some(a), Some(b)) => Some(b.saturating_sub(a) as f64 / crate::dashboard::clock_ticks_per_s() / every.as_secs_f64() * 100.0),
                     _ => None,
                 };
-                let line = format!("\x1b[2m{} [dbg] perf: {}\x1b[0m\n", clock(), perf_line(prev, now, every, cpu_pct, crate::dashboard::rss_mb()));
-                // Safety: `out` is a teed fd, open until this thread is
-                // stopped and joined.
-                let mut f = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(out) });
-                if let Err(e) = f.write_all(line.as_bytes()) {
+                let line = format!("\x1b[2m{} [dbg] perf: {}\x1b[0m\n", sys::clock(), perf_line(prev, now, every, cpu_pct, crate::dashboard::rss_mb()));
+                // `out` stays teed until this thread is stopped and joined.
+                if let Err(e) = sys::write(out, line.as_bytes()) {
                     eprintln!("warning: debug.log: the perf line: {e}");
                     break;
                 }
@@ -207,8 +176,8 @@ impl DebugLog {
     /// How the run ended, in the file only: main says it on stderr.
     pub fn ended(&self, result: &Result<(), String>) {
         match result {
-            Ok(()) => self.to_file_only(&format!("{} [dbg] ended", clock())),
-            Err(e) => self.to_file_only(&format!("{} [dbg] ended: {e}", clock())),
+            Ok(()) => self.to_file_only(&format!("{} [dbg] ended", sys::clock())),
+            Err(e) => self.to_file_only(&format!("{} [dbg] ended: {e}", sys::clock())),
         }
     }
 
@@ -235,12 +204,8 @@ impl Drop for DebugLog {
         }
         // The originals back: each pipe's last writer goes, and its copy
         // ends.
-        for &(fd, original) in &self.teed {
-            // Safety: both fds are open and ours.
-            unsafe {
-                libc::dup2(original, fd);
-                libc::close(original);
-            }
+        for restore in self.teed.drain(..) {
+            sys::restore(restore);
         }
         for (thread, done) in self.copies.drain(..) {
             if done.recv_timeout(DRAIN).is_ok() {
@@ -257,7 +222,7 @@ impl Drop for DebugLog {
 /// reader gone) is said once in the log, which then has the rest alone.
 /// The log's lock is held for one write at a time: `ended` and the other
 /// copy take it too, and this one blocks in `read`.
-fn copy(mut from: File, mut to: File, file: &Mutex<Option<File>>, path: &Path) {
+fn copy(mut from: File, mut to: impl Write, file: &Mutex<Option<File>>, path: &Path) {
     let mut buf = [0u8; 8192];
     let mut forward = true;
     loop {
@@ -324,20 +289,260 @@ fn perf_line(prev: Counts, now: Counts, every: Duration, cpu_pct: Option<f64>, r
     )
 }
 
-/// The local time as `date +%T.%3N`.
-fn clock() -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    let secs = now.as_secs() as libc::time_t;
-    // Safety: localtime_r writes into `tm`, which outlives the call.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
-        return format!("{secs}.{:03}", now.subsec_millis());
+/// The tee on Linux: each fd pointed at a pipe with `dup2`.
+#[cfg(unix)]
+mod sys {
+    use std::fs::File;
+    use std::io::{self, Write};
+    use std::os::fd::{FromRawFd, RawFd};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A teed stream: the fd itself.
+    pub type Stream = RawFd;
+
+    pub fn standard() -> [Stream; 2] {
+        [libc::STDOUT_FILENO, libc::STDERR_FILENO]
     }
-    format!("{:02}:{:02}:{:02}.{:03}", tm.tm_hour, tm.tm_min, tm.tm_sec, now.subsec_millis())
+
+    /// A stream pointed at its pipe: the pipe's read end, where the output
+    /// went before, and what puts it back.
+    pub struct Teed {
+        pub from: File,
+        pub to: File,
+        pub restore: Restore,
+    }
+
+    /// The fd and a duplicate of what it was.
+    pub struct Restore {
+        fd: RawFd,
+        original: RawFd,
+    }
+
+    pub fn tee(fd: RawFd) -> io::Result<Teed> {
+        // Safety: plain fd calls on fds this process owns; every result is
+        // checked.
+        let original = cvt(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) })?;
+        let mut pipe = [0; 2];
+        if let Err(e) = cvt(unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) }) {
+            unsafe { libc::close(original) };
+            return Err(e);
+        }
+        // The copy writes to its own duplicate, so putting `original` back
+        // never pulls the fd from under it.
+        let to_original = match cvt(unsafe { libc::fcntl(original, libc::F_DUPFD_CLOEXEC, 3) }) {
+            Ok(d) => d,
+            Err(e) => {
+                unsafe {
+                    libc::close(original);
+                    libc::close(pipe[0]);
+                    libc::close(pipe[1]);
+                }
+                return Err(e);
+            }
+        };
+        if let Err(e) = cvt(unsafe { libc::dup2(pipe[1], fd) }) {
+            unsafe {
+                libc::close(original);
+                libc::close(to_original);
+                libc::close(pipe[0]);
+                libc::close(pipe[1]);
+            }
+            return Err(e);
+        }
+        unsafe { libc::close(pipe[1]) };
+        // Safety: each fd is ours alone from here, and closed once.
+        let (from, to) = unsafe { (File::from_raw_fd(pipe[0]), File::from_raw_fd(to_original)) };
+        Ok(Teed { from, to, restore: Restore { fd, original } })
+    }
+
+    pub fn restore(r: Restore) {
+        // Safety: both fds are open and ours.
+        unsafe {
+            libc::dup2(r.original, r.fd);
+            libc::close(r.original);
+        }
+    }
+
+    /// Writes to the stream, teed or not.
+    pub fn write(fd: RawFd, bytes: &[u8]) -> io::Result<()> {
+        // Safety: the fd is open while the log runs; it is not closed here.
+        let mut out = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
+        out.write_all(bytes)
+    }
+
+    /// The local time as `date +%T.%3N`.
+    pub fn clock() -> String {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        let secs = now.as_secs() as libc::time_t;
+        // Safety: localtime_r writes into `tm`, which outlives the call.
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+            return format!("{secs}.{:03}", now.subsec_millis());
+        }
+        format!("{:02}:{:02}:{:02}.{:03}", tm.tm_hour, tm.tm_min, tm.tm_sec, now.subsec_millis())
+    }
+
+    pub fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
+        if r < 0 { Err(io::Error::last_os_error()) } else { Ok(r) }
+    }
 }
 
-fn cvt(r: libc::c_int) -> io::Result<libc::c_int> {
-    if r < 0 { Err(io::Error::last_os_error()) } else { Ok(r) }
+/// The tee on Windows (#33): each standard handle swapped for a pipe's
+/// write end with `SetStdHandle`, and the copy forwarded to what it was.
+#[cfg(windows)]
+mod sys {
+    use std::fs::File;
+    use std::io::{self, Write};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+
+    use windows::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE};
+    use windows::Win32::System::Console::{
+        CONSOLE_MODE, GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle, WriteConsoleW,
+    };
+    use windows::Win32::System::Pipes::CreatePipe;
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    /// A teed stream: where its handle is kept, the process's standard
+    /// handle or (tests) a stand-in.
+    #[derive(Clone, Copy)]
+    pub struct Stream {
+        pub get: fn() -> HANDLE,
+        pub set: fn(HANDLE) -> windows::core::Result<()>,
+    }
+
+    pub fn standard() -> [Stream; 2] {
+        // Safety (all four): the process's standard handle slots; none is
+        // closed here. No handle (a process without a console) reads as null.
+        [
+            Stream { get: || unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }.unwrap_or_default(), set: |h| unsafe { SetStdHandle(STD_OUTPUT_HANDLE, h) } },
+            Stream { get: || unsafe { GetStdHandle(STD_ERROR_HANDLE) }.unwrap_or_default(), set: |h| unsafe { SetStdHandle(STD_ERROR_HANDLE, h) } },
+        ]
+    }
+
+    /// A stream pointed at its pipe: the pipe's read end, where the output
+    /// went before, and what puts it back.
+    pub struct Teed {
+        pub from: File,
+        pub to: Forward,
+        pub restore: Restore,
+    }
+
+    /// The stream, its handle before, and the pipe's write end, held open
+    /// until the stream is put back.
+    pub struct Restore {
+        stream: Stream,
+        /// The handle as a number: not ours to close, only to put back
+        /// (and so the log may end on another thread).
+        original: isize,
+        write: File,
+    }
+
+    pub fn tee(stream: Stream) -> io::Result<Teed> {
+        let original = (stream.get)();
+        let to = Forward::to(original)?;
+        let (mut read, mut write) = (HANDLE::default(), HANDLE::default());
+        // Safety: two out-pointers; not inheritable (no attributes), so a
+        // child started with its own handles holds no end.
+        unsafe { CreatePipe(&mut read, &mut write, None, 0) }?;
+        // Safety: each handle is ours alone from here, and closed once.
+        let (from, write) = unsafe { (File::from_raw_handle(read.0), File::from_raw_handle(write.0)) };
+        (stream.set)(HANDLE(write.as_raw_handle()))?;
+        Ok(Teed { from, to, restore: Restore { stream, original: original.0 as isize, write } })
+    }
+
+    pub fn restore(r: Restore) {
+        // Nowhere to say a failure: the output still goes into the pipe.
+        let _ = (r.stream.set)(HANDLE(r.original as *mut _));
+        // The pipe's last writer: its copy ends.
+        drop(r.write);
+    }
+
+    /// Writes to the stream, teed or not.
+    pub fn write(stream: Stream, bytes: &[u8]) -> io::Result<()> {
+        let h = (stream.get)();
+        if h.is_invalid() {
+            return Err(io::Error::other("no handle"));
+        }
+        // Safety: the handle is open while the log runs; it is not closed here.
+        let mut out = std::mem::ManuallyDrop::new(unsafe { File::from_raw_handle(h.0) });
+        out.write_all(bytes)
+    }
+
+    /// Where a stream's copy goes: a console takes UTF-16, as Rust's own
+    /// stdout writes it (bytes would show in the console's code page); a
+    /// file or pipe takes the bytes; with no handle, nowhere.
+    pub enum Forward {
+        Nowhere,
+        Bytes(File),
+        Console { handle: File, pending: Vec<u8> },
+    }
+
+    impl Forward {
+        fn to(original: HANDLE) -> io::Result<Self> {
+            if original.is_invalid() {
+                return Ok(Self::Nowhere);
+            }
+            let mut dup = HANDLE::default();
+            // Safety: a duplicate of a live handle, owned by `handle` below,
+            // so putting the original back never pulls it from under the copy.
+            unsafe { DuplicateHandle(GetCurrentProcess(), original, GetCurrentProcess(), &mut dup, 0, false, DUPLICATE_SAME_ACCESS) }?;
+            let handle = unsafe { File::from_raw_handle(dup.0) };
+            let mut mode = CONSOLE_MODE::default();
+            // Safety: an out-pointer and a live handle.
+            Ok(if unsafe { GetConsoleMode(dup, &mut mode) }.is_ok() { Self::Console { handle, pending: Vec::new() } } else { Self::Bytes(handle) })
+        }
+    }
+
+    impl Write for Forward {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            match self {
+                Self::Nowhere => Ok(buf.len()),
+                Self::Bytes(f) => f.write(buf),
+                Self::Console { handle, pending } => {
+                    pending.extend_from_slice(buf);
+                    let whole = whole(pending);
+                    let text: Vec<u16> = String::from_utf8_lossy(&pending[..whole]).encode_utf16().collect();
+                    pending.drain(..whole);
+                    let mut rest = &text[..];
+                    while !rest.is_empty() {
+                        let mut n = 0u32;
+                        // Safety: a live console handle and a slice it reads.
+                        unsafe { WriteConsoleW(HANDLE(handle.as_raw_handle()), rest, Some(&mut n), None) }?;
+                        if n == 0 {
+                            return Err(io::Error::from(io::ErrorKind::WriteZero));
+                        }
+                        rest = &rest[n as usize..];
+                    }
+                    Ok(buf.len())
+                }
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            match self {
+                Self::Bytes(f) => f.flush(),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    /// How much of `pending` goes to the console now: all of it, but for a
+    /// character split across reads, which waits for its rest. Bytes that
+    /// are no UTF-8 at all go, as U+FFFD.
+    pub fn whole(pending: &[u8]) -> usize {
+        match std::str::from_utf8(pending) {
+            Err(e) if e.error_len().is_none() => e.valid_up_to(),
+            _ => pending.len(),
+        }
+    }
+
+    /// The local time as `date +%T.%3N`.
+    pub fn clock() -> String {
+        // Safety: no arguments.
+        let t = unsafe { GetLocalTime() };
+        format!("{:02}:{:02}:{:02}.{:03}", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds)
+    }
 }
 
 #[cfg(test)]
@@ -354,16 +559,66 @@ mod tests {
         d
     }
 
-    /// A pipe standing in for stderr: (read end, write end).
-    fn stand_in() -> (File, RawFd) {
+    /// A pipe standing in for stderr: (read end, the stream writing to it).
+    /// `slot` tells each test's stand-in apart on Windows.
+    #[cfg(unix)]
+    fn stand_in(_slot: usize) -> (File, sys::Stream) {
+        use std::os::fd::FromRawFd;
         let mut p = [0; 2];
-        cvt(unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_CLOEXEC) }).unwrap();
+        sys::cvt(unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_CLOEXEC) }).unwrap();
         (unsafe { File::from_raw_fd(p[0]) }, p[1])
     }
 
-    fn write_fd(fd: RawFd, s: &str) {
-        let mut f = std::mem::ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
-        f.write_all(s.as_bytes()).unwrap();
+    /// Closes the stream's handle: the stand-in's reader then sees its end.
+    #[cfg(unix)]
+    fn close(fd: sys::Stream) {
+        unsafe { libc::close(fd) };
+    }
+
+    #[cfg(windows)]
+    mod slots {
+        use std::sync::atomic::{AtomicIsize, Ordering};
+
+        use windows::Win32::Foundation::HANDLE;
+
+        /// A standard handle slot per test, as `SetStdHandle` keeps them; a
+        /// fn pointer reaches them from the perf thread too.
+        static SLOTS: [AtomicIsize; 4] = [const { AtomicIsize::new(0) }; 4];
+
+        pub fn get<const N: usize>() -> HANDLE {
+            HANDLE(SLOTS[N].load(Ordering::SeqCst) as *mut _)
+        }
+
+        pub fn set<const N: usize>(h: HANDLE) -> windows::core::Result<()> {
+            SLOTS[N].store(h.0 as isize, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[cfg(windows)]
+    fn stand_in(slot: usize) -> (File, sys::Stream) {
+        use std::os::windows::io::FromRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::Pipes::CreatePipe;
+        let stream = match slot {
+            0 => sys::Stream { get: slots::get::<0>, set: slots::set::<0> },
+            1 => sys::Stream { get: slots::get::<1>, set: slots::set::<1> },
+            2 => sys::Stream { get: slots::get::<2>, set: slots::set::<2> },
+            _ => sys::Stream { get: slots::get::<3>, set: slots::set::<3> },
+        };
+        let (mut r, mut w) = (HANDLE::default(), HANDLE::default());
+        unsafe { CreatePipe(&mut r, &mut w, None, 0) }.unwrap();
+        (stream.set)(w).unwrap();
+        (unsafe { File::from_raw_handle(r.0) }, stream)
+    }
+
+    #[cfg(windows)]
+    fn close(stream: sys::Stream) {
+        unsafe { windows::Win32::Foundation::CloseHandle((stream.get)()) }.unwrap();
+    }
+
+    fn write_to(stream: sys::Stream, s: &str) {
+        sys::write(stream, s.as_bytes()).unwrap();
     }
 
     #[test]
@@ -372,7 +627,7 @@ mod tests {
         let path = dir.join("debug.log");
         // A stale log from an earlier session: started anew.
         std::fs::write(&path, "an earlier session\n").unwrap();
-        let (mut terminal, fd) = stand_in();
+        let (mut terminal, out) = stand_in(0);
         let live = Arc::new(Live::new());
         let s = Settings::resolve_with(&|k| match k {
             "CONFIG_FILE" => Some(dir.join("none").display().to_string()),
@@ -380,11 +635,11 @@ mod tests {
             _ => None,
         });
         {
-            let mut log = DebugLog::start_on(&path, &[fd]).unwrap();
+            let mut log = DebugLog::start_on(&path, &[out]).unwrap();
             log.header(&Desktop::Generic);
             log.settings(&s);
             log.format(Format { width: 1920, height: 1080, fps: 60.0, pixels: Pixels::Yuyv }, false);
-            write_fd(fd, "warning: something the viewer said\n");
+            write_to(out, "warning: something the viewer said\n");
             log.perf(live.clone(), Duration::from_millis(20));
             for _ in 0..30 {
                 live.frame();
@@ -408,7 +663,7 @@ mod tests {
             assert!(text.contains(want), "no {want:?} in\n{text}");
         }
         // The original output got the same, but not the end line.
-        unsafe { libc::close(fd) };
+        close(out);
         let mut seen = String::new();
         terminal.read_to_string(&mut seen).unwrap();
         assert!(seen.contains("warning: something the viewer said") && seen.contains("[dbg] perf: "), "{seen}");
@@ -420,10 +675,10 @@ mod tests {
     fn the_output_goes_back_once_the_log_ends() {
         let dir = tmp("restore");
         let path = dir.join("debug.log");
-        let (mut terminal, fd) = stand_in();
-        drop(DebugLog::start_on(&path, &[fd]).unwrap());
-        write_fd(fd, "after the log\n");
-        unsafe { libc::close(fd) };
+        let (mut terminal, out) = stand_in(1);
+        drop(DebugLog::start_on(&path, &[out]).unwrap());
+        write_to(out, "after the log\n");
+        close(out);
         let mut seen = String::new();
         terminal.read_to_string(&mut seen).unwrap();
         assert_eq!(seen, "after the log\n");
@@ -438,11 +693,11 @@ mod tests {
         // review of #27: the copy held the log's lock while it read).
         let dir = tmp("gone");
         let path = dir.join("debug.log");
-        let (terminal, fd) = stand_in();
+        let (terminal, out) = stand_in(2);
         drop(terminal);
-        let log = DebugLog::start_on(&path, &[fd]).unwrap();
-        write_fd(fd, "before\n");
-        write_fd(fd, "after\n");
+        let log = DebugLog::start_on(&path, &[out]).unwrap();
+        write_to(out, "before\n");
+        write_to(out, "after\n");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !std::fs::read_to_string(&path).unwrap().contains("after") {
             assert!(std::time::Instant::now() < deadline, "the log never got the output");
@@ -459,8 +714,22 @@ mod tests {
         for want in ["before", "after", "[dbg] the original output failed: ", "[dbg] ended"] {
             assert!(text.contains(want), "no {want:?} in\n{text}");
         }
-        unsafe { libc::close(fd) };
+        close(out);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A console takes whole characters: one split across two writes
+    /// waits for its rest (#33).
+    #[cfg(windows)]
+    #[test]
+    fn a_character_split_across_reads_reaches_the_console_whole() {
+        let s = "a · b".as_bytes();
+        let dot = s.iter().position(|&b| b == 0xC2).unwrap();
+        assert_eq!(sys::whole(&s[..dot + 1]), dot, "the half of · waits");
+        assert_eq!(sys::whole(s), s.len());
+        // Not UTF-8 at all: goes on, not held for ever.
+        assert_eq!(sys::whole(b"a\xFFb"), 3);
+        assert_eq!(sys::whole(b""), 0);
     }
 
     #[test]

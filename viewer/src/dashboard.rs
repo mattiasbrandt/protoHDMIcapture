@@ -157,7 +157,6 @@ impl Live {
     }
 
     /// The counters, for the debug log's perf line (#27).
-    #[cfg(target_os = "linux")]
     pub fn counts(&self) -> crate::debuglog::Counts {
         crate::debuglog::Counts {
             frames: self.frames.load(Ordering::Relaxed),
@@ -409,7 +408,7 @@ pub(crate) fn rss_mb() -> Option<f64> {
 
 /// This process's user and system CPU time on Windows, in 100 ns ticks.
 #[cfg(windows)]
-fn cpu_ticks() -> Option<u64> {
+pub(crate) fn cpu_ticks() -> Option<u64> {
     use windows::Win32::Foundation::FILETIME;
     use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
     let ticks = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
@@ -420,13 +419,13 @@ fn cpu_ticks() -> Option<u64> {
 }
 
 #[cfg(windows)]
-fn clock_ticks_per_s() -> f64 {
+pub(crate) fn clock_ticks_per_s() -> f64 {
     1e7
 }
 
 /// The working set, Windows' resident memory.
 #[cfg(windows)]
-fn rss_mb() -> Option<f64> {
+pub(crate) fn rss_mb() -> Option<f64> {
     use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
     use windows::Win32::System::Threading::GetCurrentProcess;
     let mut c = PROCESS_MEMORY_COUNTERS { cb: size_of::<PROCESS_MEMORY_COUNTERS>() as u32, ..Default::default() };
