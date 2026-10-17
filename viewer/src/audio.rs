@@ -994,12 +994,17 @@ mod tests {
 
     /// m, 9 and 0 on this process's WASAPI session while the card's loopback
     /// plays: `cargo test --release -- --ignored level_on_wasapi --nocapture`.
-    /// Needs the MS2130's input; leaves the session at 100 %, unmuted.
+    /// Needs an audio input, SRC or else the first; leaves the session at
+    /// 100 %, unmuted.
     #[test]
     #[cfg(windows)]
-    #[ignore = "needs the card's audio input and an output"]
+    #[ignore = "needs an audio input and an output"]
     fn level_on_wasapi() {
-        let audio = Audio::start("Microphone (USB Audio Device)", None, 50, 10).unwrap();
+        let src = std::env::var("SRC")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| inputs().unwrap().into_iter().next().expect("an audio input").id);
+        let audio = Audio::start(&src, None, 50, 10).unwrap();
         eprintln!("{}", audio.describe());
         std::thread::sleep(Duration::from_millis(500));
 
