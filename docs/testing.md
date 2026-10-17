@@ -64,7 +64,9 @@ trusting it. Below: the traps that produce false results on real runs.
   wtype -k Tab          # ctrl+=: wtype -M ctrl -k equal -m ctrl
   ```
 
-  Focus follows the mouse: a key the user types lands in the window under
+  Focus follows the mouse: the dispatch holds for one key, then focus goes
+  back under the pointer, so focus again before every key (a wizard walk
+  lost three keys of four). A key the user types lands in the window under
   the pointer, and their own typing can reach the viewer mid-run (it
   closed the panel in a 10-minute overlay-open run). Screenshot the panel
   now and then to prove a long run's state.
