@@ -583,6 +583,7 @@ mod tests {
 
         /// A standard handle slot per test, as `SetStdHandle` keeps them; a
         /// fn pointer reaches them from the perf thread too.
+        // process-global: stand-ins for the process's standard handles, which are global; one slot per test.
         static SLOTS: [AtomicIsize; 4] = [const { AtomicIsize::new(0) }; 4];
 
         pub fn get<const N: usize>() -> HANDLE {
