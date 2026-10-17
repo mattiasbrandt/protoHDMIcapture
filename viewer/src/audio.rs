@@ -333,16 +333,19 @@ fn output_level(change: Option<LevelChange>) -> Result<Level, String> {
     result
 }
 
-/// The session's volume in percent, as the Volume mixer's slider shows the
-/// session's scalar (linear, 0..1).
+/// The session's volume in percent as PipeWire's is (pactl's cubic
+/// scale): the session's scalar is the amplitude, and the percent its cube
+/// root, so a 9 or 0 step sounds as it does on Linux. Linear, a step near
+/// the top was under half a dB, which no one heard (#19). The Volume
+/// mixer shows the scalar itself: our 80 % is its 51.
 #[cfg(any(windows, test))]
 fn session_percent(scalar: f32) -> u32 {
-    (f64::from(scalar.clamp(0.0, 1.0)) * 100.0).round() as u32
+    (f64::from(scalar.clamp(0.0, 1.0)).cbrt() * 100.0).round() as u32
 }
 
 #[cfg(any(windows, test))]
 fn session_scalar(percent: u32) -> f32 {
-    percent.min(100) as f32 / 100.0
+    (f64::from(percent.min(100)) / 100.0).powi(3) as f32
 }
 
 /// Reads, and with a change sets, the level of `our_session`.
@@ -956,11 +959,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_volume_is_the_mixers_percent() {
+    fn session_volume_is_pactls_cubic_percent() {
         assert_eq!(session_percent(1.0), 100);
-        assert_eq!(session_percent(0.5), 50);
-        assert_eq!(session_percent(0.004), 0);
-        assert_eq!(session_percent(0.006), 1);
+        assert_eq!(session_percent(0.125), 50, "50 % is an eighth of the amplitude, as pactl's");
+        assert_eq!(session_scalar(80), 0.512);
+        // A step near the top is over a dB, as on Linux (linear was 0.45).
+        let db = |p: u32| 20.0 * f64::from(session_scalar(p)).log10();
+        assert!(db(100) - db(95) > 1.3, "{}", db(100) - db(95));
         assert_eq!((session_percent(-0.1), session_percent(1.5)), (0, 100), "clamped");
         for p in 0..=100 {
             assert_eq!(session_percent(session_scalar(p)), p, "{p} % round trips");
