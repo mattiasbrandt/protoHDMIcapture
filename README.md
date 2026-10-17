@@ -1,4 +1,9 @@
-# protoHDMIcapture
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logo-lockup-for-dark-bg.svg">
+    <img alt="protoHDMIcapture" src="assets/brand/logo-lockup-for-light-bg.svg" width="480">
+  </picture>
+</p>
 
 Low-latency viewer for any HDMI source (console, camera, another PC) through a
 USB capture card on Linux. It runs on any desktop; on Hyprland (Omarchy) it also
