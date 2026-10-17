@@ -642,7 +642,9 @@ impl App {
         let feedback = feedback(&window)?;
 
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-        desc.backends = wgpu::Backends::PRIMARY;
+        // DX12 on Windows: with Vulkan also offered, wgpu took Intel's Vulkan
+        // driver on a UHD 620, which crashed the viewer at its first frame.
+        desc.backends = if cfg!(windows) { wgpu::Backends::DX12 } else { wgpu::Backends::PRIMARY };
         let instance = wgpu::Instance::new(desc);
         let surface = instance.create_surface(window.clone()).map_err(|e| format!("surface: {e}"))?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
