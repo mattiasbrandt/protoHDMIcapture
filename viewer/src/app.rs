@@ -1713,7 +1713,8 @@ mod tests {
 
     /// An app with no window, its settings in a temp file.
     fn app_with(config: &str) -> (App, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("phc-app-{}-{:p}", std::process::id(), config));
+        // as_ptr: a &str's {:p} carries its length after a ':' (no file name on Windows).
+        let dir = std::env::temp_dir().join(format!("phc-app-{}-{:p}", std::process::id(), config.as_ptr()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("config");
         std::fs::write(&file, config).unwrap();
@@ -1921,17 +1922,21 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "# mine\nLEVELS=limited\nCONTRAST=2\nSCALING=fast\n");
         assert_eq!(app.overlay.current_message(Instant::now()), Some("Saved: SCALING=fast LEVELS=limited"));
         assert_eq!(panel(&app)[9], "w     Save         nothing changed", "the save is the new baseline");
-        // view.sh reads what w wrote as saved and valid.
-        let out = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../view.sh"))
-            .arg("--settings")
-            .env("CONFIG_FILE", &file)
-            .output()
-            .unwrap();
-        let report = String::from_utf8_lossy(&out.stdout);
-        let row = |k: &str| report.lines().find(|l| l.split_whitespace().next() == Some(k)).unwrap_or("").split_whitespace().collect::<Vec<_>>();
-        assert_eq!(row("LEVELS"), ["LEVELS", "limited", "saved"], "{report}");
-        assert_eq!(row("SCALING"), ["SCALING", "fast", "saved"], "{report}");
-        assert!(out.status.success() && report.contains("all valid"), "{report}");
+        // view.sh reads what w wrote as saved and valid (Linux: view.sh is bash).
+        #[cfg(target_os = "linux")]
+        {
+            let out = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../view.sh"))
+                .arg("--settings")
+                .env("CONFIG_FILE", &file)
+                .output()
+                .unwrap();
+            let report = String::from_utf8_lossy(&out.stdout);
+            let row =
+                |k: &str| report.lines().find(|l| l.split_whitespace().next() == Some(k)).unwrap_or("").split_whitespace().collect::<Vec<_>>();
+            assert_eq!(row("LEVELS"), ["LEVELS", "limited", "saved"], "{report}");
+            assert_eq!(row("SCALING"), ["SCALING", "fast", "saved"], "{report}");
+            assert!(out.status.success() && report.contains("all valid"), "{report}");
+        }
 
         assert!(press(&mut app, "r"));
         assert_eq!(panel(&app)[9], "w     Save         CONTRAST=0");

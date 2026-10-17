@@ -491,7 +491,8 @@ mod tests {
     use super::*;
 
     fn with(config: &str, extra: &[(&str, &str)]) -> Settings {
-        let dir = std::env::temp_dir().join(format!("phc-settings-{}-{:p}", std::process::id(), config));
+        // as_ptr: a &str's {:p} carries its length after a ':' (no file name on Windows).
+        let dir = std::env::temp_dir().join(format!("phc-settings-{}-{:p}", std::process::id(), config.as_ptr()));
         fs::create_dir_all(&dir).unwrap();
         let f = dir.join("config");
         fs::write(&f, config).unwrap();
@@ -595,6 +596,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
     fn writes_byte_for_byte_like_config_write() {
         let start = "# my settings\n  DELAY=0.05\nNOPE=1\n\nLEVELS=auto\nLEVELS=full\nWINDOW=fullscreen\r\nSOURCE='ps5'";
         let cases: &[(Option<&str>, &[&str])] = &[
@@ -647,6 +649,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
     fn unsets_byte_for_byte_like_config_unset() {
         let start = "# my settings\n  DELAY=0.05\nNOPE=1\n\nFULLSCREEN=yes\nLEVELS=full\nFULLSCREEN=no\r\nSOURCE='ps5'";
         let cases: &[(Option<&str>, &[&str])] = &[
@@ -662,6 +665,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
     fn read_file_and_with_flag_as_lib_settings_sh() {
         let out = std::process::Command::new("bash")
             .arg("-c")

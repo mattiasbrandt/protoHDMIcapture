@@ -629,6 +629,7 @@ mod tests {
 
     /// The same answer as lib/pick-refresh-mode.py, byte for byte.
     #[test]
+    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
     fn the_plan_matches_pick_refresh_mode_py() {
         let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../lib/pick-refresh-mode.py");
         let mut cases = vec![(monitors(), 60.0), (monitors(), 50.0), (monitors(), 59.94)];
@@ -689,6 +690,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
     fn recovery_as_lib_desktop_sh_does_it() {
         // recover RATE EVAL_OK -> (ok, record kept), the harness's cases.
         let recover = |name: &str, rate: Option<f64>, eval_ok: bool| {
@@ -716,6 +718,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
     fn match_records_first_and_restores() {
         let dir = tmp("match");
         let h = Desktop::Hyprland(fake(&dir, Some(59.950001), true));
@@ -796,6 +799,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
     fn the_monitors_through_hyprctl() {
         let dir = tmp("monitors");
         fs::create_dir_all(&dir).unwrap();

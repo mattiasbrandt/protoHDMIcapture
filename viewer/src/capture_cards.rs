@@ -171,6 +171,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
     fn lookups_as_lib_capture_cards_sh() {
         for id in ["1e4e:7016", "345f:2130", "534d:2109", "534d:9999", "dead:beef", ""] {
             assert_eq!(rust(id), bash(id), "{id}");

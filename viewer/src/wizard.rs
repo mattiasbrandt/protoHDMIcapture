@@ -2177,24 +2177,30 @@ mod tests {
              SOURCE=ps5\nCARD_SERIAL=20000130041415\nIGNORE_CARDS_RE='OBSBOT Meet 2'\nRES=1920x1080\nFPS=60\n\
              FMT=yuyv422\nDELAY=0.110\nBACKEND=mpv\nWINDOW=fullscreen\nSCALING=balanced\nREFRESH=match\n"
         );
-        // view.sh reads the wizard's file as saved and valid.
-        let out = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../view.sh"))
-            .arg("--settings")
-            .env("CONFIG_FILE", &file)
-            .output()
-            .unwrap();
-        let report = String::from_utf8_lossy(&out.stdout);
-        let row = |k: &str| report.lines().find(|l| l.split_whitespace().next() == Some(k)).unwrap_or("").split_whitespace().last().unwrap_or("").to_string();
-        for k in ["SOURCE", "CARD_SERIAL", "IGNORE_CARDS_RE", "RES", "FPS", "FMT", "DELAY", "WINDOW", "SCALING", "REFRESH"] {
-            assert_eq!(row(k), "saved", "{k}: {report}");
+        // view.sh reads the wizard's file as saved and valid (Linux: view.sh is bash).
+        #[cfg(target_os = "linux")]
+        {
+            let out = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../view.sh"))
+                .arg("--settings")
+                .env("CONFIG_FILE", &file)
+                .output()
+                .unwrap();
+            let report = String::from_utf8_lossy(&out.stdout);
+            let row = |k: &str| {
+                report.lines().find(|l| l.split_whitespace().next() == Some(k)).unwrap_or("").split_whitespace().last().unwrap_or("").to_string()
+            };
+            for k in ["SOURCE", "CARD_SERIAL", "IGNORE_CARDS_RE", "RES", "FPS", "FMT", "DELAY", "WINDOW", "SCALING", "REFRESH"] {
+                assert_eq!(row(k), "saved", "{k}: {report}");
+            }
+            assert!(out.status.success() && report.contains("all valid"), "{report}");
         }
-        assert!(out.status.success() && report.contains("all valid"), "{report}");
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 
     /// The same answers through lib/setup.sh's apply_to on a copy of the
     /// same start: byte for byte, FULLSCREEN's removal included.
     #[test]
+    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
     fn rerunning_edits_the_file_as_apply_to_does() {
         let start = "# mine\nFULLSCREEN=no\nDEV=/dev/video9\nLEVELS=full\nBACKEND=gst\nDEBUG=log\n";
         let file = scratch("rerun", Some(start));
@@ -2441,13 +2447,17 @@ mod tests {
         assert_eq!(w.outcome(), Some(Outcome::Play));
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.ends_with("# Setup was skipped; run ./view.sh --setup (or protohdmicapture --setup) to choose settings.\n"), "{text}");
-        // view.sh then plays without asking: the file exists, and is valid.
-        let out = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../view.sh"))
-            .arg("--settings")
-            .env("CONFIG_FILE", &file)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+        // view.sh then plays without asking: the file exists, and is valid
+        // (Linux: view.sh is bash).
+        #[cfg(target_os = "linux")]
+        {
+            let out = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../view.sh"))
+                .arg("--settings")
+                .env("CONFIG_FILE", &file)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+        }
 
         // q in the tuner: the loopback stops, the wizard ends unsaved.
         let mut w = wizard(fake(), &file, false);
@@ -2518,6 +2528,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
     fn ignore_patterns_as_lib_setup_sh_writes_them() {
         let lit = bash_fn("_regex_literal");
         for name in ["UVC Camera (1e4e:7016)", "Cam [x] 2.0*", "it's a $cam^ {1}|b", "a\\b+?"] {
