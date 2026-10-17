@@ -152,19 +152,19 @@ fn card_input(card: u128, inputs: &[(String, String, Option<u128>)]) -> Result<&
 /// Holds setup.lock as lib/setup.sh does (one wizard at a time) and leaves
 /// setup.done. True when the feed should start: saved and asked for, or
 /// the first run skipped.
-#[cfg(target_os = "linux")]
 fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
     use std::cell::RefCell;
-    use std::os::fd::AsRawFd;
     use std::rc::Rc;
     use wizard::{Outcome, Phase, Wizard};
 
     let dir = session::run_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let lock = std::fs::File::create(dir.join("setup.lock")).map_err(|e| format!("setup.lock: {e}"))?;
-    // Safety: flock on an fd this File owns.
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        return Err("another setup wizard is already running".into());
+    // flock(LOCK_EX | LOCK_NB) on Linux, lib/setup.sh's lock; LockFileEx on Windows.
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Err("another setup wizard is already running".into()),
+        Err(std::fs::TryLockError::Error(e)) => return Err(format!("setup.lock: {e}")),
     }
 
     let s = Settings::resolve();
@@ -177,11 +177,14 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
         fallback("LAT_MS", "10");
         10
     });
+    #[cfg(target_os = "linux")]
     let sys = wizard::Linux {
         sink: s.get("SINK").to_string(),
         buffer_ms,
         refresh: matches!(desktop, desktop::Desktop::Hyprland(_)),
     };
+    #[cfg(windows)]
+    let sys = wizard::Windows { sink: s.get("SINK").to_string(), buffer_ms };
     let wiz = Rc::new(RefCell::new(Wizard::new(Box::new(sys), s.config_file.clone(), first_run, &|k| env::var_os(k).is_some())?));
     // After every early return above, so none leaves it behind.
     std::fs::write(dir.join("setup.pid"), format!("{}\n", std::process::id())).map_err(|e| format!("setup.pid: {e}"))?;
@@ -243,10 +246,9 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
                     let Some((node, format)) = wiz.borrow().feed() else {
                         return Err("the wizard reached the feed without a card".into());
                     };
-                    let source = match format.and_then(|f| capture::V4l2::open(&node.path, f)) {
+                    let source = match format.and_then(|f| open_node(&node, f)) {
                         Ok(source) => source,
                         Err(e) => {
-                            let e = card::open_error(e, &card::holders(&node.path));
                             wiz.borrow_mut().feed_failed(e);
                             continue;
                         }
@@ -254,7 +256,7 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
                     if let Some(s) = feed.session() {
                         s.announce()?;
                     }
-                    let outcome = app::run(Box::new(source), opts(), quit);
+                    let outcome = app::run(source, opts(), quit);
                     feed.finish();
                     outcome
                 }
@@ -283,15 +285,6 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
     Ok(wiz.borrow().outcome() == Some(Outcome::Play) && !quit.requested())
 }
 
-/// No setup wizard on Windows yet (#18): it reads V4L2, sysfs and PipeWire.
-#[cfg(windows)]
-fn setup(_: bool, _: &run::Quit) -> Result<bool, String> {
-    Err(format!(
-        "the setup wizard is not on Windows yet; write the settings by hand in {}",
-        settings::config_file(&|k| env::var(k).ok()).display()
-    ))
-}
-
 /// The card the settings pin, opened at `format`: V4L2 on Linux, Media
 /// Foundation on Windows (#18), where DEV may hold the device's friendly
 /// name or its symbolic link.
@@ -302,11 +295,17 @@ fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::
         eprintln!("warning: {w}");
     }
     eprintln!("video device: {} ({})", picked.node.path.display(), picked.node.card_type);
+    Ok((open_node(&picked.node, format)?, picked.node))
+}
+
+/// The capture node opened at `format`, a busy card's error saying who
+/// holds it where that can be read (Linux).
+fn open_node(node: &card::Node, format: capture::Format) -> Result<Box<dyn capture::FrameSource>, String> {
     #[cfg(target_os = "linux")]
-    let source = capture::V4l2::open(&picked.node.path, format).map_err(|e| card::open_error(e, &card::holders(&picked.node.path)))?;
+    let source = capture::V4l2::open(&node.path, format).map_err(|e| card::open_error(e, &card::holders(&node.path)))?;
     #[cfg(windows)]
-    let source = capture::MediaFoundation::open(&picked.node.path, format).map_err(|e| card::open_error(e, &[]))?;
-    Ok((Box::new(source), picked.node))
+    let source = capture::MediaFoundation::open(&node.path, format).map_err(|e| card::open_error(e, &[]))?;
+    Ok(Box::new(source))
 }
 
 /// The settings; with `menu`, a menu launch's defaults (`--menu`, #28).
@@ -317,15 +316,8 @@ fn settings(menu: bool) -> Settings {
 
 fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
     // First run: no settings file, so the wizard, as view.sh offers it
-    // (not for a measurement run, nor for the wizard's own children). On
-    // Windows there is no wizard yet: the defaults, said once.
-    #[cfg(target_os = "linux")]
+    // (not for a measurement run, nor for the wizard's own children).
     let unset = |k: &str| env::var_os(k).is_none_or(|v| v.is_empty());
-    #[cfg(windows)]
-    if !settings::config_file(&|k| env::var(k).ok()).exists() {
-        eprintln!("note: no settings file yet, so the defaults; the setup wizard is not on Windows yet");
-    }
-    #[cfg(target_os = "linux")]
     if args.is_empty()
         && !settings::config_file(&|k| env::var(k).ok()).exists()
         && unset("PROTOHDMI_SETUP_CHILD")

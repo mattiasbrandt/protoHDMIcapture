@@ -23,7 +23,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFAttributes, IMFMediaEvent, IMFSample, IMFSourceReader, IMFSourceReaderCallback, IMFSourceReaderCallback_Impl,
+    IMFActivate, IMFAttributes, IMFMediaEvent, IMFMediaType, IMFSample, IMFSourceReader, IMFSourceReaderCallback, IMFSourceReaderCallback_Impl,
     MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_E_NO_MORE_TYPES, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
     MF_MT_SUBTYPE, MF_READWRITE_DISABLE_CONVERTERS, MF_SOURCE_READER_ASYNC_CALLBACK, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
@@ -219,20 +219,37 @@ fn devnode_string(devnode: u32, key: &DEVPROPKEY) -> Option<String> {
 /// (Windows' own ids for one without hold a '&'), and its first location
 /// path names the port, stable across replugs into it. Empty when unknown.
 fn serial_and_port(link: &str) -> (String, String) {
-    let Ok(function) = devnode(&HSTRING::from(link)) else { return Default::default() };
-    let instance = devnode_string(function, &DEVPKEY_Device_InstanceId).unwrap_or_default();
-    let usb = if instance.contains("&MI_") {
-        let mut parent = 0u32;
+    let Some((usb, instance)) = usb_device(link) else { return Default::default() };
+    (usb_serial(&instance), devnode_string(usb, &DEVPKEY_Device_LocationPaths).unwrap_or_default())
+}
+
+/// The USB device behind the capture interface `link` (its parent, for a
+/// composite device), and its instance id.
+fn usb_device(link: &str) -> Option<(u32, String)> {
+    let function = devnode(&HSTRING::from(link)).ok()?;
+    let mut usb = function;
+    if devnode_string(function, &DEVPKEY_Device_InstanceId)?.contains("&MI_") {
         // Safety: an out-pointer and a live devnode.
-        if unsafe { CM_Get_Parent(&mut parent, function, 0) } != CR_SUCCESS {
-            return Default::default();
+        if unsafe { CM_Get_Parent(&mut usb, function, 0) } != CR_SUCCESS {
+            return None;
         }
-        parent
-    } else {
-        function
-    };
-    let id = devnode_string(usb, &DEVPKEY_Device_InstanceId).unwrap_or_default();
-    (usb_serial(&id), devnode_string(usb, &DEVPKEY_Device_LocationPaths).unwrap_or_default())
+    }
+    Some((usb, devnode_string(usb, &DEVPKEY_Device_InstanceId)?))
+}
+
+/// The card's USB id ("1e4e:7016", as lsusb and capture-cards/ spell it)
+/// and port (its location path), as the setup wizard shows them; None when
+/// it is not on USB.
+pub fn usb(node: &Path) -> Option<(String, String)> {
+    let (usb, instance) = usb_device(&link(node).ok()?)?;
+    Some((usb_id(&instance)?, devnode_string(usb, &DEVPKEY_Device_LocationPaths).unwrap_or_default()))
+}
+
+/// "vid:pid" from a USB instance id (`USB\VID_1E4E&PID_7016\...`).
+fn usb_id(instance: &str) -> Option<String> {
+    let ids = instance.strip_prefix("USB\\")?.split('\\').next()?;
+    let field = |key: &str| ids.split('&').find_map(|f| f.strip_prefix(key)).map(str::to_ascii_lowercase);
+    Some(format!("{}:{}", field("VID_")?, field("PID_")?))
 }
 
 /// The serial at the end of a USB device instance id, if it is one.
@@ -274,38 +291,10 @@ fn subtype(p: Pixels) -> (GUID, &'static str) {
 /// type's row stride in bytes (YUY2; MJPG has none: a row's width).
 fn reader(link: &str, want: Format, callback: Option<&IMFSourceReaderCallback>) -> Result<(IMFSourceReader, usize), String> {
     let at = |e: windows::core::Error| format!("{link}: {e}");
-    let device = attributes(2)?;
-    let link_w = HSTRING::from(link);
-    // Safety: GUID and string arguments that outlive the calls.
-    unsafe {
-        device.SetGUID(&MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID).map_err(at)?;
-        device.SetString(&MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, PCWSTR(link_w.as_ptr())).map_err(at)?;
-    }
-    let source = unsafe { MFCreateDeviceSource(&device) }.map_err(at)?;
-    let options = attributes(2)?;
-    unsafe {
-        // The card's own frames: no decoder or converter on the way.
-        options.SetUINT32(&MF_READWRITE_DISABLE_CONVERTERS, 1).map_err(at)?;
-        if let Some(cb) = callback {
-            options.SetUnknown(&MF_SOURCE_READER_ASYNC_CALLBACK, cb).map_err(at)?;
-        }
-    }
-    let reader = unsafe { MFCreateSourceReaderFromMediaSource(&source, &options) }.map_err(at)?;
-
+    let reader = source_reader(link, callback)?;
     let (want_sub, want_name) = subtype(want.pixels);
     let mut offered = Vec::new();
-    for i in 0.. {
-        let t = match unsafe { reader.GetNativeMediaType(STREAM, i) } {
-            Ok(t) => t,
-            Err(e) if e.code() == MF_E_NO_MORE_TYPES => break,
-            Err(e) => return Err(at(e)),
-        };
-        // Safety: reads of the type's own attributes.
-        let (sub, size, rate) = unsafe {
-            (t.GetGUID(&MF_MT_SUBTYPE).map_err(at)?, t.GetUINT64(&MF_MT_FRAME_SIZE).map_err(at)?, t.GetUINT64(&MF_MT_FRAME_RATE).map_err(at)?)
-        };
-        let (w, h) = ((size >> 32) as u32, size as u32);
-        let fps = (rate >> 32) as f64 / (rate as u32).max(1) as f64;
+    for NativeType { t, subtype: sub, width: w, height: h, fps } in native_types(&reader, link)? {
         let name = Pixels::ALL.into_iter().map(subtype).find(|(g, _)| *g == sub).map_or("other", |(_, name)| name);
         offered.push(format!("{w}x{h} {name} {fps:.3}"));
         // FPS may be fractional (59.94 = 60000/1001), as on V4L2.
@@ -330,6 +319,72 @@ fn reader(link: &str, want: Format, callback: Option<&IMFSourceReaderCallback>) 
         want.fps,
         offered.join(", ")
     ))
+}
+
+/// The modes the device at `node` lists, in its own order: the formats
+/// this viewer captures (YUY2, MJPG), each size and rate.
+pub fn modes(node: &Path) -> Result<Vec<(Pixels, u32, u32, f64)>, String> {
+    let link = link(node)?;
+    on_mta_thread(move || {
+        let reader = source_reader(&link, None)?;
+        let all = native_types(&reader, &link)?;
+        Ok(all
+            .into_iter()
+            .filter_map(|n| Pixels::ALL.into_iter().find(|p| subtype(*p).0 == n.subtype).map(|p| (p, n.width, n.height, n.fps)))
+            .collect())
+    })
+}
+
+/// A source reader on the device at `link`, converters off; with
+/// `callback`, in asynchronous mode.
+fn source_reader(link: &str, callback: Option<&IMFSourceReaderCallback>) -> Result<IMFSourceReader, String> {
+    let at = |e: windows::core::Error| format!("{link}: {e}");
+    let device = attributes(2)?;
+    let link_w = HSTRING::from(link);
+    // Safety: GUID and string arguments that outlive the calls.
+    unsafe {
+        device.SetGUID(&MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID).map_err(at)?;
+        device.SetString(&MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, PCWSTR(link_w.as_ptr())).map_err(at)?;
+    }
+    let source = unsafe { MFCreateDeviceSource(&device) }.map_err(at)?;
+    let options = attributes(2)?;
+    unsafe {
+        // The card's own frames: no decoder or converter on the way.
+        options.SetUINT32(&MF_READWRITE_DISABLE_CONVERTERS, 1).map_err(at)?;
+        if let Some(cb) = callback {
+            options.SetUnknown(&MF_SOURCE_READER_ASYNC_CALLBACK, cb).map_err(at)?;
+        }
+    }
+    unsafe { MFCreateSourceReaderFromMediaSource(&source, &options) }.map_err(at)
+}
+
+/// One of a reader's native types, with what is read from it.
+struct NativeType {
+    t: IMFMediaType,
+    subtype: GUID,
+    width: u32,
+    height: u32,
+    fps: f64,
+}
+
+/// The reader's native types, in its order.
+fn native_types(reader: &IMFSourceReader, link: &str) -> Result<Vec<NativeType>, String> {
+    let at = |e: windows::core::Error| format!("{link}: {e}");
+    let mut out = Vec::new();
+    for i in 0.. {
+        let t = match unsafe { reader.GetNativeMediaType(STREAM, i) } {
+            Ok(t) => t,
+            Err(e) if e.code() == MF_E_NO_MORE_TYPES => break,
+            Err(e) => return Err(at(e)),
+        };
+        // Safety: reads of the type's own attributes.
+        let (sub, size, rate) = unsafe {
+            (t.GetGUID(&MF_MT_SUBTYPE).map_err(at)?, t.GetUINT64(&MF_MT_FRAME_SIZE).map_err(at)?, t.GetUINT64(&MF_MT_FRAME_RATE).map_err(at)?)
+        };
+        let fps = (rate >> 32) as f64 / (rate as u32).max(1) as f64;
+        out.push(NativeType { t, subtype: sub, width: (size >> 32) as u32, height: size as u32, fps });
+    }
+    Ok(out)
 }
 
 /// One callback's worth: a sample, a stream event, or an error.
@@ -510,7 +565,14 @@ impl Drop for Running<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::usb_serial;
+    use super::{usb_id, usb_serial};
+
+    #[test]
+    fn the_usb_id_from_an_instance_id() {
+        assert_eq!(usb_id(r"USB\VID_1E4E&PID_7016\20000130041415").as_deref(), Some("1e4e:7016"));
+        assert_eq!(usb_id(r"USB\VID_534D&PID_2109&REV_2100\5&1"), Some("534d:2109".into()));
+        assert_eq!(usb_id(r"PCI\VEN_8086&DEV_5917\3&1"), None);
+    }
 
     #[test]
     fn the_serial_ends_a_usb_instance_id() {

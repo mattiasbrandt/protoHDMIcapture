@@ -821,7 +821,11 @@ impl Wizard {
         }
         let mut body = vec![
             format!("USB id  : {} · {}", u.id, cc.chip),
-            format!("Port    : {} · USB {}", u.port, u.version.replace(' ', "")),
+            match u.version.trim() {
+                // Windows gives no bcdUSB without asking the hub (#19).
+                "" => format!("Port    : {}", u.port),
+                v => format!("Port    : {} · USB {v}", u.port),
+            },
         ];
         if !support.is_empty() {
             body.push(format!("Support : {}", capital(&support)));
@@ -1879,13 +1883,22 @@ pub struct Linux {
     pub refresh: bool,
 }
 
-#[cfg(target_os = "linux")]
 struct Loopback {
     _audio: crate::audio::Audio,
     controls: crate::audio::Controls,
 }
 
-#[cfg(target_os = "linux")]
+impl Loopback {
+    /// The sync stage's loopback from `source`, held back by `delay_ms`.
+    fn start(source: &str, sink: &str, delay_ms: u32, buffer_ms: u32) -> Result<Box<dyn Tuner>, String> {
+        let sink = Some(sink).filter(|s| !s.is_empty());
+        let audio = crate::audio::Audio::start(source, sink, delay_ms, buffer_ms)?;
+        eprintln!("{}", audio.describe());
+        let controls = audio.controls();
+        Ok(Box::new(Self { _audio: audio, controls }))
+    }
+}
+
 impl Tuner for Loopback {
     fn delay_ms(&self) -> u32 {
         self.controls.delay_ms()
@@ -1955,11 +1968,59 @@ impl System for Linux {
     }
 
     fn start_audio(&self, source: &str, delay_ms: u32) -> Result<Box<dyn Tuner>, String> {
-        let sink = Some(self.sink.as_str()).filter(|s| !s.is_empty());
-        let audio = crate::audio::Audio::start(source, sink, delay_ms, self.buffer_ms)?;
-        eprintln!("{}", audio.describe());
-        let controls = audio.controls();
-        Ok(Box::new(Loopback { _audio: audio, controls }))
+        Loopback::start(source, &self.sink, delay_ms, self.buffer_ms)
+    }
+}
+
+#[cfg(windows)]
+/// The machine as the wizard sees it on Windows (#19): Media Foundation,
+/// the device tree, WASAPI. No link speed or bcdUSB (the USB stage says
+/// the link is unknown), and no refresh matching.
+pub struct Windows {
+    /// SINK and LAT_MS, for the sync stage's loopback.
+    pub sink: String,
+    pub buffer_ms: u32,
+}
+
+#[cfg(windows)]
+impl System for Windows {
+    fn cards(&self) -> Vec<Node> {
+        crate::card::list()
+    }
+
+    fn usb(&self, node: &Node) -> Option<Usb> {
+        let (id, port) = crate::capture::mf::usb(&node.path)?;
+        Some(Usb { id, port, version: String::new(), speed: String::new() })
+    }
+
+    fn modes(&self, node: &Node) -> Vec<Mode> {
+        let modes = crate::capture::mf::modes(&node.path).unwrap_or_else(|e| {
+            eprintln!("warning: the card's modes: {e}");
+            Vec::new()
+        });
+        // Rounded as lib/setup.sh rounds v4l2-ctl's "(%.3f fps)".
+        modes.into_iter().map(|(p, width, height, fps)| Mode { fmt: p.setting().into(), width, height, fps: (fps + 0.5).floor() as u32 }).collect()
+    }
+
+    /// By friendly name, as SRC may say it: the card's input is the one in
+    /// the card's container (main.rs `card_audio_input`).
+    fn audio_inputs(&self, node: &Node) -> Result<AudioInputs, String> {
+        let inputs = crate::audio::inputs()?;
+        let container = crate::capture::mf::container(&node.path).ok().map(|g| g.to_u128());
+        let mut in_card = inputs.iter().filter(|i| container.is_some() && i.container == container);
+        let card = match (in_card.next(), in_card.next()) {
+            (Some(one), None) => Some(one.name.clone()),
+            _ => None,
+        };
+        Ok(AudioInputs { card, all: inputs.into_iter().map(|i| i.name).collect() })
+    }
+
+    fn can_match_refresh(&self) -> bool {
+        false
+    }
+
+    fn start_audio(&self, source: &str, delay_ms: u32) -> Result<Box<dyn Tuner>, String> {
+        Loopback::start(source, &self.sink, delay_ms, self.buffer_ms)
     }
 }
 
