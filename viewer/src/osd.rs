@@ -224,9 +224,15 @@ fn char_colors(text: &str, base: Color32, kind: PageKind, index: usize, count: u
 /// a hanging indent (`hang`).
 fn page_rows(lines: &[String], cols: usize, kind: PageKind) -> Vec<Row> {
     let mut rows = Vec::new();
+    // The wizard wraps a note itself: its indented lines under a bullet are
+    // the same note.
+    let mut in_note = false;
     for (i, l) in lines.iter().enumerate() {
         let (symbol, rest, base) = if i == 0 { (None, l.as_str(), TITLE) } else { styled(l) };
-        let colors = char_colors(rest, base, kind, i, lines.len());
+        in_note = kind == PageKind::Wizard
+            && i > 0
+            && (rest.trim_start().starts_with("• ") || (in_note && rest.starts_with(' ')));
+        let colors = if in_note { vec![DIM; rest.chars().count()] } else { char_colors(rest, base, kind, i, lines.len()) };
         let chars: Vec<char> = rest.chars().collect();
         let band = kind == PageKind::Wizard && is_choice(&chars) && chars[0] == '▸';
         let width = if symbol.is_some() { cols.saturating_sub(2) } else { cols };
@@ -563,6 +569,9 @@ mod tests {
             colored("f     Display      Fullscreen", PageKind::Panel, 1, 3),
             vec![s("f     ", ACCENT), s("Display      ", DIM), s("Fullscreen", TITLE)]
         );
+        // A note the wizard wrapped itself stays dim on its later lines.
+        let rows = page_rows(&["T".into(), "• a note".into(), "  that wraps".into(), "Next".into(), "k".into()], 80, PageKind::Wizard);
+        assert_eq!(rows.iter().map(|r| r.spans[0].color).collect::<Vec<_>>(), vec![TITLE, DIM, DIM, TEXT, ACCENT]);
         // A wizard's note is secondary; a tip is the content.
         assert_eq!(colored("• Captures YUYV", PageKind::Wizard, 1, 3), vec![s("• Captures YUYV", DIM)]);
         assert_eq!(colored("• HDCP: Off", PageKind::Tips, 1, 3), vec![s("• HDCP: Off", TEXT)]);
