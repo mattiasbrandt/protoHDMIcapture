@@ -122,6 +122,18 @@ trusting it. Below: the traps that produce false results on real runs.
   compare scalers, grab the window from the compositor (`grim`).
 - **The MS2109 sends about 7 s of black** after every stream start, with a
   source playing: a shorter probe sees only black.
+- **Windows: mains or battery?** An idle laptop on mains loses about one
+  card frame a second; on battery, a third as many (#32). Check before a
+  capture count: `(Get-CimInstance -Namespace root/wmi BatteryStatus).PowerOnline`.
+  Load hides the losses too: a heavy scaler or a busy core makes a run
+  look clean, so name the scaling and what else ran. The idle case to
+  measure: fullscreen at 1:1, `CARD_SERIAL` set, `FMT=yuyv422`,
+  `--stats --seconds 60`, nobody at the keyboard; 60 s runs swing from
+  about 20 to 70 gaps, so alternate and compare several.
+- **Windows power plan changes for a test:** `powercfg /setacvalueindex
+  scheme_current sub_processor IDLEDISABLE 1` then `powercfg /setactive
+  scheme_current`; put the value back in a `finally`. Hidden settings
+  such as IDLEDISABLE show only with `powercfg /qh`, not `/query`.
 
 ## Signals
 
