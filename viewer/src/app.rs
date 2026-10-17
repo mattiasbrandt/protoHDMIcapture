@@ -1906,7 +1906,7 @@ mod tests {
         // Sent on the compositor's frame callback alone, a held frame kept
         // every later one a refresh behind (55 ms kernel -> presented, not
         // 41, on the MS2130 2026-10-16): the next card frame replaces it.
-        let (mut app, _) = app_with("");
+        let (mut app, _) = app_with("# held frame\n");
         let held = |app: &App, ago: Duration| {
             let at = now_monotonic().saturating_sub(ago);
             app.slot.lock().unwrap().tag = Some(Tag { captured: at, dequeued: at, repaint: false });
@@ -1931,7 +1931,7 @@ mod tests {
         // presents' outcomes before the pull came in after the no-signal
         // state, with their pre-pull times; the first present after the
         // return counted every refresh since.
-        let (mut app, _) = app_with("");
+        let (mut app, _) = app_with("# repeats\n");
         let live = Arc::new(crate::dashboard::Live::new());
         app.stats = Stats::new(Duration::ZERO, false, live.clone());
         let refresh = Duration::from_micros(16_681);
@@ -1956,7 +1956,7 @@ mod tests {
 
     #[test]
     fn the_sound_comes_back_with_a_card_pulled_out_and_plugged_back() {
-        let (mut app, _loopback, script, _) = app_with_loopback("");
+        let (mut app, _loopback, script, _) = app_with_loopback("# sound back\n");
         let unplugged = Signal::NoSignal { since: crate::capture::Since::Stopped, reason: Reason::Unplugged("gone".into()) };
         // The loopback dies with the card's audio input; its notice may
         // not have been taken when the picture is back.
@@ -2106,7 +2106,7 @@ mod tests {
 
     #[test]
     fn every_saveable_setting_has_a_live_value() {
-        let (app, file) = app_with("");
+        let (app, file) = app_with("# saveable\n");
         let rows = crate::settings::rows();
         let flagged: Vec<&str> = rows.iter().filter(|r| r.has_flag("save")).map(|r| r.name.as_str()).collect();
         assert!(flagged.contains(&"DELAY") && flagged.contains(&"WINDOW"), "{flagged:?}");
