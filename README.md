@@ -121,33 +121,34 @@ audio. The tuning pair above is one of each, so it is allowed.
    known capture-chip USB id is recommended. Pinned by USB serial
    (`CARD_SERIAL`), or by USB port (`CARD_PORT`) when the card reports none,
    or as a last resort by its node (`DEV=/dev/videoN`, which can change on a
-   replug). Each other device can be marked as not the capture card: it is
-   then an ignored device (`IGNORE_CARDS_RE`), never opened as the card.
-2. **USB link**: the chip the id implies, with what is known about that
-   card and its support status (its profile in `capture-cards/`; see
-   [docs/capture-cards.md](docs/capture-cards.md)), and the negotiated
-   speed. 480 Mbit/s (USB 2) is flagged, since uncompressed 1080p60 needs
-   USB 3, unless the chip is a USB 2 one (MS2109) anyway.
-3. **Source**: what is plugged into the card (a profile from `sources/`, or
+   replug). Right after the pick, the card's details: the chip the USB id
+   implies, with what is known about that card and its support status (its
+   profile in `capture-cards/`; see
+   [docs/capture-cards.md](docs/capture-cards.md)), and the negotiated USB
+   link speed. 480 Mbit/s (USB 2) is flagged, since uncompressed 1080p60
+   needs USB 3, unless the chip is a USB 2 one (MS2109) anyway. Then each
+   other device can be marked as not the capture card: it is then an
+   ignored device (`IGNORE_CARDS_RE`), never opened as the card.
+2. **Source**: what is plugged into the card (a profile from `sources/`, or
    any HDMI source), and that source's setup tips to apply now (`SOURCE`).
-4. **Picture format**: the card's own mode list, best first (frame rate, then
+3. **Picture format**: the card's own mode list, best first (frame rate, then
    size, then uncompressed), starting on the mode the source suggests or the
    closest one the card has, with a note when the card cannot do it.
-5. **Signal check**: 2 seconds of capture at that mode, measuring the real
+4. **Signal check**: 2 seconds of capture at that mode, measuring the real
    frame rate. UVC cards cannot report signal lock, so frames are the test,
    and a few frames are checked for a uniformly black picture: some cards
    (the MS2109) stream black at full rate with nothing plugged in.
-6. **Audio**: the card's own input (found on the card's USB device at every
+5. **Audio**: the card's own input (found on the card's USB device at every
    start), another source, or none.
-7. **Display mode** and window size, **refresh matching** (where the desktop
+6. **Display mode** and window size, **refresh matching** (where the desktop
    adapter can; it switches the monitor that has focus when the feed starts),
    and scaling. The player is mpv; a config set to gst or
    ffplay by hand is offered the switch.
-8. **Audio sync**: optional; a windowed feed without audio opens and the
+7. **Audio sync**: optional; a windowed feed without audio opens and the
    j/k/h/l tuner runs in the wizard's terminal.
-9. **Troubleshooting**: debug output off (recommended), a log, or a log plus
+8. **Troubleshooting**: debug output off (recommended), a log, or a log plus
    the live dashboard (`DEBUG`).
-10. **Review**: a diff of exactly what will change; nothing is written before
+9. **Review**: a diff of exactly what will change; nothing is written before
     this. Then an optional test feed that behaves exactly as the saved config.
 
 Re-running it edits: every question starts on the current value. Each run

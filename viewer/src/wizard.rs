@@ -41,7 +41,7 @@ pub const SIGNAL_TIMEOUT: Duration = Duration::from_secs(6);
 const PICTURE_FRAMES: usize = 5;
 /// The width the page's text wraps at, in characters.
 const WIDTH: usize = 72;
-/// The USB stage's text at most, in lines, so its page fits a 720-line
+/// The card's details at most, in lines, so its page fits a 720-line
 /// window at the overlay's font size (window height / 40).
 const MAX_USB_LINES: usize = 15;
 /// A whole page at most, in lines, for a 720-line window: osd.rs draws
@@ -63,7 +63,6 @@ pub enum Phase {
 pub enum Stage {
     Welcome,
     Card,
-    Usb,
     Source,
     Format,
     Signal,
@@ -82,7 +81,6 @@ impl Stage {
         match self {
             Stage::Welcome => "Welcome",
             Stage::Card => "Capture card",
-            Stage::Usb => "USB link",
             Stage::Source => "Source",
             Stage::Format => "Picture format",
             Stage::Signal => "Signal check",
@@ -100,7 +98,7 @@ impl Stage {
     /// The window the stage needs; None: whichever is open.
     fn phase(self) -> Option<Phase> {
         match self {
-            Stage::Welcome | Stage::Card | Stage::Usb | Stage::Source | Stage::Format => Some(Phase::Choose),
+            Stage::Welcome | Stage::Card | Stage::Source | Stage::Format => Some(Phase::Choose),
             Stage::Done => None,
             _ => Some(Phase::Feed),
         }
@@ -235,7 +233,7 @@ enum Step {
     /// Ignore this other device?
     CardIgnore(usize),
     CardResult,
-    Usb,
+    CardDetails,
     SourcePick,
     SourceTips,
     FormatPick,
@@ -317,6 +315,8 @@ pub struct Wizard {
     usb: Option<Usb>,
     ignoring: Ignoring,
     card_lines: Vec<String>,
+    /// Other devices with the card's name, which cannot be ignored by name.
+    ignore_notes: Vec<String>,
     modes: Vec<Mode>,
     feed_error: Option<String>,
     measure: Measure,
@@ -483,7 +483,6 @@ impl Wizard {
         let mut stages = vec![
             Stage::Welcome,
             Stage::Card,
-            Stage::Usb,
             Stage::Source,
             Stage::Format,
             Stage::Signal,
@@ -516,6 +515,7 @@ impl Wizard {
             usb: None,
             ignoring: Ignoring::default(),
             card_lines: Vec::new(),
+            ignore_notes: Vec::new(),
             modes: Vec::new(),
             feed_error: None,
             measure: Measure::default(),
@@ -620,7 +620,6 @@ impl Wizard {
         match stage {
             Stage::Welcome => self.welcome(),
             Stage::Card => self.card_stage(),
-            Stage::Usb => self.usb_stage(),
             Stage::Source => self.source_stage(),
             Stage::Format => self.format_stage(),
             Stage::Signal => self.signal_stage(),
@@ -759,8 +758,9 @@ impl Wizard {
         }
         self.card = Some(node);
         self.card_lines = lines;
+        self.ignore_notes.clear();
         self.ignoring = Ignoring { pattern, nodes: self.nodes.clone(), pick };
-        self.ignore_next(0);
+        self.card_details();
     }
 
     /// The next other device to ask about, from index `from`; the card's
@@ -776,15 +776,17 @@ impl Wizard {
                 continue;
             }
             if matches(&regex_literal(&n.card_type), &card_type) {
-                self.card_lines.push(format!(
+                self.ignore_notes.push(format!(
                     "{} ({}) has the capture card's name, so it cannot be ignored by name.",
                     n.card_type,
                     n.path.display()
                 ));
                 continue;
             }
-            let mut body = self.card_lines.clone();
-            body.push(String::new());
+            let mut body = std::mem::take(&mut self.ignore_notes);
+            if !body.is_empty() {
+                body.push(String::new());
+            }
             let ask = if self.usb_known(&n) {
                 body.push(format!("{} ({}) is a capture card too.", n.card_type, n.path.display()));
                 yes_no("Ignore it from now on?", false)
@@ -796,16 +798,25 @@ impl Wizard {
         }
         let pattern = std::mem::take(&mut self.ignoring.pattern);
         self.set("IGNORE_CARDS_RE", &pattern);
-        let body = self.card_lines.clone();
+        // Only a name that could not be ignored is left to say.
+        let body = std::mem::take(&mut self.ignore_notes);
+        if body.is_empty() {
+            return self.next_stage();
+        }
         self.show(Step::CardResult, body, Ask::Continue);
     }
 
-    fn usb_stage(&mut self) {
+    /// The chosen card's details, right after the pick: how it is pinned,
+    /// its USB id, chip, support, notes and link. The other devices are
+    /// asked about after it (`ignore_next`).
+    fn card_details(&mut self) {
         let Some(card) = self.card.clone() else { return self.enter(Stage::Card) };
         self.usb = self.sys.usb(&card);
+        let mut body = self.card_lines.clone();
+        body.push(String::new());
         let Some(u) = self.usb.clone() else {
-            let body = vec![format!("Warning: {} is not on USB; nothing to check here.", card.path.display())];
-            return self.show(Step::Usb, body, Ask::Continue);
+            body.push(format!("Warning: {} is not on USB; nothing to check here.", card.path.display()));
+            return self.show(Step::CardDetails, body, Ask::Continue);
         };
         let (_, cc) = capture_cards::lookup(&u.id);
         let mut support = String::new();
@@ -819,14 +830,14 @@ impl Wizard {
                 if rest.is_empty() { String::new() } else { format!(" · {rest}") }
             );
         }
-        let mut body = vec![
+        body.extend([
             format!("USB id  : {} · {}", u.id, cc.chip),
             match u.version.trim() {
                 // Windows gives no bcdUSB without asking the hub (#19).
                 "" => format!("Port    : {}", u.port),
                 v => format!("Port    : {} · USB {v}", u.port),
             },
-        ];
+        ]);
         if !support.is_empty() {
             body.push(format!("Support : {}", capital(&support)));
         }
@@ -862,7 +873,7 @@ impl Wizard {
             }
             (s, _) => body.push(format!("Warning: link {} Mbit/s", if s.is_empty() { "unknown" } else { s })),
         }
-        self.show(Step::Usb, body, Ask::Continue);
+        self.show(Step::CardDetails, body, Ask::Continue);
     }
 
     fn source_stage(&mut self) {
@@ -1495,7 +1506,8 @@ impl Wizard {
                 }
                 self.ignore_next(i + 1);
             }
-            Step::CardResult | Step::Usb | Step::SourceTips | Step::SignalResult | Step::SyncNone | Step::SyncResult => {
+            Step::CardDetails => self.ignore_next(0),
+            Step::CardResult | Step::SourceTips | Step::SignalResult | Step::SyncNone | Step::SyncResult => {
                 self.next_stage()
             }
             Step::SourcePick => {
@@ -2171,12 +2183,14 @@ mod tests {
         assert_eq!(selected(&w), "1");
         assert!(w.lines().iter().any(|l| l.contains("UVC Camera (1e4e:7016)") && l.contains("◂ capture chip")), "{:#?}", w.lines());
         press(&mut w, &["Enter"]);
-        // The camera: ignore it (yes by default).
-        assert_eq!(w.step, Step::CardIgnore(0));
-        press(&mut w, &["Enter", "Enter"]);
-        assert_eq!(w.stage, Stage::Usb);
+        // The card's details come straight after the pick.
+        assert_eq!((w.stage, w.step.clone()), (Stage::Card, Step::CardDetails));
+        assert!(w.lines().iter().any(|l| l.starts_with("OK: pinned by USB serial")), "{:#?}", w.lines());
         assert!(w.lines().iter().any(|l| l == "USB id  : 1e4e:7016 · MacroSilicon MS2130"), "{:#?}", w.lines());
         assert!(w.lines().iter().any(|l| l == "Port    : 3-2 · USB 3.20"));
+        press(&mut w, &["Enter"]);
+        // Then the camera: ignore it (yes by default).
+        assert_eq!(w.step, Step::CardIgnore(0));
         press(&mut w, &["Enter"]);
         // Source: the PS5, then its tips.
         assert_eq!(w.stage, Stage::Source);
@@ -2623,9 +2637,12 @@ mod tests {
         press(&mut w, &["Enter"]);
         assert!(w.lines().iter().any(|l| l.contains("UVC Camera (1e4e:7016)") && l.contains("◂ ignored · capture chip")), "{:#?}", w.lines());
         press(&mut w, &["Enter"]);
-        // The camera stays ignored, so nothing is asked about it.
-        assert_eq!(w.step, Step::CardResult);
+        // The details say it; the camera stays ignored, so nothing is asked
+        // about it.
+        assert_eq!(w.step, Step::CardDetails);
         assert!(w.lines().iter().any(|l| l == "Warning: this card was on the ignored list; it is taken off."));
+        press(&mut w, &["Enter"]);
+        assert_eq!(w.stage, Stage::Source);
         assert_eq!(w.new["IGNORE_CARDS_RE"], "OBSBOT");
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
@@ -2640,7 +2657,7 @@ mod tests {
         let mut w = wizard(sys, &file, false);
         press(&mut w, &["Enter", "Enter"]);
         assert_eq!(w.new["DEV"], "/dev/video4", "no serial, no port: pinned by node");
-        press(&mut w, &["Enter", "Enter", "Enter", "Enter"]); // result, usb, source, tips
+        press(&mut w, &["Enter", "Enter", "Enter"]); // details, source, tips
         assert_eq!(w.step, Step::FormatNone);
         press(&mut w, &["n"]);
         assert_eq!(w.step, Step::FormatRes);

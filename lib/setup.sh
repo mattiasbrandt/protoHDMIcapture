@@ -122,7 +122,7 @@ run_child() {
 }
 
 # --- stage list --------------------------------------------------------------
-STAGES=(welcome card usb source format signal audio display)
+STAGES=(welcome card source format signal audio display)
 desktop_can refresh_match && STAGES+=(refresh)
 STAGES+=(backend sync debug review)
 [ -z "$FROM_LAUNCHER$THEN_PLAY" ] && STAGES+=(test)
@@ -184,14 +184,15 @@ _usb_id() {
     [ -n "$d" ] && echo "$(cat "$d/idVendor"):$(cat "$d/idProduct")"
 }
 
-stage_usb() {
-    stage "🔌 USB link"
-    # The card may report no product string, so nothing here depends on one.
+# The chosen card's details, right after the pick: its USB id, chip,
+# support, notes and link. The card may report no product string, so
+# nothing here depends on one.
+card_details() {
     USB_DIR=$(card_usb_dir "$CARD_DEV")
     if [ -z "$USB_DIR" ]; then
         USB_RESULT="not a USB device"
         ui_warn "$CARD_DEV is not on USB; nothing to check here."
-        center ""; pause; return
+        return
     fi
     VIDPID="$(cat "$USB_DIR/idVendor"):$(cat "$USB_DIR/idProduct")"
     LINK_SPEED=$(cat "$USB_DIR/speed" 2>/dev/null)
@@ -230,8 +231,6 @@ stage_usb() {
             USB_RESULT="speed ${LINK_SPEED:-unknown}"
             ui_warn "Link: ${LINK_SPEED:-unknown} Mbit/s" ;;
     esac
-    center ""
-    pause
 }
 
 # A device name as a regex matching only itself, for IGNORE_CARDS_RE. A
@@ -327,6 +326,8 @@ stage_card() {
         ui_warn "This card reports no serial, so it is pinned by node ($CARD_DEV)."
         note "Node numbers can change when devices are replugged; re-run setup if it moves."
     fi
+    center ""
+    card_details
     ignore_others "$pick" nodes types
     center ""
     pause
