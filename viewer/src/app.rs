@@ -1103,8 +1103,10 @@ impl App {
         let picture = s == Signal::Picture;
         if matches!(s, Signal::NoSignal { reason: Reason::Unplugged(_), .. }) {
             self.sound_with_card = true;
-            // The refreshes until the card is back are no repeats.
-            self.stats.card_unplugged();
+        }
+        // Back after no signal: the refreshes without frames are no repeats.
+        if picture && matches!(self.overlay.signal, Signal::NoSignal { .. }) {
+            self.stats.picture_back();
         }
         self.overlay.signal = s;
         if picture && std::mem::take(&mut self.sound_with_card) {
@@ -1921,6 +1923,35 @@ mod tests {
         app.repaint = false;
         held(&app, Duration::from_millis(30));
         assert!(app.send_now(), "past 1.5 frame times (25 ms at 60 fps) the card has stopped: sent alone");
+    }
+
+    #[test]
+    fn the_refreshes_without_a_picture_are_not_counted_as_repeats() {
+        // The laptop (#40): "repeated refreshes 1614" after a pull. The last
+        // presents' outcomes before the pull came in after the no-signal
+        // state, with their pre-pull times; the first present after the
+        // return counted every refresh since.
+        let (mut app, _) = app_with("");
+        let live = Arc::new(crate::dashboard::Live::new());
+        app.stats = Stats::new(Duration::ZERO, false, live.clone());
+        let refresh = Duration::from_micros(16_681);
+        let present = |app: &mut App, at: Duration| {
+            let tag = Tag { captured: at - Duration::from_millis(30), dequeued: at - Duration::from_millis(20), repaint: false };
+            app.stats.presented(tag, at, refresh, 0);
+        };
+        // The card pulled out, then an HDMI pull (an ordinary no signal).
+        for (base, reason) in [(0, Reason::Unplugged("gone".into())), (100, Reason::Nothing)] {
+            let at = |s: u64| Duration::from_secs(base + s);
+            present(&mut app, at(1));
+            let before = live.counts().repeated;
+            app.signal(Signal::NoSignal { since: crate::capture::Since::Stopped, reason: reason.clone() });
+            // An outcome arriving after the no-signal state, from before it.
+            present(&mut app, at(1) + refresh);
+            app.signal(Signal::Picture);
+            present(&mut app, at(26));
+            present(&mut app, at(26) + refresh);
+            assert_eq!(live.counts().repeated - before, 0, "{reason:?}");
+        }
     }
 
     #[test]

@@ -135,10 +135,12 @@ impl Stats {
         self.last_present = None;
     }
 
-    /// The card pulled out (#40): no frame comes until it is back, so the
-    /// refreshes until the next present repeated no frame by being late.
-    /// The count starts over, as after a discard.
-    pub fn card_unplugged(&mut self) {
+    /// The picture back after no signal (an HDMI pull, the card pulled
+    /// out, #40): the refreshes without frames repeated no frame by being
+    /// late, so the count starts over, as after a discard. At the return,
+    /// not at the loss: the outcomes of the last presents before it come
+    /// in after the no-signal state, with their earlier times.
+    pub fn picture_back(&mut self) {
         self.last_present = None;
     }
 
@@ -256,13 +258,13 @@ mod tests {
     }
 
     #[test]
-    fn refreshes_while_the_card_is_unplugged_are_not_repeats() {
+    fn refreshes_without_a_picture_are_not_repeats() {
         // The card pulled out at 1 s and back at 6 s (#40): the laptop's
         // perf line said "repeated 595" for the time without frames.
         let live = Arc::new(Live::new());
         let mut s = Stats::new(Duration::ZERO, false, live.clone());
         present(&mut s, Duration::from_secs(1));
-        s.card_unplugged();
+        s.picture_back();
         present(&mut s, Duration::from_secs(6));
         present(&mut s, Duration::from_secs(6) + REFRESH);
         assert_eq!(s.skipped_refreshes, 0);
