@@ -374,8 +374,10 @@ fn source_reader(link: &str, callback: Option<&IMFSourceReaderCallback>) -> Resu
         device.SetGUID(&MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID).map_err(at)?;
         device.SetString(&MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, PCWSTR(link_w.as_ptr())).map_err(at)?;
     }
+    // Safety: attributes this function made and holds.
     let source = unsafe { MFCreateDeviceSource(&device) }.map_err(at)?;
     let options = attributes(2)?;
+    // Safety: a value and a callback that outlive the calls.
     unsafe {
         // The card's own frames: no decoder or converter on the way.
         options.SetUINT32(&MF_READWRITE_DISABLE_CONVERTERS, 1).map_err(at)?;
@@ -383,6 +385,7 @@ fn source_reader(link: &str, callback: Option<&IMFSourceReaderCallback>) -> Resu
             options.SetUnknown(&MF_SOURCE_READER_ASYNC_CALLBACK, cb).map_err(at)?;
         }
     }
+    // Safety: a source and attributes this function holds.
     unsafe { MFCreateSourceReaderFromMediaSource(&source, &options) }.map_err(at)
 }
 
@@ -400,6 +403,7 @@ fn native_types(reader: &IMFSourceReader, link: &str) -> Result<Vec<NativeType>,
     let at = |e: windows::core::Error| format!("{link}: {e}");
     let mut out = Vec::new();
     for i in 0.. {
+        // Safety: a live reader; past its last type it says MF_E_NO_MORE_TYPES.
         let t = match unsafe { reader.GetNativeMediaType(STREAM, i) } {
             Ok(t) => t,
             Err(e) if e.code() == MF_E_NO_MORE_TYPES => break,

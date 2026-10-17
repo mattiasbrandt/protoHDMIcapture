@@ -11,8 +11,8 @@
 //! - how the run ended, in the file only (main prints the error itself)
 //!
 //! The log is started once `video.lock` is held: a refused second launch
-//! must not truncate the running session's log. Linux only: there is no run
-//! dir on Windows yet (#18).
+//! must not truncate the running session's log. Linux only for now: Windows
+//! has the run dir (session.rs) but not this log yet (#33).
 
 use std::fmt::Write as _;
 use std::fs::File;
