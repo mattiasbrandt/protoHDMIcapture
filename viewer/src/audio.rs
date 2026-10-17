@@ -813,11 +813,11 @@ impl Loopback {
     }
 
     /// The running loopback's buffer sizes and status (`--stats`), or that
-    /// none runs.
-    pub fn summary(&self) -> [String; 2] {
+    /// none runs, said once.
+    pub fn summary(&self) -> Vec<String> {
         match self.0.running.borrow().as_ref() {
-            Some(r) => [r.granted(), r.status()],
-            None => ["not running".into(), "not running".into()],
+            Some(r) => vec![r.granted(), r.status()],
+            None => vec!["not running".into()],
         }
     }
 }
@@ -976,6 +976,16 @@ pub mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_summary_says_once_that_no_loopback_runs() {
+        // `--stats` printed "summary: audio not running" twice (#38).
+        let (loopback, _) = fake::loopback(50);
+        assert_eq!(loopback.summary(), ["not running"]);
+        let keys = loopback.keys();
+        assert!(keys.start(50).is_ok());
+        assert_eq!(loopback.summary(), ["granted: none", "status: none"]);
+    }
 
     #[test]
     fn session_volume_is_pactls_cubic_percent() {
