@@ -5,6 +5,11 @@
   </picture>
 </p>
 
+<p align="center">
+  <a href="https://github.com/mattiasbrandt/protoHDMIcapture/actions/workflows/check.yml"><img alt="check" src="https://github.com/mattiasbrandt/protoHDMIcapture/actions/workflows/check.yml/badge.svg"></a>
+  <a href="https://github.com/mattiasbrandt/protoHDMIcapture/actions/workflows/release.yml"><img alt="release" src="https://github.com/mattiasbrandt/protoHDMIcapture/actions/workflows/release.yml/badge.svg"></a>
+</p>
+
 Low-latency viewer for any HDMI source (console, camera, another PC) through a
 USB capture card on Linux. It runs on any desktop; on Hyprland (Omarchy) it also
 matches the display refresh to the feed and focuses the running window.
