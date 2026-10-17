@@ -10,6 +10,29 @@ use egui::{Align2, Color32, FontId, LayerId, Pos2, Rect, Vec2};
 const BOX: Color32 = Color32::from_rgba_unmultiplied_const(16, 16, 16, 255 - 0x30);
 const TEXT: Color32 = Color32::from_rgb(0xDD, 0xDD, 0xDD);
 const TITLE: Color32 = Color32::WHITE;
+/// The status symbols' colours (the wizard's OK, Warning and Failed lines).
+const GOOD: Color32 = Color32::from_rgb(0x6C, 0xD0, 0x6C);
+const WARN: Color32 = Color32::from_rgb(0xF0, 0xB4, 0x3C);
+const BAD: Color32 = Color32::from_rgb(0xF0, 0x5A, 0x5A);
+
+/// A page line as drawn: the wizard's status prefixes ("OK: ",
+/// "Warning: ", "Failed: ") become a coloured symbol before the rest, and a
+/// heading (unindented, ending in ":") takes the title colour. egui's
+/// default fonts have these symbols; colour emoji they do not (#31).
+fn styled(line: &str) -> (Option<(&'static str, Color32)>, &str, Color32) {
+    for (prefix, symbol, color) in [("OK: ", "✔", GOOD), ("Warning: ", "⚠", WARN), ("Failed: ", "✖", BAD)] {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            return (Some((symbol, color)), rest, TEXT);
+        }
+    }
+    let heading = line.ends_with(':') && !line.starts_with(char::is_whitespace);
+    (None, line, if heading { TITLE } else { TEXT })
+}
+
+/// The symbol and the space after it, before a styled line's rest.
+fn symbol_lead(symbol: &str) -> String {
+    format!("{symbol} ")
+}
 
 /// One frame's overlay.
 #[derive(Default)]
@@ -120,19 +143,33 @@ fn paint(p: &egui::Painter, w: f32, h: f32, scene: &Scene) {
     if let Some(lines) = scene.page {
         // Sized by the height, then smaller where the widest line would
         // run past a narrow window (a tiled one); monospace scales evenly.
-        let widest = lines.iter().map(|l| text_width(p, l, &FontId::monospace(panel_fs))).fold(0.0, f32::max);
+        let shown: Vec<_> = lines.iter().map(|l| styled(l)).collect();
+        let width = |s: &(Option<(&str, Color32)>, &str, Color32), font: &FontId| {
+            s.0.map_or(0.0, |(sym, _)| text_width(p, &symbol_lead(sym), font)) + text_width(p, s.1, font)
+        };
+        let widest = shown.iter().map(|s| width(s, &FontId::monospace(panel_fs))).fold(0.0, f32::max);
         let room = w - 5.0 * panel_fs;
         let fs = if widest > room && widest > 0.0 { (panel_fs * room / widest).floor().max(8.0) } else { panel_fs };
         let font = FontId::monospace(fs);
         let lh = (fs * 1.3).floor();
         let pad = fs;
-        let widest = lines.iter().map(|l| text_width(p, l, &font)).fold(0.0, f32::max);
+        let widest = shown.iter().map(|s| width(s, &font)).fold(0.0, f32::max);
         let (x0, y0) = ((fs * 1.5).floor(), (fs * 3.5).floor());
         let size = Vec2::new((widest + 2.0 * pad).floor(), lines.len() as f32 * lh + 2.0 * pad);
         p.rect_filled(Rect::from_min_size(Pos2::new(x0, y0), size), 0.0, BOX);
-        for (i, l) in lines.iter().enumerate() {
-            let color = if i == 0 { TITLE } else { TEXT };
-            outlined(p, Pos2::new(x0 + pad, y0 + pad + i as f32 * lh), Align2::LEFT_TOP, l, font.clone(), color);
+        for (i, (l, s)) in lines.iter().zip(&shown).enumerate() {
+            let pos = Pos2::new(x0 + pad, y0 + pad + i as f32 * lh);
+            if i == 0 {
+                outlined(p, pos, Align2::LEFT_TOP, l, font.clone(), TITLE);
+                continue;
+            }
+            let (symbol, rest, color) = *s;
+            let mut x = pos.x;
+            if let Some((sym, sym_color)) = symbol {
+                outlined(p, pos, Align2::LEFT_TOP, sym, font.clone(), sym_color);
+                x += text_width(p, &symbol_lead(sym), &font);
+            }
+            outlined(p, Pos2::new(x, pos.y), Align2::LEFT_TOP, rest, font.clone(), color);
         }
     }
 
@@ -172,6 +209,17 @@ mod tests {
     /// $TMPDIR/phc-osd-<page>.png to look at:
     /// `cargo test -- --ignored --nocapture osd_drawn_offscreen`.
     #[test]
+    fn status_lines_become_symbols_and_headings_take_the_title_colour() {
+        assert_eq!(styled("OK: saved."), (Some(("✔", GOOD)), "saved.", TEXT));
+        assert_eq!(styled("Warning: node numbers move"), (Some(("⚠", WARN)), "node numbers move", TEXT));
+        assert_eq!(styled("Failed: the card is busy"), (Some(("✖", BAD)), "the card is busy", TEXT));
+        assert_eq!(styled("Known about this card (capture-cards/ms2130.md):"), (None, "Known about this card (capture-cards/ms2130.md):", TITLE));
+        assert_eq!(styled("USB id  : 1e4e:7016 · MacroSilicon MS2130"), (None, "USB id  : 1e4e:7016 · MacroSilicon MS2130", TEXT));
+        assert_eq!(styled("  • a bullet that ends:"), (None, "  • a bullet that ends:", TEXT));
+        assert_eq!(styled("Not OK: kept"), (None, "Not OK: kept", TEXT));
+    }
+
+    #[test]
     #[ignore = "needs a GPU"]
     fn osd_drawn_offscreen() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
@@ -194,7 +242,22 @@ mod tests {
         let ps5 = crate::sources::get("ps5").unwrap();
         let tips = overlay::tips_lines("ps5", Some(&ps5));
         let bar = overlay::key_bar(true);
+        let wizard: Vec<String> = [
+            "protoHDMIcapture setup · 1/12 · Capture card",
+            "",
+            "OK: pinned by USB serial 20000130041415: found wherever it enumerates.",
+            "Warning: this card was on the ignored list; it is taken off.",
+            "",
+            "USB id  : 1e4e:7016 · MacroSilicon MS2130",
+            "Known about this card (capture-cards/ms2130.md):",
+            "  • Captures uncompressed YUYV 1080p60 only on a 5000 Mbit/s link.",
+            "",
+            "Failed: link 480 Mbit/s, a USB 2 port or hub",
+        ]
+        .map(String::from)
+        .to_vec();
         for (name, scene) in [
+            ("wizard", Scene { page: Some(&wizard), ..Default::default() }),
             ("panel", Scene { page: Some(&panel), message: Some("Volume 80%"), ..Default::default() }),
             ("tips", Scene { page: Some(&tips), ..Default::default() }),
             (
