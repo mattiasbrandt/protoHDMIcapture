@@ -1103,6 +1103,8 @@ impl App {
         let picture = s == Signal::Picture;
         if matches!(s, Signal::NoSignal { reason: Reason::Unplugged(_), .. }) {
             self.sound_with_card = true;
+            // The refreshes until the card is back are no repeats.
+            self.stats.card_unplugged();
         }
         self.overlay.signal = s;
         if picture && std::mem::take(&mut self.sound_with_card) {
