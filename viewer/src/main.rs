@@ -626,20 +626,38 @@ fn hold_prompt(offer_setup: bool) -> &'static str {
     if offer_setup { "Press S to run the setup, Enter to close." } else { "Press Enter to close." }
 }
 
-/// The answer to `hold_prompt`, a line from `input`: true for the setup.
-/// S (either case) when it was offered; anything else, or the input's
-/// end, closes.
+/// A held console's answer to a key.
 #[cfg(any(windows, test))]
-fn wants_setup(input: &mut impl std::io::BufRead, offer_setup: bool) -> std::io::Result<bool> {
-    let mut line = String::new();
-    input.read_line(&mut line)?;
-    Ok(offer_setup && line.trim().eq_ignore_ascii_case("s"))
+#[derive(Debug, PartialEq, Eq)]
+enum Held {
+    /// Not an answer: keep waiting.
+    Wait,
+    Close,
+    Setup,
+}
+
+/// The answer to `hold_prompt` from one key press, by its virtual-key
+/// code, at once (no Enter after it, #39): S runs the setup where it was
+/// offered; Enter or Esc closes; any other key, S included where the
+/// setup is not offered, is not an answer.
+#[cfg(any(windows, test))]
+fn on_key(virtual_key: u16, offer_setup: bool) -> Held {
+    // VK_RETURN, VK_ESCAPE, and the S key (either case: the key, not the
+    // character).
+    const ENTER: u16 = 0x0D;
+    const ESC: u16 = 0x1B;
+    const S: u16 = b'S' as u16;
+    match virtual_key {
+        ENTER | ESC => Held::Close,
+        S if offer_setup => Held::Setup,
+        _ => Held::Wait,
+    }
 }
 
 /// After a fatal error is printed: on Windows, a console that would close
-/// with the viewer stays open until Enter (`holds_console`), or S where the
-/// setup is offered. True: run the setup. #28's desktop notification never
-/// fires there: stderr is a console.
+/// with the viewer stays open until Enter or Esc (`holds_console`), or S
+/// where the setup is offered. True: run the setup. #28's desktop
+/// notification never fires there: stderr is a console.
 #[cfg(windows)]
 fn hold_console(offer_setup: bool) -> bool {
     use std::io::IsTerminal;
@@ -655,10 +673,43 @@ fn hold_console(offer_setup: bool) -> bool {
         return false;
     }
     eprintln!("{}", hold_prompt(offer_setup));
-    wants_setup(&mut std::io::stdin().lock(), offer_setup).unwrap_or_else(|e| {
-        eprintln!("warning: waiting for Enter: {e}");
-        false
-    })
+    match read_key_answer(offer_setup) {
+        Ok(answer) => answer == Held::Setup,
+        Err(e) => {
+            eprintln!("warning: waiting for a key: {e}");
+            false
+        }
+    }
+}
+
+/// Key presses from the console's input until one answers (`on_key`).
+/// Keys pressed before the prompt are dropped first, so a key typed while
+/// the feed ran does not answer it.
+#[cfg(windows)]
+fn read_key_answer(offer_setup: bool) -> windows::core::Result<Held> {
+    use windows::Win32::System::Console::{FlushConsoleInputBuffer, GetStdHandle, INPUT_RECORD, KEY_EVENT, ReadConsoleInputW, STD_INPUT_HANDLE};
+    // Safety: this process's own console input handle; read, not closed.
+    let input = unsafe { GetStdHandle(STD_INPUT_HANDLE) }?;
+    unsafe { FlushConsoleInputBuffer(input) }?;
+    loop {
+        let mut records = [INPUT_RECORD::default()];
+        let mut read = 0u32;
+        // Safety: a one-record buffer and an out-count; blocks for input.
+        unsafe { ReadConsoleInputW(input, &mut records, &mut read) }?;
+        let r = &records[0];
+        if read == 0 || u32::from(r.EventType) != KEY_EVENT {
+            continue;
+        }
+        // Safety: a KEY_EVENT record's union holds its key event.
+        let key = unsafe { r.Event.KeyEvent };
+        if !key.bKeyDown.as_bool() {
+            continue;
+        }
+        match on_key(key.wVirtualKeyCode, offer_setup) {
+            Held::Wait => {}
+            answer => return Ok(answer),
+        }
+    }
 }
 
 /// No console is held on Linux: a terminal or a notification has the error.
@@ -749,21 +800,26 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Fatal, card, card_input, hold_prompt, holds_console, wants_setup};
+    use super::{Fatal, Held, card, card_input, hold_prompt, holds_console, on_key};
 
     #[test]
     fn a_held_console_offers_the_setup_only_for_the_missing_card() {
         assert_eq!(hold_prompt(true), "Press S to run the setup, Enter to close.");
         assert_eq!(hold_prompt(false), "Press Enter to close.");
-        // S, either case, around spaces: the setup, when offered.
-        for line in ["s\r\n", "S\n", "  s \n"] {
-            assert!(wants_setup(&mut line.as_bytes(), true).unwrap(), "{line:?}");
-            assert!(!wants_setup(&mut line.as_bytes(), false).unwrap(), "{line:?}");
+        // One key answers at once (#39: S waited for an Enter after it).
+        let (s, enter, esc, q, shift, space) = (0x53, 0x0D, 0x1B, 0x51, 0x10, 0x20);
+        assert_eq!(on_key(s, true), Held::Setup);
+        assert_eq!(on_key(enter, true), Held::Close);
+        assert_eq!(on_key(esc, true), Held::Close);
+        // A stray key is not an answer: the console stays open.
+        for k in [q, shift, space] {
+            assert_eq!(on_key(k, true), Held::Wait, "{k:#x}");
+            assert_eq!(on_key(k, false), Held::Wait, "{k:#x}");
         }
-        // Enter, anything else, or the input's end: close.
-        for line in ["\r\n", "\n", "setup\n", "q\n", ""] {
-            assert!(!wants_setup(&mut line.as_bytes(), true).unwrap(), "{line:?}");
-        }
+        // Not offered: S is a stray key, Enter and Esc still close.
+        assert_eq!(on_key(s, false), Held::Wait);
+        assert_eq!(on_key(enter, false), Held::Close);
+        assert_eq!(on_key(esc, false), Held::Close);
         // The offer follows the error's kind, not its text.
         let missing = card::Missing { headline: "h".into(), details: vec![], setup: "s".into() };
         assert!(matches!(Fatal::from(card::PickError::Missing(missing)), Fatal::CardMissing(_)));
