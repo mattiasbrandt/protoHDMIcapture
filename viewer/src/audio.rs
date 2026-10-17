@@ -140,12 +140,29 @@ fn on_error(counters: &Arc<Counters>, notify: &NotifySlot, side: &'static str) -
             // going Unconnected or Error this way (host/pipewire/stream.rs
             // `state_changed`), and WASAPI's device removal and invalidated
             // resources.
-            ErrorKind::DeviceNotAvailable | ErrorKind::StreamInvalidated => died(&counters, &notify, format!("{side}: {e}")),
+            ErrorKind::DeviceNotAvailable | ErrorKind::StreamInvalidated => died(&counters, &notify, format!("{side}: {}", worded(&e.to_string()))),
             _ => {
                 counters.other_errors.fetch_add(1, Ordering::Relaxed);
                 eprintln!("audio {side}: {e}");
             }
         }
+    }
+}
+
+/// An audio error as the user reads it. cpal words a Windows error it has
+/// no message for as `OS Error -2004287484 (FormatMessageW() returned error
+/// 317) (os error -2004287484)` (seen with the card pulled out, #40): its
+/// code in hex instead, named where known. Any other text as it is.
+fn worded(e: &str) -> String {
+    let code = e
+        .contains("FormatMessageW")
+        .then(|| e.split("OS Error ").nth(1)?.split(' ').next()?.parse::<i32>().ok())
+        .flatten();
+    let Some(code) = code else { return e.to_string() };
+    let hex = format!("0x{:08X}", code as u32);
+    match code as u32 {
+        0x8889_0004 => format!("the audio device is gone ({hex}, AUDCLNT_E_DEVICE_INVALIDATED)"),
+        _ => format!("Windows error {hex}"),
     }
 }
 
@@ -976,6 +993,19 @@ pub mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_windows_error_cpal_cannot_word_is_named_by_its_code() {
+        // The card pulled out on Windows (#40).
+        assert_eq!(
+            worded("OS Error -2004287484 (FormatMessageW() returned error 317) (os error -2004287484)"),
+            "the audio device is gone (0x88890004, AUDCLNT_E_DEVICE_INVALIDATED)"
+        );
+        assert_eq!(worded("OS Error -2147024809 (FormatMessageW() returned error 317) (os error -2147024809)"), "Windows error 0x80070057");
+        // Worded already (PipeWire, or a Windows error with a message).
+        assert_eq!(worded("Device disconnected"), "Device disconnected");
+        assert_eq!(worded("OS Error 5 (Access is denied.)"), "OS Error 5 (Access is denied.)");
+    }
 
     #[test]
     fn the_summary_says_once_that_no_loopback_runs() {
