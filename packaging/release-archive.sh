@@ -28,7 +28,10 @@ install -Dm755 "$target/release/protohdmicapture" "$d/bin/protohdmicapture"
 # archive ships without it, as makepkg's strip does for the package.
 strip --strip-debug "$d/bin/protohdmicapture"
 install -Dm644 "$root/packaging/protohdmicapture.desktop" "$d/share/applications/protohdmicapture.desktop"
-install -Dm644 "$root/desktop/protohdmicapture.svg" "$d/share/icons/hicolor/scalable/apps/protohdmicapture.svg"
+# The app icon at every size, as the hicolor theme lays it out (#35).
+(cd "$root/packaging/linux/icons" && find hicolor -type f) | while read -r f; do
+    install -Dm644 "$root/packaging/linux/icons/$f" "$d/share/icons/$f"
+done
 install -Dm644 -t "$d/share/licenses/protohdmicapture" "$root/LICENSE-MIT" "$root/LICENSE-APACHE"
 install -Dm644 -t "$d/share/doc/protohdmicapture" "$root/README.md" "$root/packaging/INSTALL.md"
 install -Dm644 -t "$d/share/doc/protohdmicapture/capture-cards" "$root"/capture-cards/*.md

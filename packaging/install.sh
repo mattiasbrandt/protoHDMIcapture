@@ -14,8 +14,11 @@ prefix=${1:-$HOME/.local}
 files=(
     bin/protohdmicapture
     share/applications/protohdmicapture.desktop
-    share/icons/hicolor/scalable/apps/protohdmicapture.svg
 )
+# The app icon at every size the archive carries (#35).
+mapfile -t icons < <(cd "$here" && find share/icons -type f | sort)
+[ "${#icons[@]}" -gt 0 ] || { echo "install.sh: no icons in $here/share/icons" >&2; exit 1; }
+files+=("${icons[@]}")
 dirs=(share/licenses/protohdmicapture share/doc/protohdmicapture)
 
 if [ "$uninstall" = yes ]; then

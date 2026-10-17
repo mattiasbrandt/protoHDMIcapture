@@ -67,7 +67,10 @@ package() {
   cd "$_src"
   install -Dm0755 -t "$pkgdir/usr/bin/" viewer/target/release/protohdmicapture
   install -Dm0644 -t "$pkgdir/usr/share/applications/" packaging/protohdmicapture.desktop
-  install -Dm0644 -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/" desktop/protohdmicapture.svg
+  # The app icon at every size, as the hicolor theme lays it out.
+  (cd packaging/linux/icons && find hicolor -type f) | while read -r f; do
+    install -Dm0644 "packaging/linux/icons/$f" "$pkgdir/usr/share/icons/$f"
+  done
   install -Dm0644 -t "$pkgdir/usr/share/licenses/$pkgname/" LICENSE-MIT LICENSE-APACHE
   install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/" README.md
   install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/capture-cards/" capture-cards/*.md

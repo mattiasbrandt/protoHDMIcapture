@@ -854,7 +854,7 @@ v4l2-ctl -d /dev/video2 --get-fmt-video
   `git config core.hooksPath .githooks`
 - `docs/testing.md`, `docs/run-dir.md`, `CODING_STANDARDS.md` — how to verify a
   change on hardware, the session-file contract, and the review rules
-- `desktop/` — the `.desktop` entry and icon, symlinked into `~/.local/share`
+- `desktop/` — the `.desktop` entry, symlinked into `~/.local/share`
 - `viewer/` — the Rust viewer (`protohdmicapture`); `packaging/` — its
   PKGBUILD, release archive and install script
   ([`packaging/INSTALL.md`](packaging/INSTALL.md))
@@ -865,19 +865,20 @@ v4l2-ctl -d /dev/video2 --get-fmt-video
 
 ## Desktop launcher
 
-`protoHDMIcapture` shows up in the Omarchy launcher (SUPER+SPACE). Both files
-live in `desktop/` in this repo and are symlinked to where XDG looks for them:
+`protoHDMIcapture` shows up in the Omarchy launcher (SUPER+SPACE). The entry
+lives in `desktop/` and the icon in `packaging/linux/icons/` (the brand's,
+`assets/brand/`); both are symlinked to where XDG looks for them:
 
 | file | what it is |
 |---|---|
 | `~/.local/share/applications/protohdmicapture.desktop` → `desktop/protohdmicapture.desktop` | the menu entry; `Exec=` points at `launch.sh` (view.sh). The packaged Rust viewer's entry, `packaging/protohdmicapture.desktop`, runs `protohdmicapture --menu` instead |
-| `~/.local/share/icons/hicolor/scalable/apps/protohdmicapture.svg` → `desktop/protohdmicapture.svg` | the icon |
+| `~/.local/share/icons/hicolor/scalable/apps/protohdmicapture.svg` → `packaging/linux/icons/hicolor/scalable/apps/protohdmicapture.svg` | the icon |
 
 On a fresh machine:
 
 ```bash
 ln -s "$PWD/desktop/protohdmicapture.desktop" ~/.local/share/applications/
-ln -s "$PWD/desktop/protohdmicapture.svg" ~/.local/share/icons/hicolor/scalable/apps/
+ln -s "$PWD/packaging/linux/icons/hicolor/scalable/apps/protohdmicapture.svg" ~/.local/share/icons/hicolor/scalable/apps/
 ```
 
 `Exec=` is an absolute path to this checkout; edit it if the repo lives
