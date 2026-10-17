@@ -91,6 +91,9 @@ pub struct Counters {
     /// Why the loopback stopped mid-feed, once a stream reported itself
     /// gone (#29).
     dead: Mutex<Option<String>>,
+    /// `dead` is set, for the output callback without its lock: it plays
+    /// silence and counts no more (#40).
+    stopped: AtomicBool,
 }
 
 impl Counters {
@@ -175,6 +178,7 @@ fn died(counters: &Counters, notify: &NotifySlot, why: String) {
             return;
         }
         *dead = Some(why.clone());
+        counters.stopped.store(true, Ordering::Relaxed);
     }
     eprintln!("warning: the audio loopback stopped mid-feed: {why}");
     eprintln!("warning: the feed plays on without sound; ctrl -/+, m, 9 or 0 start the loopback again");
@@ -460,6 +464,64 @@ impl Drop for Audio {
     }
 }
 
+/// One output callback: `out` filled from the ring, at the delay asked
+/// for. A loopback stopped mid-feed (its input gone, #40) plays silence
+/// and counts nothing more: the laptop's summary said "ring underruns
+/// 6706", counted after the card's input died.
+fn play_out(r: &mut Ring, c: &Counters, out: &mut [f32], buffer_frames: u32) {
+    let n = out.len() / CHANNELS as usize;
+    seen(&c.out_min, &c.out_max, n as u32);
+    if c.stopped.load(Ordering::Relaxed) {
+        out.fill(0.0);
+        return;
+    }
+    let target = target_frames(c.target_ms.load(Ordering::Relaxed), buffer_frames);
+    c.fill.store(r.frames.len() as u32, Ordering::Relaxed);
+    if !r.primed {
+        if r.frames.len() < target {
+            out.fill(0.0);
+            return;
+        }
+        r.primed = true;
+    }
+    // Too much delay: play faster; too little: slower.
+    let error = (r.frames.len() as f64 - target as f64) / RATE as f64;
+    let step = if error.abs() <= DEAD_BAND { 1.0 } else { 1.0 + (error * GAIN).clamp(-CATCH_UP, CATCH_UP) };
+    let mut pos = r.pos;
+    let mut dry_from = None;
+    for (i, o) in out.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+        let k = pos as usize;
+        let (Some(a), Some(b)) = (r.frames.get(k), r.frames.get(k + 1)) else {
+            c.ring_underruns.fetch_add(1, Ordering::Relaxed);
+            dry_from = Some(i);
+            break;
+        };
+        let t = (pos - k as f64) as f32;
+        o[0] = a[0] + (b[0] - a[0]) * t;
+        o[1] = a[1] + (b[1] - a[1]) * t;
+        pos += step;
+    }
+    if let Some(i) = dry_from {
+        out[i * 2..].fill(0.0);
+    }
+    let used = (pos as usize).min(r.frames.len());
+    r.frames.drain(..used);
+    r.pos = pos - used as f64;
+}
+
+/// The `--stats` status line; a loopback stopped mid-feed says so, its
+/// counts being from before it stopped (#40).
+fn status_line(delay_ms: u32, fill: Duration, c: &Counters) -> String {
+    let stopped = c.dead().map_or(String::new(), |why| format!(", stopped mid-feed ({why})"));
+    format!(
+        "delay {delay_ms} ms (ring {:.1} ms), ring underruns {}, xruns {}, errors {}{stopped}",
+        fill.as_secs_f64() * 1000.0,
+        c.ring_underruns.load(Ordering::Relaxed),
+        c.xruns.load(Ordering::Relaxed),
+        c.other_errors.load(Ordering::Relaxed)
+    )
+}
+
 /// The default output, as the host names it.
 #[cfg(not(windows))]
 fn default_output(host: &cpal::Host) -> Result<cpal::Device, String> {
@@ -559,47 +621,7 @@ impl Audio {
             out_dev
                 .build_output_stream::<f32, _, _>(
                     config,
-                    move |out, _| {
-                        let n = out.len() / CHANNELS as usize;
-                        seen(&c.out_min, &c.out_max, n as u32);
-                        let target = target_frames(c.target_ms.load(Ordering::Relaxed), buffer_frames);
-                        let mut r = ring.lock().unwrap();
-                        c.fill.store(r.frames.len() as u32, Ordering::Relaxed);
-                        if !r.primed {
-                            if r.frames.len() < target {
-                                out.fill(0.0);
-                                return;
-                            }
-                            r.primed = true;
-                        }
-                        // Too much delay: play faster; too little: slower.
-                        let error = (r.frames.len() as f64 - target as f64) / RATE as f64;
-                        let step = if error.abs() <= DEAD_BAND {
-                            1.0
-                        } else {
-                            1.0 + (error * GAIN).clamp(-CATCH_UP, CATCH_UP)
-                        };
-                        let mut pos = r.pos;
-                        let mut dry_from = None;
-                        for (i, o) in out.as_chunks_mut::<2>().0.iter_mut().enumerate() {
-                            let k = pos as usize;
-                            let (Some(a), Some(b)) = (r.frames.get(k), r.frames.get(k + 1)) else {
-                                c.ring_underruns.fetch_add(1, Ordering::Relaxed);
-                                dry_from = Some(i);
-                                break;
-                            };
-                            let t = (pos - k as f64) as f32;
-                            o[0] = a[0] + (b[0] - a[0]) * t;
-                            o[1] = a[1] + (b[1] - a[1]) * t;
-                            pos += step;
-                        }
-                        if let Some(i) = dry_from {
-                            out[i * 2..].fill(0.0);
-                        }
-                        let used = (pos as usize).min(r.frames.len());
-                        r.frames.drain(..used);
-                        r.pos = pos - used as f64;
-                    },
+                    move |out, _| play_out(&mut ring.lock().unwrap(), &c, out, buffer_frames),
                     on_error(&counters, &notify, "output"),
                     None,
                 )
@@ -666,15 +688,7 @@ impl Audio {
     }
 
     pub fn status(&self) -> String {
-        let c = &self.counters;
-        format!(
-            "delay {} ms (ring {:.1} ms), ring underruns {}, xruns {}, errors {}",
-            self.delay_ms(),
-            self.fill().as_secs_f64() * 1000.0,
-            c.ring_underruns.load(Ordering::Relaxed),
-            c.xruns.load(Ordering::Relaxed),
-            c.other_errors.load(Ordering::Relaxed)
-        )
+        status_line(self.delay_ms(), self.fill(), &self.counters)
     }
 }
 
@@ -1028,6 +1042,28 @@ pub mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_loopback_stopped_mid_feed_counts_no_more_underruns() {
+        // The laptop (#40): "ring underruns 6706", counted after the card's
+        // input died with the card pulled out.
+        let c = Counters { in_min: AtomicU32::new(u32::MAX), out_min: AtomicU32::new(u32::MAX), ..Default::default() };
+        let mut ring = Ring { frames: VecDeque::new(), pos: 0.0, primed: true };
+        let mut out = vec![1.0f32; 480 * 2];
+        play_out(&mut ring, &c, &mut out, 480);
+        assert_eq!(c.ring_underruns.load(Ordering::Relaxed), 1, "an empty ring while it runs: one");
+        died(&c, &NotifySlot::default(), "input: the audio device is gone".into());
+        out.fill(1.0);
+        for _ in 0..100 {
+            play_out(&mut ring, &c, &mut out, 480);
+        }
+        assert_eq!(c.ring_underruns.load(Ordering::Relaxed), 1, "none after it stopped");
+        assert!(out.iter().all(|&s| s == 0.0), "silence");
+        assert_eq!(
+            status_line(50, Duration::ZERO, &c),
+            "delay 50 ms (ring 0.0 ms), ring underruns 1, xruns 0, errors 0, stopped mid-feed (input: the audio device is gone)"
+        );
+    }
 
     #[test]
     fn a_windows_error_cpal_cannot_word_is_named_by_its_code() {
