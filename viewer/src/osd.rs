@@ -14,6 +14,24 @@ const TITLE: Color32 = Color32::WHITE;
 const GOOD: Color32 = Color32::from_rgb(0x6C, 0xD0, 0x6C);
 const WARN: Color32 = Color32::from_rgb(0xF0, 0xB4, 0x3C);
 const BAD: Color32 = Color32::from_rgb(0xF0, 0x5A, 0x5A);
+/// Keys, the stage count and tags that point at a choice.
+const ACCENT: Color32 = Color32::from_rgb(0x5C, 0xC8, 0xE6);
+/// Secondary text: labels, notes, an ignored device.
+const DIM: Color32 = Color32::from_rgb(0x9A, 0x9A, 0x9A);
+/// The band behind the selected choice.
+const BAND: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 0x1C);
+
+/// What a page is, for how its lines are coloured (#31).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PageKind {
+    /// The overlay's panel: "key   Label        value" rows.
+    #[default]
+    Panel,
+    /// A source's setup tips: bullets that are the content.
+    Tips,
+    /// The setup wizard's page.
+    Wizard,
+}
 
 /// A page line as drawn: the wizard's status prefixes ("OK: ",
 /// "Warning: ", "Failed: ") become a coloured symbol before the rest, and a
@@ -38,6 +56,13 @@ fn symbol_lead(symbol: &str) -> String {
 /// its bullets and the panel's rows sit a little wider.
 const PAGE_COLS: usize = 80;
 
+/// A run of one colour.
+#[derive(Debug, Clone, PartialEq)]
+struct Span {
+    text: String,
+    color: Color32,
+}
+
 /// One drawn row of a page.
 #[derive(Debug, PartialEq)]
 struct Row {
@@ -45,21 +70,179 @@ struct Row {
     symbol: Option<(&'static str, Color32)>,
     /// A status line's later rows: indented by this symbol's width.
     under: Option<&'static str>,
-    text: String,
-    color: Color32,
+    spans: Vec<Span>,
+    /// The selected choice: drawn on a lighter band.
+    band: bool,
+}
+
+impl Row {
+    fn text(&self) -> String {
+        self.spans.iter().map(|s| s.text.as_str()).collect()
+    }
+}
+
+/// "▸  1  label" or "   2  label": a choice in the wizard's list.
+fn is_choice(chars: &[char]) -> bool {
+    chars.len() > 6
+        && matches!(chars[0], '▸' | ' ')
+        && chars[1] == ' '
+        && chars[3].is_ascii_digit()
+        && (chars[2] == ' ' || chars[2].is_ascii_digit())
+        && chars[4] == ' '
+        && chars[5] == ' '
+}
+
+/// A tag's colour by what it says: a tested source is good, an ignored
+/// device or a merely reported source secondary, the rest (recommended,
+/// current, capture chip) points at the choice.
+fn tag_color(tag: &str) -> Color32 {
+    match tag.trim() {
+        "ignored" | "reported" => DIM,
+        "tested" => GOOD,
+        _ => ACCENT,
+    }
+}
+
+/// A key line's colours: each `sep`-separated group's first word and any
+/// symbols after it ("◂ ▸ other sources") in the accent, the words that
+/// say what they do in `base`.
+fn key_colors(text: &str, sep: &str, base: Color32) -> Vec<Color32> {
+    let mut colors = vec![base; text.chars().count()];
+    let mut at = 0;
+    for part in text.split(sep) {
+        // A wider separator ("   ·   ") leaves spaces around a group.
+        let lead = part.chars().take_while(|c| *c == ' ').count();
+        let start = at + lead;
+        let mut keys = 0;
+        for (i, word) in part.trim_start().split(' ').enumerate() {
+            if i > 0 && word.chars().any(char::is_alphanumeric) {
+                break;
+            }
+            keys += word.chars().count() + usize::from(i > 0);
+        }
+        for c in &mut colors[start..(start + keys).min(text.chars().count())] {
+            *c = ACCENT;
+        }
+        at += part.chars().count() + sep.chars().count();
+    }
+    colors
+}
+
+/// Spans of one colour each, from a colour per character.
+fn spans(text: &str, colors: &[Color32]) -> Vec<Span> {
+    let mut out: Vec<Span> = Vec::new();
+    for (c, color) in text.chars().zip(colors) {
+        match out.last_mut() {
+            Some(s) if s.color == *color => s.text.push(c),
+            _ => out.push(Span { text: c.to_string(), color: *color }),
+        }
+    }
+    out
+}
+
+/// The colour of each character of `text`, one of a page's lines (`index`
+/// of `count`; the first is the title, the last the keys).
+fn char_colors(text: &str, base: Color32, kind: PageKind, index: usize, count: usize) -> Vec<Color32> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut colors = vec![base; chars.len()];
+    let paint = |colors: &mut Vec<Color32>, from: usize, to: usize, c: Color32| {
+        for x in &mut colors[from.min(chars.len())..to.min(chars.len())] {
+            *x = c;
+        }
+    };
+    if index == 0 {
+        // The stage count ("1/11") in the title.
+        let mut at = 0;
+        for part in text.split(" · ") {
+            let n = part.chars().count();
+            let count_like = part.split_once('/').is_some_and(|(a, b)| {
+                !a.is_empty() && !b.is_empty() && a.chars().chain(b.chars()).all(|c| c.is_ascii_digit())
+            });
+            if count_like {
+                paint(&mut colors, at, at + n, ACCENT);
+            }
+            at += n + 3;
+        }
+        return colors;
+    }
+    if index + 1 == count && !text.is_empty() {
+        return key_colors(text, if kind == PageKind::Wizard { " · " } else { "   " }, base);
+    }
+    if kind == PageKind::Wizard && is_choice(&chars) {
+        if chars[0] == '▸' {
+            paint(&mut colors, 0, chars.len(), TITLE);
+            paint(&mut colors, 0, 1, ACCENT);
+        }
+        // Tags: from "◂" to the next double space, each " · " part by
+        // what it says.
+        let mut k = 0;
+        while k < chars.len() {
+            if chars[k] != '◂' {
+                k += 1;
+                continue;
+            }
+            let end = (k..chars.len()).find(|&j| chars[j] == ' ' && chars.get(j + 1) == Some(&' ')).unwrap_or(chars.len());
+            let tag: String = chars[k + 1..end].iter().collect();
+            let mut at = k + 1;
+            let mut first = None;
+            for part in tag.split(" · ") {
+                let n = part.chars().count();
+                let c = tag_color(part);
+                first.get_or_insert(c);
+                paint(&mut colors, at, at + n, c);
+                at += n + 3;
+            }
+            paint(&mut colors, k, k + 1, first.unwrap_or(ACCENT));
+            k = end;
+        }
+        return colors;
+    }
+    if kind == PageKind::Panel && chars.len() > 6 && chars[5] == ' ' && chars[6].is_alphabetic() {
+        // "key   Label        value"
+        paint(&mut colors, 0, 6, ACCENT);
+        paint(&mut colors, 6, 19, DIM);
+        paint(&mut colors, 19, chars.len(), TITLE);
+        return colors;
+    }
+    if kind == PageKind::Wizard {
+        if text.trim_start().starts_with("• ") {
+            return vec![DIM; chars.len()];
+        }
+        if let Some(at) = text.find(" : ") {
+            let label = text[..at].chars().count();
+            if label < 12 {
+                paint(&mut colors, 0, label + 3, DIM);
+                paint(&mut colors, label + 3, chars.len(), TITLE);
+            }
+        }
+    }
+    colors
 }
 
 /// A page's lines as rows, `cols` columns wide at most: the first line is
-/// the title, the rest styled (`styled`), each wrapped with a hanging
-/// indent (`hang`).
-fn page_rows(lines: &[String], cols: usize) -> Vec<Row> {
+/// the title, the rest styled (`styled`, `char_colors`), each wrapped with
+/// a hanging indent (`hang`).
+fn page_rows(lines: &[String], cols: usize, kind: PageKind) -> Vec<Row> {
     let mut rows = Vec::new();
     for (i, l) in lines.iter().enumerate() {
-        let (symbol, rest, color) = if i == 0 { (None, l.as_str(), TITLE) } else { styled(l) };
+        let (symbol, rest, base) = if i == 0 { (None, l.as_str(), TITLE) } else { styled(l) };
+        let colors = char_colors(rest, base, kind, i, lines.len());
+        let chars: Vec<char> = rest.chars().collect();
+        let band = kind == PageKind::Wizard && is_choice(&chars) && chars[0] == '▸';
         let width = if symbol.is_some() { cols.saturating_sub(2) } else { cols };
-        for (j, text) in wrap_cols(rest, width, hang(rest)).into_iter().enumerate() {
+        for (j, (prefix, from, to)) in wrap_ranges(&chars, width, hang(rest)).into_iter().enumerate() {
+            let mut spans: Vec<Span> = Vec::new();
+            if prefix > 0 {
+                spans.push(Span { text: " ".repeat(prefix), color: base });
+            }
+            for k in from..to {
+                match spans.last_mut() {
+                    Some(s) if s.color == colors[k] => s.text.push(chars[k]),
+                    _ => spans.push(Span { text: chars[k].to_string(), color: colors[k] }),
+                }
+            }
             let (symbol, under) = if j == 0 { (symbol, None) } else { (None, symbol.map(|(s, _)| s)) };
-            rows.push(Row { symbol, under, text, color });
+            rows.push(Row { symbol, under, spans, band });
         }
     }
     rows
@@ -74,14 +257,7 @@ fn hang(line: &str) -> usize {
     if line.trim_start().starts_with("• ") {
         return ws + 2;
     }
-    let choice = chars.len() > 6
-        && matches!(chars[0], '▸' | ' ')
-        && chars[1] == ' '
-        && chars[3].is_ascii_digit()
-        && (chars[2] == ' ' || chars[2].is_ascii_digit())
-        && chars[4] == ' '
-        && chars[5] == ' ';
-    if choice {
+    if is_choice(&chars) {
         return 6;
     }
     match line.find(" : ") {
@@ -91,17 +267,19 @@ fn hang(line: &str) -> usize {
 }
 
 /// `text` in rows of at most `cols` characters, broken at spaces where it
-/// can be; the later rows start with `hang` spaces.
-fn wrap_cols(text: &str, cols: usize, hang: usize) -> Vec<String> {
+/// can be: each row's indent and its range of `text`. The later rows
+/// start `hang` spaces in.
+fn wrap_ranges(text: &[char], cols: usize, hang: usize) -> Vec<(usize, usize, usize)> {
     let cols = cols.max(1);
     let hang = hang.min(cols / 3);
     let mut rows = Vec::new();
-    let mut rest: Vec<char> = text.chars().collect();
+    let mut from = 0;
     let mut prefix = 0;
     loop {
         let room = cols - prefix;
+        let rest = &text[from..];
         if rest.len() <= room {
-            rows.push(" ".repeat(prefix) + &rest.iter().collect::<String>());
+            rows.push((prefix, from, text.len()));
             return rows;
         }
         // A tag ("◂ capture chip") runs to the next double space and is
@@ -120,11 +298,11 @@ fn wrap_cols(text: &str, cols: usize, hang: usize) -> Vec<String> {
         // The last such space that leaves the row non-empty, else a hard
         // break.
         let cut = (1..=room).rev().find(|&k| breakable[k] && rest[..k].iter().any(|c| *c != ' ')).unwrap_or(room);
-        let row: String = rest[..cut].iter().collect();
-        rows.push(" ".repeat(prefix) + row.trim_end());
-        rest = rest[cut..].iter().copied().skip_while(|c| *c == ' ').collect();
+        let end = (0..cut).rev().find(|&k| rest[k] != ' ').map_or(cut, |k| k + 1);
+        rows.push((prefix, from, from + end));
+        from += cut + rest[cut..].iter().take_while(|c| **c == ' ').count();
         prefix = hang;
-        if rest.is_empty() {
+        if from >= text.len() {
             return rows;
         }
     }
@@ -133,8 +311,9 @@ fn wrap_cols(text: &str, cols: usize, hang: usize) -> Vec<String> {
 /// One frame's overlay.
 #[derive(Default)]
 pub struct Scene<'a> {
-    /// The panel or the tips page.
+    /// The panel, the tips or the wizard's page.
     pub page: Option<&'a [String]>,
+    pub kind: PageKind,
     pub key_bar: Option<&'a str>,
     /// The banner's detail line.
     pub no_signal: Option<&'a str>,
@@ -248,15 +427,21 @@ fn paint(p: &egui::Painter, w: f32, h: f32, scene: &Scene) {
         let cols = ((room / (cols_px(fs) / PAGE_COLS as f32)).floor() as usize).max(PAGE_COLS.min(20));
         let lh = (fs * 1.3).floor();
         let pad = fs;
-        let rows = page_rows(lines, cols);
+        let rows = page_rows(lines, cols, scene.kind);
         let lead = |sym: &str| text_width(p, &symbol_lead(sym), &font);
-        let row_width = |r: &Row| r.under.or(r.symbol.map(|(s, _)| s)).map_or(0.0, lead) + text_width(p, &r.text, &font);
+        // Advance, trailing spaces included.
+        let adv = |s: &str| text_width(p, &format!("{s}|"), &font) - text_width(p, "|", &font);
+        let row_width = |r: &Row| r.under.or(r.symbol.map(|(s, _)| s)).map_or(0.0, lead) + adv(&r.text());
         let widest = rows.iter().map(row_width).fold(0.0, f32::max);
         let (x0, y0) = ((fs * 1.5).floor(), (fs * 3.5).floor());
         let size = Vec2::new((widest + 2.0 * pad).floor(), rows.len() as f32 * lh + 2.0 * pad);
         p.rect_filled(Rect::from_min_size(Pos2::new(x0, y0), size), 0.0, BOX);
         for (i, r) in rows.iter().enumerate() {
             let pos = Pos2::new(x0 + pad, y0 + pad + i as f32 * lh);
+            if r.band {
+                let top = Pos2::new(x0 + pad / 2.0, pos.y - (lh - fs) / 2.0);
+                p.rect_filled(Rect::from_min_size(top, Vec2::new(size.x - pad, lh)), 0.0, BAND);
+            }
             let mut x = pos.x;
             if let Some((sym, sym_color)) = r.symbol {
                 outlined(p, pos, Align2::LEFT_TOP, sym, font.clone(), sym_color);
@@ -264,7 +449,10 @@ fn paint(p: &egui::Painter, w: f32, h: f32, scene: &Scene) {
             } else if let Some(sym) = r.under {
                 x += lead(sym);
             }
-            outlined(p, Pos2::new(x, pos.y), Align2::LEFT_TOP, &r.text, font.clone(), r.color);
+            for s in &r.spans {
+                outlined(p, Pos2::new(x, pos.y), Align2::LEFT_TOP, &s.text, font.clone(), s.color);
+                x += adv(&s.text);
+            }
         }
     }
 
@@ -276,7 +464,12 @@ fn paint(p: &egui::Painter, w: f32, h: f32, scene: &Scene) {
         let bh = (fs * 2.0).floor();
         let (x0, y0) = (((w - bw) / 2.0).floor(), h - bh - fs);
         p.rect_filled(Rect::from_min_size(Pos2::new(x0, y0), Vec2::new(bw, bh)), 0.0, BOX);
-        outlined(p, Pos2::new((w / 2.0).floor(), y0 + (bh / 2.0).floor()), Align2::CENTER_CENTER, text, font, TEXT);
+        let mut x = x0 + fs;
+        let adv = |s: &str| text_width(p, &format!("{s}|"), &font) - text_width(p, "|", &font);
+        for s in spans(text, &key_colors(text, "·", TEXT)) {
+            outlined(p, Pos2::new(x, y0 + (bh / 2.0).floor()), Align2::LEFT_CENTER, &s.text, font.clone(), s.color);
+            x += adv(&s.text);
+        }
     }
 
     // A short message, top left, where mpv shows its OSD messages; a long
@@ -303,6 +496,11 @@ mod tests {
     /// The overlay drawn over a test frame on the GPU, written to
     /// $TMPDIR/phc-osd-<page>.png to look at:
     /// `cargo test -- --ignored --nocapture osd_drawn_offscreen`.
+    fn wrap_cols(text: &str, cols: usize, hang: usize) -> Vec<String> {
+        let chars: Vec<char> = text.chars().collect();
+        wrap_ranges(&chars, cols, hang).into_iter().map(|(p, a, b)| " ".repeat(p) + &chars[a..b].iter().collect::<String>()).collect()
+    }
+
     #[test]
     fn a_long_line_wraps_under_its_own_text() {
         assert_eq!(wrap_cols("short", 10, 2), vec!["short"]);
@@ -314,12 +512,65 @@ mod tests {
         assert_eq!(hang("▸  1  UVC Camera"), 6);
         assert_eq!(hang("  12  Something"), 6);
         assert_eq!(hang("plain words: here"), 0);
-        let rows = page_rows(&["Title".into(), "Warning: aaaa bbbb cccc".into()], 12);
-        assert_eq!(rows[1], Row { symbol: Some(("⚠", WARN)), under: None, text: "aaaa bbbb".into(), color: TEXT });
-        assert_eq!(rows[2], Row { symbol: None, under: Some("⚠"), text: "cccc".into(), color: TEXT });
+        let rows = page_rows(&["Title".into(), "Warning: aaaa bbbb cccc".into(), "keys".into()], 12, PageKind::Wizard);
+        assert_eq!((rows[1].symbol, rows[1].under, rows[1].text()), (Some(("⚠", WARN)), None, "aaaa bbbb".into()));
+        assert_eq!((rows[2].symbol, rows[2].under, rows[2].text()), (None, Some("⚠"), "cccc".into()));
         // Every row fits.
         let long = "• ".to_string() + &"word ".repeat(40);
-        assert!(page_rows(&["T".into(), long], 30).iter().all(|r| r.text.chars().count() <= 30));
+        assert!(page_rows(&["T".into(), long, "k".into()], 30, PageKind::Tips).iter().all(|r| r.text().chars().count() <= 30));
+    }
+
+    /// Each span of `line` (the page's `index`th of `count`) as (text, colour).
+    fn colored(line: &str, kind: PageKind, index: usize, count: usize) -> Vec<(String, Color32)> {
+        let (_, rest, base) = if index == 0 { (None, line, TITLE) } else { styled(line) };
+        spans(rest, &char_colors(rest, base, kind, index, count)).into_iter().map(|s| (s.text, s.color)).collect()
+    }
+
+    #[test]
+    fn keys_tags_labels_and_notes_take_their_colours() {
+        let s = |t: &str, c| (t.to_string(), c);
+        // The stage count in the title.
+        assert_eq!(
+            colored("protoHDMIcapture setup · 1/11 · Capture card", PageKind::Wizard, 0, 3),
+            vec![s("protoHDMIcapture setup · ", TITLE), s("1/11", ACCENT), s(" · Capture card", TITLE)]
+        );
+        // The keys, last line; symbols after a key are keys too, words not.
+        assert_eq!(
+            colored("↑↓ or the number · Enter OK · q quit", PageKind::Wizard, 2, 3),
+            vec![s("↑↓", ACCENT), s(" or the number · ", TEXT), s("Enter", ACCENT), s(" OK · ", TEXT), s("q", ACCENT), s(" quit", TEXT)]
+        );
+        assert_eq!(
+            colored("◂ ▸ other sources   t back", PageKind::Tips, 2, 3),
+            vec![s("◂ ▸", ACCENT), s(" other sources   ", TEXT), s("t", ACCENT), s(" back", TEXT)]
+        );
+        // The selected choice bright, its tags by what they say.
+        assert_eq!(
+            colored("▸  1  UVC Camera  ◂ current  ◂ ignored · capture chip", PageKind::Wizard, 1, 3),
+            vec![
+                s("▸", ACCENT),
+                s("  1  UVC Camera  ", TITLE),
+                s("◂ current", ACCENT),
+                s("  ", TITLE),
+                s("◂ ignored", DIM),
+                s(" · ", TITLE),
+                s("capture chip", ACCENT),
+            ]
+        );
+        assert_eq!(colored("   3  PlayStation 5  ◂ tested", PageKind::Wizard, 1, 3)[1], s("◂ tested", GOOD));
+        // Labels dim, values bright: the wizard's and the panel's.
+        assert_eq!(colored("USB id  : 1e4e:7016", PageKind::Wizard, 1, 3), vec![s("USB id  : ", DIM), s("1e4e:7016", TITLE)]);
+        assert_eq!(
+            colored("f     Display      Fullscreen", PageKind::Panel, 1, 3),
+            vec![s("f     ", ACCENT), s("Display      ", DIM), s("Fullscreen", TITLE)]
+        );
+        // A wizard's note is secondary; a tip is the content.
+        assert_eq!(colored("• Captures YUYV", PageKind::Wizard, 1, 3), vec![s("• Captures YUYV", DIM)]);
+        assert_eq!(colored("• HDCP: Off", PageKind::Tips, 1, 3), vec![s("• HDCP: Off", TEXT)]);
+        // The key bar under the feed.
+        assert_eq!(
+            spans("Tab menu   ·   f display", &key_colors("Tab menu   ·   f display", "·", TEXT)),
+            vec![Span { text: "Tab".into(), color: ACCENT }, Span { text: " menu   ·   ".into(), color: TEXT }, Span { text: "f".into(), color: ACCENT }, Span { text: " display".into(), color: TEXT }]
+        );
     }
 
     #[test]
@@ -369,6 +620,9 @@ mod tests {
             "",
             "▸  1  UVC Camera (1e4e:7016)  /dev/video0 · serial 20000130041415  ◂ current  ◂ capture chip",
             "   2  OBSBOT Meet 2: OBSBOT Meet 2 St  /dev/video2 · port pci-0000:12:00.0-usb-0:3.4.4:1.0  ◂ ignored",
+            "   3  PlayStation 5  ◂ tested",
+            "",
+            "↑↓ or the number · Enter OK · Backspace back · Esc cancel · q quit",
         ]
         .map(String::from)
         .to_vec();
@@ -376,11 +630,11 @@ mod tests {
         // A tiled window: a page sized for its width, long lines wrapped.
         let tiled = (960u32, 1123u32); // rows of 256-byte multiples for the copy
         for (name, (w, h), scene) in [
-            ("wizard", full, Scene { page: Some(&wizard), ..Default::default() }),
-            ("wizard-tiled", tiled, Scene { page: Some(&wizard), ..Default::default() }),
+            ("wizard", full, Scene { page: Some(&wizard), kind: PageKind::Wizard, ..Default::default() }),
+            ("wizard-tiled", tiled, Scene { page: Some(&wizard), kind: PageKind::Wizard, ..Default::default() }),
             ("panel", full, Scene { page: Some(&panel), message: Some("Volume 80%"), ..Default::default() }),
-            ("tips", full, Scene { page: Some(&tips), ..Default::default() }),
-            ("tips-tiled", tiled, Scene { page: Some(&tips), ..Default::default() }),
+            ("tips", full, Scene { page: Some(&tips), kind: PageKind::Tips, ..Default::default() }),
+            ("tips-tiled", tiled, Scene { page: Some(&tips), kind: PageKind::Tips, ..Default::default() }),
             (
                 "bar-nosignal",
                 full,

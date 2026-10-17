@@ -28,7 +28,7 @@ use crate::capture::{Format, FrameSource, now_monotonic};
 use crate::desktop::Desktop;
 use crate::gputime::GpuTimer;
 use crate::keys::{self, Action};
-use crate::osd::{Osd, Scene};
+use crate::osd::{Osd, PageKind, Scene};
 use crate::overlay::{self, Notify, Overlay, Page};
 use crate::picture::{self, Colour, Picture};
 #[cfg(target_os = "linux")]
@@ -218,6 +218,7 @@ fn saveable(rows: &[Row], now: &overlay::Values, loopback: bool) -> Vec<&'static
 /// The overlay's text for one frame (osd.rs draws it).
 struct SceneText {
     page: Option<Vec<String>>,
+    kind: PageKind,
     key_bar: Option<String>,
     no_signal: Option<String>,
     message: Option<String>,
@@ -1289,6 +1290,7 @@ impl App {
         if let Some(w) = &self.opts.wizard {
             return Some(SceneText {
                 page: Some(w.borrow().lines()),
+                kind: PageKind::Wizard,
                 key_bar: None,
                 no_signal: None,
                 message: self.overlay.current_message(now).map(str::to_string),
@@ -1329,6 +1331,7 @@ impl App {
             }
         };
         Some(SceneText {
+            kind: if matches!(self.overlay.page, Some(Page::Tips)) { PageKind::Tips } else { PageKind::Panel },
             page,
             key_bar: self.overlay.key_bar_showing(now).then(|| overlay::key_bar(loopback)),
             no_signal: self.overlay.no_signal(),
@@ -1524,6 +1527,7 @@ impl App {
             let lines = text.page.as_deref();
             let s = Scene {
                 page: lines,
+                kind: text.kind,
                 key_bar: text.key_bar.as_deref(),
                 no_signal: text.no_signal.as_deref(),
                 message: text.message.as_deref(),
