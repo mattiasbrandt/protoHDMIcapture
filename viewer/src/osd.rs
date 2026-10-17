@@ -34,6 +34,102 @@ fn symbol_lead(symbol: &str) -> String {
     format!("{symbol} ")
 }
 
+/// The columns a page is sized for: the wizard wraps its text at 72, and
+/// its bullets and the panel's rows sit a little wider.
+const PAGE_COLS: usize = 80;
+
+/// One drawn row of a page.
+#[derive(Debug, PartialEq)]
+struct Row {
+    /// The status symbol, on a status line's first row.
+    symbol: Option<(&'static str, Color32)>,
+    /// A status line's later rows: indented by this symbol's width.
+    under: Option<&'static str>,
+    text: String,
+    color: Color32,
+}
+
+/// A page's lines as rows, `cols` columns wide at most: the first line is
+/// the title, the rest styled (`styled`), each wrapped with a hanging
+/// indent (`hang`).
+fn page_rows(lines: &[String], cols: usize) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let (symbol, rest, color) = if i == 0 { (None, l.as_str(), TITLE) } else { styled(l) };
+        let width = if symbol.is_some() { cols.saturating_sub(2) } else { cols };
+        for (j, text) in wrap_cols(rest, width, hang(rest)).into_iter().enumerate() {
+            let (symbol, under) = if j == 0 { (symbol, None) } else { (None, symbol.map(|(s, _)| s)) };
+            rows.push(Row { symbol, under, text, color });
+        }
+    }
+    rows
+}
+
+/// Where a line's wrapped rows start: under a bullet's text, a
+/// "Label   : value" row's value, a choice's label ("▸  1  label"), else
+/// under the line's own indent.
+fn hang(line: &str) -> usize {
+    let chars: Vec<char> = line.chars().collect();
+    let ws = chars.iter().take_while(|c| c.is_whitespace()).count();
+    if line.trim_start().starts_with("• ") {
+        return ws + 2;
+    }
+    let choice = chars.len() > 6
+        && matches!(chars[0], '▸' | ' ')
+        && chars[1] == ' '
+        && chars[3].is_ascii_digit()
+        && (chars[2] == ' ' || chars[2].is_ascii_digit())
+        && chars[4] == ' '
+        && chars[5] == ' ';
+    if choice {
+        return 6;
+    }
+    match line.find(" : ") {
+        Some(at) if line[..at].chars().count() < 12 => line[..at].chars().count() + 3,
+        _ => ws,
+    }
+}
+
+/// `text` in rows of at most `cols` characters, broken at spaces where it
+/// can be; the later rows start with `hang` spaces.
+fn wrap_cols(text: &str, cols: usize, hang: usize) -> Vec<String> {
+    let cols = cols.max(1);
+    let hang = hang.min(cols / 3);
+    let mut rows = Vec::new();
+    let mut rest: Vec<char> = text.chars().collect();
+    let mut prefix = 0;
+    loop {
+        let room = cols - prefix;
+        if rest.len() <= room {
+            rows.push(" ".repeat(prefix) + &rest.iter().collect::<String>());
+            return rows;
+        }
+        // A tag ("◂ capture chip") runs to the next double space and is
+        // never broken.
+        let mut in_tag = false;
+        let breakable: Vec<bool> = (0..rest.len())
+            .map(|k| {
+                if rest[k] == '◂' {
+                    in_tag = true;
+                } else if rest[k] == ' ' && rest.get(k + 1) == Some(&' ') {
+                    in_tag = false;
+                }
+                rest[k] == ' ' && !in_tag
+            })
+            .collect();
+        // The last such space that leaves the row non-empty, else a hard
+        // break.
+        let cut = (1..=room).rev().find(|&k| breakable[k] && rest[..k].iter().any(|c| *c != ' ')).unwrap_or(room);
+        let row: String = rest[..cut].iter().collect();
+        rows.push(" ".repeat(prefix) + row.trim_end());
+        rest = rest[cut..].iter().copied().skip_while(|c| *c == ' ').collect();
+        prefix = hang;
+        if rest.is_empty() {
+            return rows;
+        }
+    }
+}
+
 /// One frame's overlay.
 #[derive(Default)]
 pub struct Scene<'a> {
@@ -141,35 +237,34 @@ fn paint(p: &egui::Painter, w: f32, h: f32, scene: &Scene) {
 
     // The panel or the tips, top left, below the messages' line.
     if let Some(lines) = scene.page {
-        // Sized by the height, then smaller where the widest line would
-        // run past a narrow window (a tiled one); monospace scales evenly.
-        let shown: Vec<_> = lines.iter().map(|l| styled(l)).collect();
-        let width = |s: &(Option<(&str, Color32)>, &str, Color32), font: &FontId| {
-            s.0.map_or(0.0, |(sym, _)| text_width(p, &symbol_lead(sym), font)) + text_width(p, s.1, font)
-        };
-        let widest = shown.iter().map(|s| width(s, &FontId::monospace(panel_fs))).fold(0.0, f32::max);
+        // One size for every page in a window: from the height, smaller only
+        // where PAGE_COLS columns would run past a narrow window (a tiled
+        // one). A longer line wraps rather than shrinking its page.
+        let cols_px = |fs: f32| text_width(p, &"0".repeat(PAGE_COLS), &FontId::monospace(fs));
         let room = w - 5.0 * panel_fs;
-        let fs = if widest > room && widest > 0.0 { (panel_fs * room / widest).floor().max(8.0) } else { panel_fs };
+        let wide = cols_px(panel_fs);
+        let fs = if wide > room && wide > 0.0 { (panel_fs * room / wide).floor().max(8.0) } else { panel_fs };
         let font = FontId::monospace(fs);
+        let cols = ((room / (cols_px(fs) / PAGE_COLS as f32)).floor() as usize).max(PAGE_COLS.min(20));
         let lh = (fs * 1.3).floor();
         let pad = fs;
-        let widest = shown.iter().map(|s| width(s, &font)).fold(0.0, f32::max);
+        let rows = page_rows(lines, cols);
+        let lead = |sym: &str| text_width(p, &symbol_lead(sym), &font);
+        let row_width = |r: &Row| r.under.or(r.symbol.map(|(s, _)| s)).map_or(0.0, lead) + text_width(p, &r.text, &font);
+        let widest = rows.iter().map(row_width).fold(0.0, f32::max);
         let (x0, y0) = ((fs * 1.5).floor(), (fs * 3.5).floor());
-        let size = Vec2::new((widest + 2.0 * pad).floor(), lines.len() as f32 * lh + 2.0 * pad);
+        let size = Vec2::new((widest + 2.0 * pad).floor(), rows.len() as f32 * lh + 2.0 * pad);
         p.rect_filled(Rect::from_min_size(Pos2::new(x0, y0), size), 0.0, BOX);
-        for (i, (l, s)) in lines.iter().zip(&shown).enumerate() {
+        for (i, r) in rows.iter().enumerate() {
             let pos = Pos2::new(x0 + pad, y0 + pad + i as f32 * lh);
-            if i == 0 {
-                outlined(p, pos, Align2::LEFT_TOP, l, font.clone(), TITLE);
-                continue;
-            }
-            let (symbol, rest, color) = *s;
             let mut x = pos.x;
-            if let Some((sym, sym_color)) = symbol {
+            if let Some((sym, sym_color)) = r.symbol {
                 outlined(p, pos, Align2::LEFT_TOP, sym, font.clone(), sym_color);
-                x += text_width(p, &symbol_lead(sym), &font);
+                x += lead(sym);
+            } else if let Some(sym) = r.under {
+                x += lead(sym);
             }
-            outlined(p, Pos2::new(x, pos.y), Align2::LEFT_TOP, rest, font.clone(), color);
+            outlined(p, Pos2::new(x, pos.y), Align2::LEFT_TOP, &r.text, font.clone(), r.color);
         }
     }
 
@@ -209,6 +304,25 @@ mod tests {
     /// $TMPDIR/phc-osd-<page>.png to look at:
     /// `cargo test -- --ignored --nocapture osd_drawn_offscreen`.
     #[test]
+    fn a_long_line_wraps_under_its_own_text() {
+        assert_eq!(wrap_cols("short", 10, 2), vec!["short"]);
+        assert_eq!(wrap_cols("one two three four", 9, 2), vec!["one two", "  three", "  four"]);
+        assert_eq!(wrap_cols("abcdefghijkl", 5, 0), vec!["abcde", "fghij", "kl"]);
+        assert_eq!(wrap_cols("label  ◂ capture chip", 16, 0), vec!["label", "◂ capture chip"]);
+        assert_eq!(hang("  • a bullet"), 4);
+        assert_eq!(hang("Support : Tested"), 10);
+        assert_eq!(hang("▸  1  UVC Camera"), 6);
+        assert_eq!(hang("  12  Something"), 6);
+        assert_eq!(hang("plain words: here"), 0);
+        let rows = page_rows(&["Title".into(), "Warning: aaaa bbbb cccc".into()], 12);
+        assert_eq!(rows[1], Row { symbol: Some(("⚠", WARN)), under: None, text: "aaaa bbbb".into(), color: TEXT });
+        assert_eq!(rows[2], Row { symbol: None, under: Some("⚠"), text: "cccc".into(), color: TEXT });
+        // Every row fits.
+        let long = "• ".to_string() + &"word ".repeat(40);
+        assert!(page_rows(&["T".into(), long], 30).iter().all(|r| r.text.chars().count() <= 30));
+    }
+
+    #[test]
     fn status_lines_become_symbols_and_headings_take_the_title_colour() {
         assert_eq!(styled("OK: saved."), (Some(("✔", GOOD)), "saved.", TEXT));
         assert_eq!(styled("Warning: node numbers move"), (Some(("⚠", WARN)), "node numbers move", TEXT));
@@ -225,7 +339,6 @@ mod tests {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).expect("a GPU");
         let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
-        let (w, h) = (1920u32, 1080u32);
         let format = wgpu::TextureFormat::Bgra8Unorm;
         let panel = overlay::panel_lines(&overlay::Panel {
             display: "Fullscreen",
@@ -253,15 +366,24 @@ mod tests {
             "  • Captures uncompressed YUYV 1080p60 only on a 5000 Mbit/s link.",
             "",
             "Failed: link 480 Mbit/s, a USB 2 port or hub",
+            "",
+            "▸  1  UVC Camera (1e4e:7016)  /dev/video0 · serial 20000130041415  ◂ current  ◂ capture chip",
+            "   2  OBSBOT Meet 2: OBSBOT Meet 2 St  /dev/video2 · port pci-0000:12:00.0-usb-0:3.4.4:1.0  ◂ ignored",
         ]
         .map(String::from)
         .to_vec();
-        for (name, scene) in [
-            ("wizard", Scene { page: Some(&wizard), ..Default::default() }),
-            ("panel", Scene { page: Some(&panel), message: Some("Volume 80%"), ..Default::default() }),
-            ("tips", Scene { page: Some(&tips), ..Default::default() }),
+        let full = (1920u32, 1080u32);
+        // A tiled window: a page sized for its width, long lines wrapped.
+        let tiled = (960u32, 1123u32); // rows of 256-byte multiples for the copy
+        for (name, (w, h), scene) in [
+            ("wizard", full, Scene { page: Some(&wizard), ..Default::default() }),
+            ("wizard-tiled", tiled, Scene { page: Some(&wizard), ..Default::default() }),
+            ("panel", full, Scene { page: Some(&panel), message: Some("Volume 80%"), ..Default::default() }),
+            ("tips", full, Scene { page: Some(&tips), ..Default::default() }),
+            ("tips-tiled", tiled, Scene { page: Some(&tips), ..Default::default() }),
             (
                 "bar-nosignal",
+                full,
                 Scene {
                     key_bar: Some(&bar),
                     no_signal: Some("The source stopped sending.  Press the PS button on the controller to wake it."),
