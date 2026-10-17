@@ -464,38 +464,7 @@ impl Audio {
     /// `source` and `sink` are PipeWire node names (no sink: the default);
     /// on Windows, endpoint names or ids (`inputs`). `buffer_ms` is
     /// LAT_MS.
-    #[cfg(not(windows))]
     pub fn start(source: &str, sink: Option<&str>, delay_ms: u32, buffer_ms: u32) -> Result<Self, String> {
-        Self::build(source, sink, delay_ms, buffer_ms)
-    }
-
-    /// On Windows the streams are built on a thread of their own, with
-    /// COM multithreaded, and handed back (cpal's WASAPI streams are Send).
-    /// Every start goes this way: the window's thread has COM
-    /// single-threaded (winit's OLE), where building the audio client
-    /// fails with RPC_E_CHANGED_MODE, so a restart from the keys (#29) or
-    /// with the card back (#40) could not start there; only the first
-    /// start, before the window, could.
-    #[cfg(windows)]
-    pub fn start(source: &str, sink: Option<&str>, delay_ms: u32, buffer_ms: u32) -> Result<Self, String> {
-        use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
-        let (source, sink) = (source.to_string(), sink.map(str::to_string));
-        thread::Builder::new()
-            .name("audio start".into())
-            .spawn(move || {
-                // Safety: this thread's own COM, balanced below.
-                unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok().map_err(|e| format!("COM for the audio: {e}"))?;
-                let built = Self::build(&source, sink.as_deref(), delay_ms, buffer_ms);
-                // Safety: this thread's CoInitializeEx, above.
-                unsafe { CoUninitialize() };
-                built
-            })
-            .map_err(|e| format!("the audio's start thread: {e}"))?
-            .join()
-            .map_err(|_| "the audio's start thread panicked".to_string())?
-    }
-
-    fn build(source: &str, sink: Option<&str>, delay_ms: u32, buffer_ms: u32) -> Result<Self, String> {
         let delay_ms = check_delay(delay_ms)?;
         let host = cpal::host_from_id(HOST).map_err(|e| format!("{HOST} host: {e}"))?;
         let by_name = |want: &str| -> Result<Option<cpal::Device>, String> {
