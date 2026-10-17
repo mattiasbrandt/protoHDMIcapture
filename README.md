@@ -46,8 +46,9 @@ file); to install it, see [packaging/INSTALL.md](packaging/INSTALL.md).
 ### The Rust viewer
 
 Its own capture, renderer and audio loopback in one process, on Linux; it
-also builds for Windows (Media Foundation, WASAPI, DX12), where it has not
-run yet (#18). `protohdmicapture --help` lists its flags:
+also builds for Windows (Media Foundation, WASAPI, DX12), where it has run
+on one laptop with the MS2130 (#19). `protohdmicapture --help` lists its
+flags:
 
 - `--setup` runs its setup wizard in the viewer window; `--settings`,
   `--dashboard` and `--debug` do what view.sh's do.
