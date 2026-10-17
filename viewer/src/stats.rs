@@ -127,8 +127,12 @@ impl Stats {
         self.not_acquired += 1;
     }
 
+    /// A frame the compositor never showed: the window is hidden (Hyprland
+    /// discards every frame of one in the scratchpad), so the refreshes
+    /// until the next present showed no frame of ours to repeat.
     pub fn discarded(&mut self) {
         self.discarded += 1;
+        self.last_present = None;
     }
 
     pub fn presented(&mut self, tag: Tag, at: Duration, refresh: Duration, flags: u32) {
@@ -208,5 +212,38 @@ impl Stats {
         // wp_presentation_feedback.kind: 1 vsync, 2 hw_clock, 4 hw_completion, 8 zero_copy.
         let flags: Vec<String> = self.flags.iter().map(|(f, n)| format!("{f:#x}x{n}")).collect();
         eprintln!("summary: presentation flags {}", flags.join(" "));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dashboard::Live;
+
+    const REFRESH: Duration = Duration::from_micros(16_681);
+
+    fn present(s: &mut Stats, at: Duration) {
+        let tag = Tag { captured: at - Duration::from_millis(30), dequeued: at - Duration::from_millis(20), repaint: false };
+        s.presented(tag, at, REFRESH, 0x7);
+    }
+
+    #[test]
+    fn a_late_present_counts_the_refreshes_between() {
+        let mut s = Stats::new(Duration::ZERO, false, Arc::new(Live::new()));
+        present(&mut s, Duration::from_secs(1));
+        present(&mut s, Duration::from_secs(1) + REFRESH * 3);
+        assert_eq!(s.skipped_refreshes, 2);
+    }
+
+    #[test]
+    fn refreshes_while_the_compositor_discards_are_not_repeats() {
+        // Hidden (Hyprland's scratchpad): every frame is discarded, then the
+        // window is back 7 s later.
+        let mut s = Stats::new(Duration::ZERO, false, Arc::new(Live::new()));
+        present(&mut s, Duration::from_secs(1));
+        s.discarded();
+        present(&mut s, Duration::from_secs(8));
+        present(&mut s, Duration::from_secs(8) + REFRESH);
+        assert_eq!(s.skipped_refreshes, 0);
     }
 }
