@@ -1045,10 +1045,11 @@ fn enable_vt() {
     use windows::Win32::System::Console::{ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_OUTPUT_HANDLE, SetConsoleMode};
     // Safety: this process's own console handle, read then set.
     unsafe {
-        let Ok(out) = GetStdHandle(STD_OUTPUT_HANDLE) else { return };
         let mut mode = Default::default();
-        if GetConsoleMode(out, &mut mode).is_ok() {
-            let _ = SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        let set = GetStdHandle(STD_OUTPUT_HANDLE)
+            .and_then(|out| GetConsoleMode(out, &mut mode).and_then(|()| SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING)));
+        if let Err(e) = set {
+            eprintln!("warning: the console shows the dashboard's colours as text: {e}");
         }
     }
 }

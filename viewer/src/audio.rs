@@ -382,6 +382,9 @@ fn our_session() -> Result<windows::Win32::Media::Audio::ISimpleAudioVolume, Str
 
     let pid = std::process::id();
     let mut found = Vec::new();
+    // An output or session that cannot be read is passed over, as ours may
+    // be on another; said if ours is then not found.
+    let mut passed = Vec::new();
     // Safety: COM calls on the caller's MTA (`output_level`); every object
     // is dropped before it returns.
     unsafe {
@@ -389,12 +392,27 @@ fn our_session() -> Result<windows::Win32::Media::Audio::ISimpleAudioVolume, Str
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(|e| format!("audio endpoints: {e}"))?;
         let all = endpoints.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE).map_err(|e| format!("audio outputs: {e}"))?;
         for i in 0..all.GetCount().map_err(|e| format!("audio outputs: {e}"))? {
-            let Ok(device) = all.Item(i) else { continue };
-            let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else { continue };
-            let Ok(sessions) = manager.GetSessionEnumerator() else { continue };
-            for j in 0..sessions.GetCount().unwrap_or(0) {
-                let Ok(control) = sessions.GetSession(j) else { continue };
-                let Ok(control2) = control.cast::<IAudioSessionControl2>() else { continue };
+            let sessions = all
+                .Item(i)
+                .and_then(|device| device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None))
+                .and_then(|manager| manager.GetSessionEnumerator())
+                .and_then(|sessions| sessions.GetCount().map(|n| (sessions, n)));
+            let (sessions, count) = match sessions {
+                Ok(s) => s,
+                Err(e) => {
+                    passed.push(format!("output {i}: {e}"));
+                    continue;
+                }
+            };
+            for j in 0..count {
+                let control2 = sessions.GetSession(j).and_then(|c| c.cast::<IAudioSessionControl2>().map(|c2| (c, c2)));
+                let (control, control2) = match control2 {
+                    Ok(c) => c,
+                    Err(e) => {
+                        passed.push(format!("output {i} session {j}: {e}"));
+                        continue;
+                    }
+                };
                 if control2.GetProcessId().ok() != Some(pid) {
                     continue;
                 }
@@ -413,7 +431,8 @@ fn our_session() -> Result<windows::Win32::Media::Audio::ISimpleAudioVolume, Str
     let mut found = found.into_iter();
     match (found.next(), found.next()) {
         (Some((_, one)), None) => Ok(one),
-        (None, _) => Err("this viewer has no audio output stream".into()),
+        (None, _) if passed.is_empty() => Err("this viewer has no audio output stream".into()),
+        (None, _) => Err(format!("this viewer's audio output stream was not found; passed over: {}", passed.join("; "))),
         (Some(_), Some(_)) => Err("this viewer has more than one audio output stream".into()),
     }
 }

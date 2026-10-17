@@ -2006,7 +2006,13 @@ impl System for Windows {
     /// the card's container (main.rs `card_audio_input`).
     fn audio_inputs(&self, node: &Node) -> Result<AudioInputs, String> {
         let inputs = crate::audio::inputs()?;
-        let container = crate::capture::mf::container(&node.path).ok().map(|g| g.to_u128());
+        let container = match crate::capture::mf::container(&node.path) {
+            Ok(g) => Some(g.to_u128()),
+            Err(e) => {
+                eprintln!("warning: the card's audio input: {e}");
+                None
+            }
+        };
         let mut in_card = inputs.iter().filter(|i| container.is_some() && i.container == container);
         let card = match (in_card.next(), in_card.next()) {
             (Some(one), None) => Some(one.name.clone()),

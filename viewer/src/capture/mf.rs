@@ -33,7 +33,7 @@ use windows::Win32::Media::MediaFoundation::{
 };
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     CM_Get_DevNode_PropertyW, CM_Get_Device_Interface_PropertyW, CM_Get_Parent, CM_LOCATE_DEVNODE_NORMAL, CM_Locate_DevNodeW,
-    CR_BUFFER_SMALL, CR_SUCCESS,
+    CR_BUFFER_SMALL, CR_NO_SUCH_VALUE, CR_SUCCESS,
 };
 use windows::Win32::Devices::Properties::{
     DEVPKEY_Device_ContainerId, DEVPKEY_Device_InstanceId, DEVPKEY_Device_LocationPaths, DEVPROP_TYPE_GUID, DEVPROP_TYPE_STRING,
@@ -196,53 +196,79 @@ fn devnode(link: &HSTRING) -> Result<u32, String> {
 
 /// A string or string-list property of `devnode` (a list: its first
 /// entry); None when it has none.
-fn devnode_string(devnode: u32, key: &DEVPROPKEY) -> Option<String> {
+fn devnode_string(devnode: u32, key: &DEVPROPKEY) -> Result<Option<String>, String> {
     let (mut kind, mut size) = (DEVPROPTYPE::default(), 0u32);
     // Safety: no buffer; asks only for the size.
     let r = unsafe { CM_Get_DevNode_PropertyW(devnode, key, &mut kind, None, &mut size, 0) };
+    if r == CR_NO_SUCH_VALUE {
+        return Ok(None);
+    }
     if r != CR_BUFFER_SMALL {
-        return None;
+        return Err(format!("a device property: CONFIGRET {}", r.0));
     }
     let mut buf = vec![0u16; size.div_ceil(2) as usize];
     // Safety: `buf` holds `size` bytes.
     let r = unsafe { CM_Get_DevNode_PropertyW(devnode, key, &mut kind, Some(buf.as_mut_ptr().cast()), &mut size, 0) };
-    if r != CR_SUCCESS || (kind != DEVPROP_TYPE_STRING && kind != DEVPROP_TYPE_STRING_LIST) {
-        return None;
+    if r != CR_SUCCESS {
+        return Err(format!("a device property: CONFIGRET {}", r.0));
+    }
+    if kind != DEVPROP_TYPE_STRING && kind != DEVPROP_TYPE_STRING_LIST {
+        return Err(format!("a device property: type {} where a string was expected", kind.0));
     }
     let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    Some(String::from_utf16_lossy(&buf[..end]))
+    Ok(Some(String::from_utf16_lossy(&buf[..end])))
 }
 
 /// The card's USB serial and port, as the pins compare them: the USB
 /// device's (the interface's parent, for a composite device such as the
 /// card's video and audio) instance id ends in its serial when it has one
 /// (Windows' own ids for one without hold a '&'), and its first location
-/// path names the port, stable across replugs into it. Empty when unknown.
+/// path names the port, stable across replugs into it. Empty when unknown,
+/// and said when reading them failed: the pins then cannot match.
 fn serial_and_port(link: &str) -> (String, String) {
-    let Some((usb, instance)) = usb_device(link) else { return Default::default() };
-    (usb_serial(&instance), devnode_string(usb, &DEVPKEY_Device_LocationPaths).unwrap_or_default())
+    match usb_device(link) {
+        Ok((usb, instance)) => (usb_serial(&instance), port(usb, link)),
+        Err(e) => {
+            eprintln!("warning: {link}: the USB serial and port: {e}");
+            Default::default()
+        }
+    }
+}
+
+/// The USB device's first location path; empty when it has none, or (said)
+/// when it cannot be read.
+fn port(usb: u32, link: &str) -> String {
+    devnode_string(usb, &DEVPKEY_Device_LocationPaths)
+        .unwrap_or_else(|e| {
+            eprintln!("warning: {link}: the USB port: {e}");
+            None
+        })
+        .unwrap_or_default()
 }
 
 /// The USB device behind the capture interface `link` (its parent, for a
 /// composite device), and its instance id.
-fn usb_device(link: &str) -> Option<(u32, String)> {
-    let function = devnode(&HSTRING::from(link)).ok()?;
+fn usb_device(link: &str) -> Result<(u32, String), String> {
+    let instance = |node| devnode_string(node, &DEVPKEY_Device_InstanceId)?.ok_or_else(|| "a device without an instance id".to_string());
+    let function = devnode(&HSTRING::from(link))?;
     let mut usb = function;
-    if devnode_string(function, &DEVPKEY_Device_InstanceId)?.contains("&MI_") {
+    if instance(function)?.contains("&MI_") {
         // Safety: an out-pointer and a live devnode.
-        if unsafe { CM_Get_Parent(&mut usb, function, 0) } != CR_SUCCESS {
-            return None;
+        let r = unsafe { CM_Get_Parent(&mut usb, function, 0) };
+        if r != CR_SUCCESS {
+            return Err(format!("the composite device's parent: CONFIGRET {}", r.0));
         }
     }
-    Some((usb, devnode_string(usb, &DEVPKEY_Device_InstanceId)?))
+    Ok((usb, instance(usb)?))
 }
 
 /// The card's USB id ("1e4e:7016", as lsusb and capture-cards/ spell it)
 /// and port (its location path), as the setup wizard shows them; None when
-/// it is not on USB.
+/// it is not on USB, or (said) when the device tree cannot be read.
 pub fn usb(node: &Path) -> Option<(String, String)> {
-    let (usb, instance) = usb_device(&link(node).ok()?)?;
-    Some((usb_id(&instance)?, devnode_string(usb, &DEVPKEY_Device_LocationPaths).unwrap_or_default()))
+    let found = link(node).and_then(|link| usb_device(&link).map(|d| (link, d)));
+    let (link, (usb, instance)) = found.map_err(|e| eprintln!("warning: the card's USB device: {e}")).ok()?;
+    Some((usb_id(&instance)?, port(usb, &link)))
 }
 
 /// "vid:pid" from a USB instance id (`USB\VID_1E4E&PID_7016\...`).
