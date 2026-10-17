@@ -32,12 +32,14 @@ use windows::Win32::Media::MediaFoundation::{
     MFVideoFormat_MJPG, MFVideoFormat_YUY2,
 };
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
-    CM_Get_DevNode_PropertyW, CM_Get_Device_Interface_PropertyW, CM_LOCATE_DEVNODE_NORMAL, CM_Locate_DevNodeW, CR_BUFFER_SMALL,
-    CR_SUCCESS,
+    CM_Get_DevNode_PropertyW, CM_Get_Device_Interface_PropertyW, CM_Get_Parent, CM_LOCATE_DEVNODE_NORMAL, CM_Locate_DevNodeW,
+    CR_BUFFER_SMALL, CR_SUCCESS,
 };
 use windows::Win32::Devices::Properties::{
-    DEVPKEY_Device_ContainerId, DEVPKEY_Device_InstanceId, DEVPROP_TYPE_GUID, DEVPROP_TYPE_STRING, DEVPROPTYPE,
+    DEVPKEY_Device_ContainerId, DEVPKEY_Device_InstanceId, DEVPKEY_Device_LocationPaths, DEVPROP_TYPE_GUID, DEVPROP_TYPE_STRING,
+    DEVPROP_TYPE_STRING_LIST, DEVPROPTYPE,
 };
+use windows::Win32::Foundation::DEVPROPKEY;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
 use windows::core::{GUID, HRESULT, HSTRING, PCWSTR, PWSTR, Ref, implement};
 
@@ -102,8 +104,8 @@ fn string(a: &IMFAttributes, key: &GUID) -> Result<String, String> {
 }
 
 /// Every video capture device, in Media Foundation's order: its symbolic
-/// link as the path, its friendly name as the card type. Serial and port
-/// stay empty (the link holds neither in a form view.sh's pins use).
+/// link as the path, its friendly name as the card type, its USB serial
+/// and port from the device tree (`serial_and_port`).
 pub fn list() -> Vec<Node> {
     match on_mta_thread(enumerate) {
         Ok(nodes) => nodes,
@@ -128,7 +130,10 @@ fn enumerate() -> Result<Vec<Node>, String> {
         for entry in entries.iter_mut() {
             let Some(device) = entry.take() else { continue };
             match (string(&device, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME), string(&device, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK)) {
-                (Ok(name), Ok(link)) => nodes.push(Node { path: link.into(), serial: String::new(), port: String::new(), card_type: name }),
+                (Ok(name), Ok(link)) => {
+                    let (serial, port) = serial_and_port(&link);
+                    nodes.push(Node { path: link.into(), serial, port, card_type: name })
+                }
                 (Err(e), _) | (_, Err(e)) => eprintln!("warning: a capture device without its name or link: {e}"),
             }
         }
@@ -164,14 +169,7 @@ fn link(node: &Path) -> Result<String, String> {
 /// friendly name as DEV may hold): one per physical device, shared by its
 /// functions, so the card's audio endpoint carries the same (#18).
 pub fn container(node: &Path) -> Result<GUID, String> {
-    let link = HSTRING::from(link(node)?);
-    let instance = interface_instance(&link)?;
-    let mut devnode = 0u32;
-    // Safety: an out-pointer and a NUL-terminated instance id.
-    let r = unsafe { CM_Locate_DevNodeW(&mut devnode, PCWSTR(instance.as_ptr()), CM_LOCATE_DEVNODE_NORMAL) };
-    if r != CR_SUCCESS {
-        return Err(format!("the capture device's node: CONFIGRET {}", r.0));
-    }
+    let devnode = devnode(&HSTRING::from(link(node)?))?;
     let (mut kind, mut guid) = (DEVPROPTYPE::default(), GUID::zeroed());
     let mut size = size_of::<GUID>() as u32;
     // Safety: the buffer is a GUID, and `size` says so.
@@ -182,6 +180,67 @@ pub fn container(node: &Path) -> Result<GUID, String> {
         return Err(format!("the capture device's container id: CONFIGRET {}", r.0));
     }
     Ok(guid)
+}
+
+/// The device node behind the interface `link`.
+fn devnode(link: &HSTRING) -> Result<u32, String> {
+    let instance = interface_instance(link)?;
+    let mut devnode = 0u32;
+    // Safety: an out-pointer and a NUL-terminated instance id.
+    let r = unsafe { CM_Locate_DevNodeW(&mut devnode, PCWSTR(instance.as_ptr()), CM_LOCATE_DEVNODE_NORMAL) };
+    if r != CR_SUCCESS {
+        return Err(format!("the capture device's node: CONFIGRET {}", r.0));
+    }
+    Ok(devnode)
+}
+
+/// A string or string-list property of `devnode` (a list: its first
+/// entry); None when it has none.
+fn devnode_string(devnode: u32, key: &DEVPROPKEY) -> Option<String> {
+    let (mut kind, mut size) = (DEVPROPTYPE::default(), 0u32);
+    // Safety: no buffer; asks only for the size.
+    let r = unsafe { CM_Get_DevNode_PropertyW(devnode, key, &mut kind, None, &mut size, 0) };
+    if r != CR_BUFFER_SMALL {
+        return None;
+    }
+    let mut buf = vec![0u16; size.div_ceil(2) as usize];
+    // Safety: `buf` holds `size` bytes.
+    let r = unsafe { CM_Get_DevNode_PropertyW(devnode, key, &mut kind, Some(buf.as_mut_ptr().cast()), &mut size, 0) };
+    if r != CR_SUCCESS || (kind != DEVPROP_TYPE_STRING && kind != DEVPROP_TYPE_STRING_LIST) {
+        return None;
+    }
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..end]))
+}
+
+/// The card's USB serial and port, as the pins compare them: the USB
+/// device's (the interface's parent, for a composite device such as the
+/// card's video and audio) instance id ends in its serial when it has one
+/// (Windows' own ids for one without hold a '&'), and its first location
+/// path names the port, stable across replugs into it. Empty when unknown.
+fn serial_and_port(link: &str) -> (String, String) {
+    let Ok(function) = devnode(&HSTRING::from(link)) else { return Default::default() };
+    let instance = devnode_string(function, &DEVPKEY_Device_InstanceId).unwrap_or_default();
+    let usb = if instance.contains("&MI_") {
+        let mut parent = 0u32;
+        // Safety: an out-pointer and a live devnode.
+        if unsafe { CM_Get_Parent(&mut parent, function, 0) } != CR_SUCCESS {
+            return Default::default();
+        }
+        parent
+    } else {
+        function
+    };
+    let id = devnode_string(usb, &DEVPKEY_Device_InstanceId).unwrap_or_default();
+    (usb_serial(&id), devnode_string(usb, &DEVPKEY_Device_LocationPaths).unwrap_or_default())
+}
+
+/// The serial at the end of a USB device instance id, if it is one.
+fn usb_serial(instance: &str) -> String {
+    match instance.rsplit_once('\\') {
+        Some((head, last)) if head.starts_with("USB\\") && !last.contains('&') => last.to_string(),
+        _ => String::new(),
+    }
 }
 
 /// The device instance id of the interface `link`, NUL-terminated.
@@ -446,5 +505,19 @@ impl Drop for Running<'_> {
         if let Err(e) = unsafe { self.reader.Flush(STREAM) } {
             eprintln!("warning: flushing the source reader: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::usb_serial;
+
+    #[test]
+    fn the_serial_ends_a_usb_instance_id() {
+        // The MS2130 on an Intel laptop (#19), and a webcam without a serial.
+        assert_eq!(usb_serial(r"USB\VID_1E4E&PID_7016\20000130041415"), "20000130041415");
+        assert_eq!(usb_serial(r"USB\VID_5986&PID_2115\6&35187073&0&7"), "");
+        assert_eq!(usb_serial(r"USB\VID_1E4E&PID_7016&MI_00\6&18CD860D&0&0000"), "");
+        assert_eq!(usb_serial(r"SWD\MMDEVAPI\{0.0.1.00000000}"), "");
     }
 }
