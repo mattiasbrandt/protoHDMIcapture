@@ -35,7 +35,7 @@ use crate::picture::{self, Colour, Picture};
 use crate::present::Presentation;
 use crate::present::{self, Feedback, Tag};
 use crate::run::{End, Host, Outcome, Plan, Quit, Slot, Wake, Waker};
-use crate::scale::{self, Filter, Scaling};
+use crate::scale::{self, Axis, Filter, Scaling};
 use crate::screenshot::Screenshot;
 use crate::settings::{Row, Settings};
 use crate::sources;
@@ -257,9 +257,19 @@ struct Gfx {
     screenshot: Screenshot,
     scale_pipeline: wgpu::RenderPipeline,
     scale_bind_group: wgpu::BindGroup,
+    /// A filter's pass into the viewport: the polar one from the frame,
+    /// an orthogonal one's second pass from the intermediate texture.
     filter_pipeline: wgpu::RenderPipeline,
+    /// An orthogonal filter's first pass, into the intermediate texture.
+    filter_x_pipeline: wgpu::RenderPipeline,
+    filter_layout: wgpu::BindGroupLayout,
+    /// The frame and `filter_buffer`: the polar pass, or the first pass.
     filter_bind_group: wgpu::BindGroup,
     filter_buffer: wgpu::Buffer,
+    filter_y_buffer: wgpu::Buffer,
+    /// An orthogonal filter's intermediate texture and its second pass's
+    /// bind group, made for the viewport's width in `relayout`.
+    filter_y: Option<(wgpu::TextureView, wgpu::BindGroup)>,
     /// The scaler in use: None is the bilinear sampler.
     filter: Option<Filter>,
     /// Where the frame lands on the surface: x, y, width, height.
@@ -384,6 +394,11 @@ fn letterbox(surface: (u32, u32), frame: (u32, u32)) -> [u32; 4] {
     let (vw, vh) = ((w * scale).round().clamp(1.0, sw), (h * scale).round().clamp(1.0, sh));
     [((sw - vw) / 2.0).round() as u32, ((sh - vh) / 2.0).round() as u32, vw as u32, vh as u32]
 }
+
+/// The graphics backends offered to wgpu. DX12 on Windows: with Vulkan
+/// also offered, wgpu took Intel's Vulkan driver on a UHD 620, which
+/// crashed the viewer at its first frame (#19).
+pub(crate) const BACKENDS: wgpu::Backends = if cfg!(windows) { wgpu::Backends::DX12 } else { wgpu::Backends::PRIMARY };
 
 pub(crate) fn pipeline(
     device: &wgpu::Device,
@@ -642,9 +657,7 @@ impl App {
         let feedback = feedback(&window)?;
 
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-        // DX12 on Windows: with Vulkan also offered, wgpu took Intel's Vulkan
-        // driver on a UHD 620, which crashed the viewer at its first frame.
-        desc.backends = if cfg!(windows) { wgpu::Backends::DX12 } else { wgpu::Backends::PRIMARY };
+        desc.backends = BACKENDS;
         let instance = wgpu::Instance::new(desc);
         let surface = instance.create_surface(window.clone()).map_err(|e| format!("surface: {e}"))?;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -792,12 +805,15 @@ impl App {
                 uniform_entry(1),
             ],
         });
-        let filter_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("filter"),
-            size: scale::UNIFORM_SIZE,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let uniform = |label| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: scale::UNIFORM_SIZE,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let (filter_buffer, filter_y_buffer) = (uniform("filter"), uniform("filter y"));
         let filter_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("filter"),
             layout: &filter_layout,
@@ -807,6 +823,7 @@ impl App {
             ],
         });
         let filter_pipeline = pipeline(&device, "filter", scale::WGSL, &filter_layout, config.format);
+        let filter_x_pipeline = pipeline(&device, "filter x", scale::WGSL, &filter_layout, scale::INTERMEDIATE);
 
         let screenshot = Screenshot::new(&device, w, h);
         let osd = Osd::new(&device, config.format);
@@ -825,8 +842,12 @@ impl App {
             scale_pipeline,
             scale_bind_group,
             filter_pipeline,
+            filter_x_pipeline,
+            filter_layout,
             filter_bind_group,
             filter_buffer,
+            filter_y_buffer,
+            filter_y: None,
             filter: None,
             viewport: [0, 0, 1, 1],
             timer,
@@ -847,8 +868,35 @@ impl App {
         gfx.viewport = letterbox((gfx.config.width, gfx.config.height), frame);
         let [_, _, vw, vh] = gfx.viewport;
         gfx.filter = scale::filter(self.scaling, frame, (vw, vh));
+        gfx.filter_y = None;
         if let Some(f) = &gfx.filter {
-            gfx.queue.write_buffer(&gfx.filter_buffer, 0, &f.bytes(frame));
+            gfx.queue.write_buffer(&gfx.filter_buffer, 0, &f.bytes(frame, Axis::X));
+            if !f.polar {
+                let between = (vw, frame.1);
+                let view = gfx
+                    .device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: Some("filter x"),
+                        size: wgpu::Extent3d { width: between.0, height: between.1, depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: scale::INTERMEDIATE,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    })
+                    .create_view(&Default::default());
+                gfx.queue.write_buffer(&gfx.filter_y_buffer, 0, &f.bytes(between, Axis::Y));
+                let bind = gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("filter y"),
+                    layout: &gfx.filter_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                        wgpu::BindGroupEntry { binding: 1, resource: gfx.filter_y_buffer.as_entire_binding() },
+                    ],
+                });
+                gfx.filter_y = Some((view, bind));
+            }
         }
         if self.opts.stats {
             eprintln!(
@@ -1406,18 +1454,42 @@ impl App {
         }
         gfx.screenshot.copy(&mut encoder, &gfx.rgb);
         {
+            // An orthogonal filter: its first pass, across the rows.
+            let timestamps = match (&gfx.timer, &gfx.filter_y) {
+                (Some(t), Some(_)) => t.writes_split(1),
+                (Some(t), None) => [None, t.writes(1)],
+                (None, _) => [None, None],
+            };
+            let [first, last] = timestamps;
+            if let Some((between, _)) = &gfx.filter_y {
+                let attachments = target(between);
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("filter x"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: first,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&gfx.filter_x_pipeline);
+                pass.set_bind_group(0, &gfx.filter_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
             let attachments = target(&view);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("scale"),
                 color_attachments: &attachments,
                 depth_stencil_attachment: None,
-                timestamp_writes: gfx.timer.as_ref().and_then(|t| t.writes(1)),
+                timestamp_writes: last,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
             let [x, y, vw, vh] = gfx.viewport.map(|v| v as f32);
             pass.set_viewport(x, y, vw, vh, 0.0, 1.0);
-            if gfx.filter.is_some() {
+            if let Some((_, bind)) = &gfx.filter_y {
+                pass.set_pipeline(&gfx.filter_pipeline);
+                pass.set_bind_group(0, bind, &[]);
+            } else if gfx.filter.is_some() {
                 pass.set_pipeline(&gfx.filter_pipeline);
                 pass.set_bind_group(0, &gfx.filter_bind_group, &[]);
             } else {

@@ -8,7 +8,12 @@
 //!
 //! Each filter is sampled as `pl_filter_sample` does (kernel, blur, window)
 //! into a 256-entry table the shader interpolates linearly, as libplacebo's
-//! LUTs are. Downscaling widens the kernel by the ratio (mpv's
+//! LUTs are. An orthogonal filter (spline36, mitchell) runs as two passes,
+//! as mpv's separated scaling does: across the rows into an intermediate
+//! texture at the viewport's width and the frame's height, then down the
+//! columns into the viewport. One 2-D pass reads (2n)² texels a pixel, two
+//! read 4n: a mitchell downscale to a 720p window was 31 ms a frame on an
+//! Intel UHD 620 in one pass (#19). The polar filter stays one pass. Downscaling widens the kernel by the ratio (mpv's
 //! correct-downscaling, on by default), and a ratio of 1 runs no filter
 //! (libplacebo's no-op, within 1e-6), so a 1:1 feed is the frame itself.
 //! Widening is bounded: a filter needing more than `MAX_TAPS` texels a side
@@ -269,9 +274,19 @@ pub fn filter(scaling: Scaling, src: (u32, u32), dst: (u32, u32)) -> Option<Filt
     }
 }
 
+/// Which way a pass of an orthogonal filter runs (ignored for a polar one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    /// Across the rows: the frame into the intermediate texture.
+    X = 0,
+    /// Down the columns: the intermediate texture into the viewport.
+    Y = 1,
+}
+
 impl Filter {
-    /// The uniform `Scale` in `WGSL`.
-    pub fn bytes(&self, src: (u32, u32)) -> Vec<u8> {
+    /// The uniform `Scale` in `WGSL` for a pass reading a `src`-sized
+    /// texture: the frame, or for `Axis::Y` the intermediate texture.
+    pub fn bytes(&self, src: (u32, u32), axis: Axis) -> Vec<u8> {
         let mut b = Vec::with_capacity(32 + LUT_SIZE * 4);
         for v in [src.0 as f32, src.1 as f32, self.radius[0], self.radius[1]] {
             b.extend(v.to_ne_bytes());
@@ -280,7 +295,7 @@ impl Filter {
             b.extend(v.to_ne_bytes());
         }
         b.extend(u32::from(self.polar).to_ne_bytes());
-        b.extend(0u32.to_ne_bytes());
+        b.extend((axis as u32).to_ne_bytes());
         for v in self.lut {
             b.extend(v.to_ne_bytes());
         }
@@ -291,15 +306,23 @@ impl Filter {
 /// Bytes in `Filter::bytes`.
 pub const UNIFORM_SIZE: u64 = (32 + LUT_SIZE * 4) as u64;
 
+/// The intermediate texture between an orthogonal filter's passes: float,
+/// so the first pass's overshoot (negative lobes) and precision carry
+/// into the second as they would within one pass.
+pub const INTERMEDIATE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
 /// The filter pass: libplacebo's sampling, with texel fetches clamped to
-/// the edge and the weights normalised by their sum.
+/// the edge and the weights normalised by their sum. A pass of an
+/// orthogonal filter reads along its axis only; the other axis is the
+/// output's own row or column (taken from the pixel, not the scaled
+/// position, so float error never moves it).
 pub const WGSL: &str = r#"
 struct Scale {
     size: vec2f,
     radius: vec2f,
     taps: vec2i,
     polar: u32,
-    pad: u32,
+    axis: u32,
     lut: array<vec4f, 64>,
 };
 
@@ -337,14 +360,19 @@ fn lut(u: f32) -> f32 {
                 }
             }
         }
+    } else if (sc.axis == 0u) {
+        let row = clamp(i32(floor(in.uv.y * sc.size.y)), 0, edge.y);
+        for (var x = 1 - sc.taps.x; x <= sc.taps.x; x++) {
+            let w = lut(abs(f32(x) - f.x) / sc.radius.x);
+            wsum += w;
+            color += w * textureLoad(rgb, vec2i(clamp(b.x + x, 0, edge.x), row), 0).rgb;
+        }
     } else {
+        let col = clamp(i32(floor(in.uv.x * sc.size.x)), 0, edge.x);
         for (var y = 1 - sc.taps.y; y <= sc.taps.y; y++) {
-            let wy = lut(abs(f32(y) - f.y) / sc.radius.y);
-            for (var x = 1 - sc.taps.x; x <= sc.taps.x; x++) {
-                let w = wy * lut(abs(f32(x) - f.x) / sc.radius.x);
-                wsum += w;
-                color += w * textureLoad(rgb, clamp(b + vec2i(x, y), vec2i(0), edge), 0).rgb;
-            }
+            let w = lut(abs(f32(y) - f.y) / sc.radius.y);
+            wsum += w;
+            color += w * textureLoad(rgb, vec2i(col, clamp(b.y + y, 0, edge.y)), 0).rgb;
         }
     }
     return vec4f(color / wsum, 1.0);
@@ -468,11 +496,14 @@ mod tests {
     #[test]
     fn uniform_layout() {
         let f = filter(Scaling::HighQuality, (1920, 1080), (2560, 1440)).unwrap();
-        let b = f.bytes((1920, 1080));
+        let b = f.bytes((1920, 1080), Axis::X);
         assert_eq!(b.len() as u64, UNIFORM_SIZE);
         assert_eq!(f32::from_ne_bytes(b[0..4].try_into().unwrap()), 1920.0);
         assert_eq!(u32::from_ne_bytes(b[24..28].try_into().unwrap()), 1);
+        assert_eq!(u32::from_ne_bytes(b[28..32].try_into().unwrap()), 0);
         assert_eq!(f32::from_ne_bytes(b[32..36].try_into().unwrap()), f.lut[0]);
+        let b = f.bytes((1280, 1080), Axis::Y);
+        assert_eq!(u32::from_ne_bytes(b[28..32].try_into().unwrap()), 1);
     }
 
     /// The filter shader on the GPU, against the filters sampled exactly
@@ -481,9 +512,9 @@ mod tests {
     #[test]
     #[ignore = "needs a GPU"]
     fn gpu_filters_match_the_filters_and_are_timed() {
-        use crate::app::{pipeline, texture_entry, uniform_entry};
+        use crate::app::{BACKENDS, pipeline, texture_entry, uniform_entry};
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-        desc.backends = wgpu::Backends::PRIMARY;
+        desc.backends = BACKENDS;
         let instance = wgpu::Instance::new(desc);
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -538,6 +569,7 @@ mod tests {
             entries: &[texture_entry(0, false), uniform_entry(1)],
         });
         let pipe = pipeline(&device, "filter", WGSL, &layout, wgpu::TextureFormat::Rgba8Unorm);
+        let pipe_x = pipeline(&device, "filter x", WGSL, &layout, INTERMEDIATE);
         let read = |buffer: &wgpu::Buffer| -> Vec<u8> {
             buffer.map_async(wgpu::MapMode::Read, .., |r| r.unwrap());
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
@@ -554,23 +586,45 @@ mod tests {
             (Scaling::Balanced, (240, 135)),
         ] {
             let f = filter(scaling, (w, h), dst).unwrap();
-            let uniform = device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: UNIFORM_SIZE,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&uniform, 0, &f.bytes((w, h)));
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&rgb_view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: uniform.as_entire_binding() },
-                ],
-            });
+            // One pass for the polar filter; across, then down, for the others.
+            let bind = |view: &wgpu::TextureView, bytes: Vec<u8>| {
+                let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: None,
+                    size: UNIFORM_SIZE,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                queue.write_buffer(&uniform, 0, &bytes);
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                        wgpu::BindGroupEntry { binding: 1, resource: uniform.as_entire_binding() },
+                    ],
+                })
+            };
             let target = texture(dst, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
             let target_view = target.create_view(&Default::default());
+            let intermediate = device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d { width: dst.0, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: INTERMEDIATE,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let intermediate_view = intermediate.create_view(&Default::default());
+            let passes: Vec<(&wgpu::RenderPipeline, wgpu::BindGroup, &wgpu::TextureView)> = if f.polar {
+                vec![(&pipe, bind(&rgb_view, f.bytes((w, h), Axis::X)), &target_view)]
+            } else {
+                vec![
+                    (&pipe_x, bind(&rgb_view, f.bytes((w, h), Axis::X)), &intermediate_view),
+                    (&pipe, bind(&intermediate_view, f.bytes((dst.0, h), Axis::Y)), &target_view),
+                ]
+            };
             const RUNS: u32 = 120;
             let queries = (!required_features.is_empty()).then(|| {
                 device.create_query_set(&wgpu::QuerySetDescriptor { label: None, ty: wgpu::QueryType::Timestamp, count: RUNS * 2 })
@@ -597,26 +651,30 @@ mod tests {
             });
             let mut encoder = device.create_command_encoder(&Default::default());
             for run in 0..RUNS {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: None,
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &target_view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: queries.as_ref().map(|q| wgpu::RenderPassTimestampWrites {
-                        query_set: q,
-                        beginning_of_pass_write_index: Some(run * 2),
-                        end_of_pass_write_index: Some(run * 2 + 1),
-                    }),
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-                pass.set_pipeline(&pipe);
-                pass.set_bind_group(0, &bind, &[]);
-                pass.draw(0..3, 0..1);
+                let last = passes.len() - 1;
+                for (i, (pipe, bind, view)) in passes.iter().enumerate() {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: None,
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                        })],
+                        depth_stencil_attachment: None,
+                        // From the first pass's start to the last one's end.
+                        timestamp_writes: queries.as_ref().map(|q| wgpu::RenderPassTimestampWrites {
+                            query_set: q,
+                            beginning_of_pass_write_index: (i == 0).then_some(run * 2),
+                            end_of_pass_write_index: (i == last).then_some(run * 2 + 1),
+                        }),
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(pipe);
+                    pass.set_bind_group(0, bind, &[]);
+                    pass.draw(0..3, 0..1);
+                }
             }
             if let Some(q) = &queries {
                 encoder.resolve_query_set(q, 0..RUNS * 2, &resolve, 0);

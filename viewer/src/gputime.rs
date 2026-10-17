@@ -64,6 +64,19 @@ impl GpuTimer {
         })
     }
 
+    /// Pass `i` timed over two render passes: the start on the first,
+    /// the end on the second (a filter's two passes, scale.rs).
+    pub fn writes_split(&self, i: u32) -> [Option<wgpu::RenderPassTimestampWrites<'_>>; 2] {
+        let one = |begin, end| {
+            self.armed.then_some(wgpu::RenderPassTimestampWrites {
+                query_set: &self.queries,
+                beginning_of_pass_write_index: begin,
+                end_of_pass_write_index: end,
+            })
+        };
+        [one(Some(i * 2), None), one(None, Some(i * 2 + 1))]
+    }
+
     /// After the passes, in the same encoder.
     pub fn resolve(&self, encoder: &mut wgpu::CommandEncoder) {
         if self.armed {
