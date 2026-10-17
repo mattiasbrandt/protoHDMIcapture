@@ -297,8 +297,10 @@ fn reader(link: &str, want: Format, callback: Option<&IMFSourceReaderCallback>) 
     for NativeType { t, subtype: sub, width: w, height: h, fps } in native_types(&reader, link)? {
         let name = Pixels::ALL.into_iter().map(subtype).find(|(g, _)| *g == sub).map_or("other", |(_, name)| name);
         offered.push(format!("{w}x{h} {name} {fps:.3}"));
-        // FPS may be fractional (59.94 = 60000/1001), as on V4L2.
-        if sub == want_sub && (w, h) == (want.width, want.height) && (fps - want.fps).abs() <= want.fps * 0.005 {
+        // FPS may be fractional (59.94 = 60000/1001), as on V4L2. Within
+        // 0.4 %: the lost frames counted from times hold to about there
+        // (policy.rs `LATE_LEAK`).
+        if sub == want_sub && (w, h) == (want.width, want.height) && (fps - want.fps).abs() <= want.fps * 0.004 {
             unsafe { reader.SetCurrentMediaType(STREAM, None, &t) }.map_err(at)?;
             let stride = match want.pixels {
                 Pixels::Yuyv => match unsafe { t.GetUINT32(&MF_MT_DEFAULT_STRIDE) } {

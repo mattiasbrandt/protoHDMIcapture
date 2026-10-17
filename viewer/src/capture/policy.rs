@@ -141,8 +141,21 @@ pub fn run(
 
 /// How much of the carried lateness leaks away each frame: about two
 /// seconds at 60 fps, so a card a little off FPS (the MS2130 runs at
-/// 60.08 Hz by the PC's clock) never adds up to a frame.
+/// 60.08 Hz by the PC's clock) never adds up to a frame. Only a little:
+/// from about 0.42 % off, the leak's steady lateness hides a lost frame on
+/// a fast card and makes them up on a slow one, and times that wander as
+/// the MS2130's do on a card 0.05 % slow make some up (simulated, #19's
+/// review). Hence `DRIFT_WARN`, and mf.rs's 0.4 % match.
 const LATE_LEAK: f64 = 1.0 / 120.0;
+
+/// A card's measured rate, lost frames counted in, this far off FPS (a
+/// fraction) is said once: its lost frames, counted from times, may be
+/// wrong. It sees a fast card only: on a slow one the made-up losses fill
+/// the rate back to FPS, as real ones would, so the two cannot be told
+/// apart by rate.
+const DRIFT_WARN: f64 = 0.003;
+/// Frames to measure the rate over before saying it: 10 s at 60 fps.
+const DRIFT_FRAMES: u64 = 600;
 
 /// Lost frames from sample times (100 ns units), where a source has times
 /// but no sequence numbers (Media Foundation). Each step's lateness against
@@ -152,7 +165,12 @@ const LATE_LEAK: f64 = 1.0 / 120.0;
 /// alone reads as a lost frame every 25.
 #[derive(Default)]
 struct TimeGaps {
+    first: Option<i64>,
     prev: Option<i64>,
+    /// Frames since the first, the lost ones counted in.
+    frames: u64,
+    /// The rate has been measured (`drift`).
+    measured: bool,
     /// How late this frame is, in 100 ns units, on the grid the earlier
     /// frames set (negative: early).
     late: f64,
@@ -162,11 +180,33 @@ impl TimeGaps {
     /// The frames lost before the sample at `now`.
     fn lost(&mut self, now: i64, fps: f64) -> u32 {
         let period = 1e7 / fps.max(1.0);
-        let Some(prev) = self.prev.replace(now) else { return 0 };
+        let Some(prev) = self.prev.replace(now) else {
+            self.first = Some(now);
+            return 0;
+        };
         self.late = self.late * (1.0 - LATE_LEAK) + ((now - prev) as f64 - period);
         let lost = (self.late / period).round().max(0.0);
         self.late -= lost * period;
+        self.frames += 1 + lost as u64;
         lost as u32
+    }
+
+    /// Once, after `DRIFT_FRAMES`: a warning when the card's rate by its
+    /// times is over `DRIFT_WARN` off FPS.
+    fn drift(&mut self, now: i64, fps: f64) -> Option<String> {
+        if self.measured || self.frames < DRIFT_FRAMES {
+            return None;
+        }
+        self.measured = true;
+        let elapsed = (now - self.first?) as f64 / 1e7;
+        let rate = self.frames as f64 / elapsed;
+        let off = rate / fps - 1.0;
+        (off.abs() > DRIFT_WARN).then(|| {
+            format!(
+                "warning: the card's frames come at {rate:.3} fps, {:+.2} % off FPS={fps}; the lost frames counted from their times may be wrong",
+                off * 100.0
+            )
+        })
     }
 }
 
@@ -260,6 +300,9 @@ impl Policy {
             // The first time too: it sets the grid.
             (_, Mark::Time(t)) => {
                 let lost = self.time_gaps.lost(t, self.format.fps);
+                if let Some(w) = self.time_gaps.drift(t, self.format.fps) {
+                    eprintln!("{w}");
+                }
                 let from = self.counted;
                 self.counted = self.counted.wrapping_add(lost);
                 (lost > 0).then(|| Event::Gap { from, to: from.wrapping_add(lost + 1), lost })
@@ -514,6 +557,25 @@ mod tests {
         assert_eq!(lost_in([0, p * 14 / 10, 2 * p]), [0, 0, 0], "a late frame back on the grid");
         assert_eq!(lost_in([0, 2 * p, 3 * p]), [0, 1, 0]);
         assert_eq!(lost_in([0, 5 * p, 6 * p]), [0, 4, 0]);
+    }
+
+    #[test]
+    fn a_card_far_off_fps_is_said_once() {
+        let at = |period: i64| {
+            let mut g = TimeGaps::default();
+            (0..2000i64).filter_map(|i| {
+                let now = i * period;
+                g.lost(now, 60.0);
+                g.drift(now, 60.0)
+            }).collect::<Vec<_>>()
+        };
+        assert!(at(166_667).is_empty(), "on time");
+        assert!(at(166_833).is_empty(), "59.94 Hz: 0.1 % off");
+        let fast = at(165_833);
+        assert_eq!(fast.len(), 1, "0.5 % fast, said once: {fast:?}");
+        assert!(fast[0].contains("60.302 fps, +0.50 % off FPS=60"), "{}", fast[0]);
+        // A slow card's made-up losses fill its rate back: not seen (`DRIFT_WARN`).
+        assert!(at(167_500).is_empty());
     }
 
     #[test]
