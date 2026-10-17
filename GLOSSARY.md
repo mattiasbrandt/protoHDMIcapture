@@ -64,7 +64,8 @@ because the source stopped (asleep, switched off). A card that keeps sending
 black frames is still delivering a picture. Frames that arrive but cannot be
 shown (MJPEG that does not decode, short or flagged buffers) are no picture
 either; the viewer says which. Shown after 5 s with no picture since the feed
-opened, or 2 s after the last one.
+opened, or 2 s after the last one. A card pulled out is no signal at once,
+the card unplugged, until the viewer finds it again (#40).
 _Avoid_: stall, frozen, signal loss
 
 **Overlay**:

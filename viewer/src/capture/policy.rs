@@ -13,6 +13,9 @@
 //! - **The capture gaps,** from sequence numbers or sample times; none
 //!   before the first picture (the card's start-up).
 //! - **Quit,** seen within `POLL_SLICE`: no wait is longer.
+//! - **The card pulled out** (#40), with a `Finder`: no signal, the card
+//!   unplugged, while it is looked for about once a second; found, the
+//!   feed goes on from the fresh source.
 
 use std::fmt;
 use std::io;
@@ -29,6 +32,13 @@ pub const NEVER_AFTER: Duration = Duration::from_secs(5);
 /// No picture this long after the last one: no signal, "stopped". Also how
 /// recent a dropped buffer must be to be the reason.
 pub const STOPPED_AFTER: Duration = Duration::from_secs(2);
+/// How often a card pulled out is looked for (#40).
+const FIND_EVERY: Duration = Duration::from_secs(1);
+
+/// Finds the card again once it is gone (#40), on the capture thread:
+/// `Ok(Some)` a fresh source at the same format, `Ok(None)` not plugged in
+/// yet, `Err` there but it cannot be opened (why).
+pub type Finder = Box<dyn FnMut() -> Result<Option<Box<dyn FrameSource>>, String> + Send>;
 
 /// A picture, valid only inside the callback.
 pub struct Frame<'a> {
@@ -46,6 +56,9 @@ pub enum Event<'a> {
     Signal(Signal),
     /// Buffers never reached us: `lost` of them between `from` and `to`.
     Gap { from: u32, to: u32, lost: u32 },
+    /// The card pulled out is found again and opened (#40); pictures
+    /// follow.
+    CardBack,
 }
 
 /// The signal state (GLOSSARY "No signal").
@@ -74,6 +87,8 @@ pub enum Reason {
     /// Buffers arrive that cannot be used (short, or flagged by the
     /// driver): what was wrong.
     Unusable(String),
+    /// The card is unplugged, waited for (#40): the source's error.
+    Unplugged(String),
 }
 
 impl Reason {
@@ -96,6 +111,7 @@ impl fmt::Display for Signal {
             Reason::Nothing => write!(f, "no signal ({since}): nothing arrives"),
             Reason::Undecodable(why) => write!(f, "no signal ({since}): MJPEG frames do not decode: {why}"),
             Reason::Unusable(why) => write!(f, "no signal ({since}): frames the viewer cannot use: {why}"),
+            Reason::Unplugged(why) => write!(f, "no signal ({since}): the card is unplugged ({why})"),
         }
     }
 }
@@ -110,6 +126,11 @@ pub struct Dropped {
 /// The time the policy keeps: `now_monotonic`, or a script in tests.
 pub trait Clock {
     fn now(&self) -> Duration;
+
+    /// Waits `d` with no source to wait on (a card pulled out, #40).
+    fn sleep(&self, d: Duration) {
+        std::thread::sleep(d);
+    }
 }
 
 /// `now_monotonic`, the clock the adapters stamp buffers on.
@@ -130,13 +151,66 @@ pub fn run(
     dropped: &Dropped,
     on_event: &mut dyn FnMut(Event<'_>),
 ) -> io::Result<()> {
+    Policy::new(source.format(), source.stride(), clock.now()).feed(source, clock, quit, dropped, on_event)
+}
+
+/// `run`, but a source that fails is the card pulled out (#40): no signal,
+/// the card unplugged, while `find` looks for it every `FIND_EVERY`; found,
+/// the feed goes on from the fresh source. It ends only at `quit`.
+pub fn run_finding(
+    mut source: Box<dyn FrameSource>,
+    find: &mut Finder,
+    clock: &dyn Clock,
+    quit: &AtomicBool,
+    dropped: &Dropped,
+    on_event: &mut dyn FnMut(Event<'_>),
+) -> io::Result<()> {
     let mut policy = Policy::new(source.format(), source.stride(), clock.now());
-    let mut stream = source.start()?;
-    while !quit.load(Ordering::Relaxed) {
-        stream.next(POLL_SLICE, &mut |raw| policy.buffer(raw, dropped, on_event))?;
-        policy.tick(clock.now(), on_event);
+    loop {
+        let gone = match policy.feed(&mut *source, clock, quit, dropped, on_event) {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        // The old source let go before the card is looked for: a card that
+        // is still there (a passing error) is opened again, not twice.
+        drop(source);
+        policy.unplugged(gone.to_string(), on_event);
+        match look_for(find, clock, quit) {
+            Some(found) => {
+                source = found;
+                policy.reopened(source.stride(), clock.now());
+                on_event(Event::CardBack);
+            }
+            None => return Ok(()),
+        }
     }
-    Ok(())
+}
+
+/// `find` every `FIND_EVERY` until it finds the card or `quit` is set
+/// (None). A card there that cannot be opened is said once for each new
+/// reason, and looked for on.
+fn look_for(find: &mut Finder, clock: &dyn Clock, quit: &AtomicBool) -> Option<Box<dyn FrameSource>> {
+    let mut said: Option<String> = None;
+    let mut next = clock.now();
+    while !quit.load(Ordering::Relaxed) {
+        if clock.now() >= next {
+            match find() {
+                Ok(Some(source)) => return Some(source),
+                Ok(None) => {}
+                Err(why) => {
+                    // Its first line: a device list after it may vary.
+                    let first = why.lines().next().unwrap_or_default().to_string();
+                    if said.as_ref() != Some(&first) {
+                        eprintln!("warning: the card cannot be opened yet: {why}; still waiting for it");
+                        said = Some(first);
+                    }
+                }
+            }
+            next = clock.now() + FIND_EVERY;
+        }
+        clock.sleep(POLL_SLICE);
+    }
+    None
 }
 
 /// How much of the carried lateness leaks away each frame: about two
@@ -225,6 +299,9 @@ struct Policy {
     decoder: Option<mjpeg::Decoder>,
     /// The frame decoded or packed into.
     out: Vec<u8>,
+    /// The card found again at this time (#40), no picture since: the
+    /// unplugged state stands until a picture, or `NEVER_AFTER`.
+    reopened: Option<Duration>,
 }
 
 impl Policy {
@@ -242,7 +319,45 @@ impl Policy {
             time_gaps: TimeGaps::default(),
             decoder,
             out: vec![0; format.frame_size()],
+            reopened: None,
         }
+    }
+
+    /// `source`'s stream until `quit` (Ok) or the source fails (Err).
+    fn feed(
+        &mut self,
+        source: &mut dyn FrameSource,
+        clock: &dyn Clock,
+        quit: &AtomicBool,
+        dropped: &Dropped,
+        on_event: &mut dyn FnMut(Event<'_>),
+    ) -> io::Result<()> {
+        let mut stream = source.start()?;
+        while !quit.load(Ordering::Relaxed) {
+            stream.next(POLL_SLICE, &mut |raw| self.buffer(raw, dropped, on_event))?;
+            self.tick(clock.now(), on_event);
+        }
+        Ok(())
+    }
+
+    /// The source failed: the card is unplugged (#40), said once.
+    fn unplugged(&mut self, why: String, on_event: &mut dyn FnMut(Event<'_>)) {
+        if matches!(self.state, Signal::NoSignal { reason: Reason::Unplugged(_), .. }) {
+            return;
+        }
+        let since = if self.last_picture.is_some() { Since::Stopped } else { Since::Never };
+        self.state = Signal::NoSignal { since, reason: Reason::Unplugged(why) };
+        on_event(Event::Signal(self.state.clone()));
+    }
+
+    /// The card found again at `now` (#40): a fresh stream, whose marks
+    /// start over (no gap across the time it was out).
+    fn reopened(&mut self, stride: usize, now: Duration) {
+        self.stride = stride;
+        self.last_mark = None;
+        self.time_gaps = TimeGaps::default();
+        self.last_drop = None;
+        self.reopened = Some(now);
     }
 
     fn buffer(&mut self, raw: Raw<'_>, dropped: &Dropped, on_event: &mut dyn FnMut(Event<'_>)) {
@@ -272,6 +387,7 @@ impl Policy {
         match picture {
             Ok(data) => {
                 self.last_picture = Some(raw.dequeued);
+                self.reopened = None;
                 if self.state != Signal::Picture {
                     self.state = Signal::Picture;
                     on_event(Event::Signal(Signal::Picture));
@@ -317,6 +433,10 @@ impl Policy {
 
     /// Time passing: the signal state, sent when it or its reason changes.
     fn tick(&mut self, now: Duration, on_event: &mut dyn FnMut(Event<'_>)) {
+        // The card just found again: its first picture is on the way.
+        if self.reopened.is_some_and(|t| now.saturating_sub(t) < NEVER_AFTER) {
+            return;
+        }
         let since = match self.last_picture {
             Some(t) if now.saturating_sub(t) < STOPPED_AFTER => return,
             Some(_) => Since::Stopped,
@@ -361,6 +481,10 @@ mod tests {
     impl Clock for Time {
         fn now(&self) -> Duration {
             Duration::from_nanos(self.0.load(Ordering::Relaxed))
+        }
+
+        fn sleep(&self, d: Duration) {
+            self.set(self.now() + d);
         }
     }
 
@@ -447,6 +571,7 @@ mod tests {
         Frame(Vec<u8>),
         Signal(Signal),
         Gap(u32, u32, u32),
+        CardBack,
     }
 
     fn run_script(format: Format, stride: usize, steps: Vec<Step>, end: Duration, gone: bool) -> (Vec<(Duration, Said)>, Dropped, io::Result<()>) {
@@ -460,6 +585,7 @@ mod tests {
                 Event::Frame(f) => Said::Frame(f.data.to_vec()),
                 Event::Signal(s) => Said::Signal(s),
                 Event::Gap { from, to, lost } => Said::Gap(from, to, lost),
+                Event::CardBack => Said::CardBack,
             };
             said.push((time.now(), s));
         });
@@ -662,5 +788,96 @@ mod tests {
     fn the_card_gone_ends_the_run_with_its_error() {
         let (_, _, result) = run_script(FORMAT, 8, frames(ms(0), ms(100), 0), ms(300), true);
         assert_eq!(result.unwrap_err().to_string(), "the card is gone");
+    }
+
+    /// `run_finding`: pictures to 1 s, the card pulled out at 1.5 s, not
+    /// found (or found but failing, `failing`) until `back`, then pictures
+    /// again from a fresh source, numbered from 0, 2.5 s after it is found
+    /// (a card's start-up), until `end`.
+    fn run_pulled(back: Duration, failing: bool, end: Duration) -> (Vec<(Duration, Said)>, io::Result<()>, Arc<AtomicU64>) {
+        let time = Time::default();
+        let quit = Arc::new(AtomicBool::new(false));
+        let first = Scripted { format: FORMAT, stride: 8, time: time.clone(), steps: frames(ms(0), ms(1000), 100).into(), end: ms(1500), gone: true, quit: quit.clone() };
+        let tries = Arc::new(AtomicU64::new(0));
+        let mut find: Finder = {
+            let (time, quit, tries) = (time.clone(), quit.clone(), tries.clone());
+            Box::new(move || {
+                tries.fetch_add(1, Ordering::Relaxed);
+                let now = time.now();
+                if now < back {
+                    return if failing { Err("busy".into()) } else { Ok(None) };
+                }
+                let steps = frames(now + ms(2500), end, 0).into();
+                Ok(Some(Box::new(Scripted { format: FORMAT, stride: 8, time: time.clone(), steps, end, gone: false, quit: quit.clone() })))
+            })
+        };
+        let dropped = Dropped::default();
+        let mut said = Vec::new();
+        let result = run_finding(Box::new(first), &mut find, &time, &quit, &dropped, &mut |e| {
+            let s = match e {
+                Event::Frame(f) => Said::Frame(f.data.to_vec()),
+                Event::Signal(s) => Said::Signal(s),
+                Event::Gap { from, to, lost } => Said::Gap(from, to, lost),
+                Event::CardBack => Said::CardBack,
+            };
+            said.push((time.now(), s));
+        });
+        (said, result, tries)
+    }
+
+    #[test]
+    fn a_card_pulled_out_is_waited_for_and_the_feed_goes_on() {
+        let (said, result, tries) = run_pulled(ms(4000), false, ms(8000));
+        result.unwrap();
+        let s: Vec<Signal> = signals(&said).into_iter().map(|(_, s)| s).collect();
+        // Unplugged once, at once (not "stopped, nothing arrives" first),
+        // then the picture back; no "nothing arrives" while the fresh card
+        // starts up.
+        assert_eq!(s, [no_signal(Since::Stopped, Reason::Unplugged("the card is gone".into())), Signal::Picture]);
+        let back = said.iter().position(|(_, x)| *x == Said::CardBack).expect("the card back");
+        assert!(said[back].0 >= ms(4000) && said[back].0 < ms(4000) + FIND_EVERY + POLL_SLICE, "{:?}", said[back].0);
+        assert!(matches!(said[back + 1].1, Said::Signal(Signal::Picture)));
+        // About once a second while it was out.
+        let n = tries.load(Ordering::Relaxed);
+        assert!((3..=4).contains(&n), "{n} tries");
+        // The fresh source's numbers start over: no gap across the pull.
+        assert!(!said.iter().any(|(_, x)| matches!(x, Said::Gap(..))));
+        assert!(said[back..].iter().filter(|(_, x)| matches!(x, Said::Frame(_))).count() > 30);
+    }
+
+    #[test]
+    fn a_card_there_but_failing_to_open_is_waited_for_too() {
+        let (said, result, _) = run_pulled(ms(3000), true, ms(7000));
+        result.unwrap();
+        assert!(said.iter().any(|(_, x)| *x == Said::CardBack));
+        assert_eq!(signals(&said).last().map(|(_, s)| s.clone()), Some(Signal::Picture));
+    }
+
+    #[test]
+    fn quit_while_the_card_is_out_ends_the_run() {
+        let time = Time::default();
+        let quit = Arc::new(AtomicBool::new(false));
+        let first = Scripted { format: FORMAT, stride: 8, time: time.clone(), steps: frames(ms(0), ms(100), 0).into(), end: ms(200), gone: true, quit: quit.clone() };
+        let quit_at = Arc::new(AtomicU64::new(0));
+        let mut find: Finder = {
+            let (time, quit, quit_at) = (time.clone(), quit.clone(), quit_at.clone());
+            Box::new(move || {
+                if time.now() >= ms(3000) && !quit.swap(true, Ordering::Relaxed) {
+                    quit_at.store(time.now().as_nanos() as u64, Ordering::Relaxed);
+                }
+                Ok(None)
+            })
+        };
+        let result = run_finding(Box::new(first), &mut find, &time, &quit, &Dropped::default(), &mut |_| {});
+        result.unwrap();
+        let quit_at = Duration::from_nanos(quit_at.load(Ordering::Relaxed));
+        assert!(quit_at >= ms(3000), "quit was set");
+        assert!(time.now() <= quit_at + POLL_SLICE, "ended {:?} after quit", time.now() - quit_at);
+    }
+
+    #[test]
+    fn the_unplugged_state_is_said_as_the_glossary_has_it() {
+        let s = no_signal(Since::Stopped, Reason::Unplugged("The video recording device is no longer present.".into()));
+        assert_eq!(s.to_string(), "no signal (stopped): the card is unplugged (The video recording device is no longer present.)");
     }
 }

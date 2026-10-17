@@ -1150,6 +1150,9 @@ impl Wizard {
                     format!("frames arrive but the viewer cannot use them ({why})."),
                     if self.sys.has_view_sh() { "Go back and pick another mode, or use view.sh." } else { "Go back and pick another mode." },
                 ),
+                // Not sent here: the wizard's feed has no finder (#40), and
+                // a card pulled out ends it.
+                Some(Reason::Unplugged(why)) => (format!("the card is unplugged ({why})."), "Plug the card back in."),
                 Some(Reason::Nothing) | None => (
                     "no frames in 6 seconds: no signal, or HDCP is on at the source.".into(),
                     "Check the source is on and outputting, HDCP is off, and the card is plugged in.",

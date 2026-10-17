@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::capture::{self, Event, Format, FrameSource, Signal};
+use crate::capture::{self, Event, Finder, Format, FrameSource, Reason, Signal};
 use crate::dashboard::Live;
 use crate::present::Tag;
 
@@ -134,6 +134,10 @@ pub struct Plan {
     pub log_signal: bool,
     /// `--stats`: the capture's summary at the end.
     pub stats: bool,
+    /// Finds the card again when it is pulled out (#40): the run waits for
+    /// it instead of ending `CaptureEnded`. None: the source failing ends
+    /// the run (the setup wizard's feed, which says so on its page).
+    pub find: Option<Finder>,
 }
 
 /// One window over `source`, until it ends; why it did.
@@ -177,10 +181,11 @@ pub fn run(host: &mut dyn Host, mut source: Box<dyn FrameSource>, plan: Plan, qu
     let capture_thread = {
         let (slot, stop, end, live) = (slot.clone(), stop.clone(), end.clone(), plan.live.clone());
         let log_signal = plan.log_signal;
+        let find = plan.find;
         thread::spawn(move || -> (u64, u64) {
             let mut frames = 0u64;
             let mut gaps = 0u64;
-            let result = capture::run(&mut *source, &capture::Monotonic, &stop, &live.dropped, &mut |e| match e {
+            let mut on_event = |e: Event<'_>| match e {
                 Event::Frame(f) => {
                     frames += 1;
                     live.frame();
@@ -202,11 +207,26 @@ pub fn run(host: &mut dyn Host, mut source: Box<dyn FrameSource>, plan: Plan, qu
                 Event::Signal(s) => {
                     live.signal(&s);
                     if log_signal {
-                        eprintln!("{s}");
+                        match &s {
+                            Signal::NoSignal { reason: Reason::Unplugged(why), .. } => {
+                                eprintln!("capture: the card is gone ({why}); waiting for it to come back")
+                            }
+                            s => eprintln!("{s}"),
+                        }
                     }
                     wake(Wake::Signal(s));
                 }
-            });
+                Event::CardBack => {
+                    live.event("the card is back".into());
+                    if log_signal {
+                        eprintln!("the card is back");
+                    }
+                }
+            };
+            let result = match find {
+                Some(mut find) => capture::run_finding(source, &mut find, &capture::Monotonic, &stop, &live.dropped, &mut on_event),
+                None => capture::run(&mut *source, &capture::Monotonic, &stop, &live.dropped, &mut on_event),
+            };
             // The run ends with its capture, unless it ended first.
             match result {
                 Err(e) => end.set_or_warn(Outcome::CaptureEnded(e.to_string())),
@@ -423,7 +443,21 @@ mod tests {
     }
 
     fn plan(seconds: Option<Duration>) -> Plan {
-        Plan { seconds, live: Arc::new(Live::new()), log_signal: false, stats: false }
+        Plan { seconds, live: Arc::new(Live::new()), log_signal: false, stats: false, find: None }
+    }
+
+    /// `plan`, with a finder that finds nothing `misses` times, then a
+    /// fresh card of `frames` frames.
+    fn finding(seconds: Option<Duration>, misses: u32, frames: u32) -> Plan {
+        let mut left = misses;
+        let find: Finder = Box::new(move || {
+            if left == 0 {
+                return Ok(Some(card(frames, false)));
+            }
+            left -= 1;
+            Ok(None)
+        });
+        Plan { find: Some(find), ..plan(seconds) }
     }
 
     fn card(frames: u32, fail: bool) -> Box<dyn FrameSource> {
@@ -448,6 +482,31 @@ mod tests {
             })
         };
         assert_eq!(run(&mut host, card(0, false), plan(None), &quit), Outcome::Signal);
+        signal.join().unwrap();
+    }
+
+    #[test]
+    fn with_a_finder_a_card_pulled_out_is_waited_for_not_the_end() {
+        let quit = Quit::new();
+        // Gone after 2 frames, found again at once: the window sees the
+        // fresh card's frames and closes after 20 in all.
+        let mut host = Scripted::new([Act::CloseAfter(20)]);
+        let p = finding(None, 0, 100);
+        let live = p.live.clone();
+        assert_eq!(run(&mut host, card(2, true), p, &quit), Outcome::Closed);
+        assert_eq!(host.frames, 20);
+        assert!(live.counts().frames >= 20);
+        // Never found: --seconds and a signal still end the run as before.
+        let mut host = Scripted::new([Act::Wait, Act::Wait]);
+        assert_eq!(run(&mut host, card(2, true), finding(Some(Duration::from_millis(300)), u32::MAX, 0), &quit), Outcome::TimeUp);
+        let signal = {
+            let quit = quit.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(300));
+                quit.request();
+            })
+        };
+        assert_eq!(run(&mut host, card(2, true), finding(None, u32::MAX, 0), &quit), Outcome::Signal);
         signal.join().unwrap();
     }
 

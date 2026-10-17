@@ -350,7 +350,7 @@ impl Rolling {
 
 /// The state as view.sh's dashboard names it: ok, never (no picture since
 /// the feed opened) or stopped; and why, when frames arrive that cannot be
-/// shown (null when nothing arrives).
+/// shown or the card is unplugged (#40) (null when nothing arrives).
 fn signal_json(signal: &Signal) -> (&'static str, Value) {
     let Signal::NoSignal { since, reason } = signal else { return ("ok", Value::Null) };
     let name = match since {
@@ -361,6 +361,7 @@ fn signal_json(signal: &Signal) -> (&'static str, Value) {
         Reason::Nothing => Value::Null,
         Reason::Undecodable(why) => json!(format!("MJPEG frames do not decode: {why}")),
         Reason::Unusable(why) => json!(format!("frames the viewer cannot use: {why}")),
+        Reason::Unplugged(why) => json!(format!("the card is unplugged: {why}")),
     };
     (name, why)
 }
@@ -1617,5 +1618,6 @@ mod tests {
         assert_eq!(signal_json(&no(Since::Never, Reason::Nothing)), ("never", Value::Null));
         assert_eq!(signal_json(&no(Since::Stopped, Reason::Nothing)), ("stopped", Value::Null));
         assert_eq!(signal_json(&no(Since::Never, Reason::Unusable("short".into()))), ("never", json!("frames the viewer cannot use: short")));
+        assert_eq!(signal_json(&no(Since::Stopped, Reason::Unplugged("gone".into()))), ("stopped", json!("the card is unplugged: gone")));
     }
 }

@@ -24,7 +24,7 @@ use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::audio::{Controls, LoopbackKeys};
-use crate::capture::{Format, FrameSource, now_monotonic};
+use crate::capture::{Format, FrameSource, Reason, Signal, now_monotonic};
 use crate::desktop::Desktop;
 use crate::gputime::GpuTimer;
 use crate::keys::{self, Action};
@@ -300,6 +300,9 @@ struct App {
     repaint: bool,
     /// A card frame came on this wake (`about_to_wait` sends it).
     arrived: bool,
+    /// The card was pulled out (#40): with the first picture after, the
+    /// loopback that died with its audio input starts again.
+    sound_with_card: bool,
     /// When d last started a dashboard (`DASHBOARD_MAPS`).
     dashboard_opened: Option<Instant>,
     /// LEVELS or a colour value changed: convert the last frame again on a
@@ -465,13 +468,15 @@ fn posts(pending: &AtomicBool, w: &Wake) -> bool {
 }
 
 /// One window over `source` (run.rs), on winit: until it ends, and why.
-pub fn run(source: Box<dyn FrameSource>, opts: Options, quit: &Quit) -> Outcome {
+/// With `find`, a card pulled out is waited for (#40).
+pub fn run(source: Box<dyn FrameSource>, find: Option<crate::capture::Finder>, opts: Options, quit: &Quit) -> Outcome {
     let plan = Plan {
         seconds: opts.seconds.map(Duration::from_secs),
         live: opts.live.clone(),
         // The wizard's page says what its feed does (its signal check).
         log_signal: opts.wizard.is_none(),
         stats: opts.stats,
+        find,
     };
     let mut host = Winit { opts: Some(opts), event_loop: None, window_no: 0, frame_wake: Arc::default() };
     crate::run::run(&mut host, source, plan, quit)
@@ -542,6 +547,7 @@ impl Host for Winit {
             notify,
             repaint: false,
             arrived: false,
+            sound_with_card: false,
             dashboard_opened: None,
             reconvert: false,
             deadline: None,
@@ -1088,6 +1094,34 @@ impl App {
         }
     }
 
+    /// The frame policy's signal state changed: the wizard's check, the
+    /// banner, and the sound back with the card after a pull (#40).
+    fn signal(&mut self, s: Signal) {
+        if let Some(w) = &self.opts.wizard {
+            w.borrow_mut().signal(&s);
+        }
+        let picture = s == Signal::Picture;
+        if matches!(s, Signal::NoSignal { reason: Reason::Unplugged(_), .. }) {
+            self.sound_with_card = true;
+        }
+        self.overlay.signal = s;
+        if picture && std::mem::take(&mut self.sound_with_card) {
+            self.sound_back();
+        }
+        self.repaint = true;
+    }
+
+    /// The card back after it was pulled out (#40): its loopback, which
+    /// stopped with the card's audio input, starts again as the keys
+    /// would start it (#29). One still running is left alone.
+    fn sound_back(&mut self) {
+        // A death not yet taken from its notice counts as stopped.
+        self.audio_check();
+        let AudioSetup::Loopback { keys, now: Err(_) } = &self.opts.audio else { return };
+        let delay_ms = keys.delay_ms();
+        self.restart_audio(delay_ms);
+    }
+
     /// A loopback that stopped mid-feed (its controls say so, and wake the
     /// window): no longer running, and said in the dashboard and as a
     /// notification; the overlay's message and the terminal's came from
@@ -1619,11 +1653,7 @@ impl ApplicationHandler<UserEvent> for App {
                 Ok(())
             }
             What::Run(Wake::Signal(s)) => {
-                if let Some(w) = &self.opts.wizard {
-                    w.borrow_mut().signal(&s);
-                }
-                self.overlay.signal = s;
-                self.repaint = true;
+                self.signal(s);
                 Ok(())
             }
             What::Notice => {
@@ -1783,6 +1813,7 @@ mod tests {
             notify: Arc::new(|_| {}),
             repaint: false,
             arrived: false,
+            sound_with_card: false,
             dashboard_opened: None,
             reconvert: false,
             deadline: None,
@@ -1888,6 +1919,28 @@ mod tests {
         app.repaint = false;
         held(&app, Duration::from_millis(30));
         assert!(app.send_now(), "past 1.5 frame times (25 ms at 60 fps) the card has stopped: sent alone");
+    }
+
+    #[test]
+    fn the_sound_comes_back_with_a_card_pulled_out_and_plugged_back() {
+        let (mut app, _loopback, script, _) = app_with_loopback("");
+        let unplugged = Signal::NoSignal { since: crate::capture::Since::Stopped, reason: Reason::Unplugged("gone".into()) };
+        // The loopback dies with the card's audio input; its notice may
+        // not have been taken when the picture is back.
+        crate::audio::fake::kill(&keys(&app));
+        app.signal(unplugged.clone());
+        assert_eq!(script.starts.borrow().len(), 1, "not while the card is out");
+        app.signal(Signal::Picture);
+        assert_eq!(*script.starts.borrow(), [50, 50], "started again at its delay");
+        assert!(app.loopback().is_some_and(|c| c.dead().is_none()));
+        // Once: a later picture after an ordinary no-signal starts nothing.
+        app.signal(Signal::NoSignal { since: crate::capture::Since::Stopped, reason: Reason::Nothing });
+        app.signal(Signal::Picture);
+        assert_eq!(script.starts.borrow().len(), 2);
+        // A loopback still running through the pull is left alone.
+        app.signal(unplugged);
+        app.signal(Signal::Picture);
+        assert_eq!(script.starts.borrow().len(), 2);
     }
 
     #[test]

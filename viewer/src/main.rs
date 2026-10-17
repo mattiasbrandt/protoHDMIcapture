@@ -37,7 +37,7 @@ mod wizard;
 
 use std::env;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use settings::Settings;
 
@@ -84,8 +84,10 @@ fn environment() {
 /// AUDIO=none. Each start (the first, and the keys' restarts, #29) finds
 /// the source again and starts it at the delay asked for; a failed one is
 /// reported and the feed goes on without sound, as in view.sh.
-/// `card`: None with `--test-pattern`, where only SRC can name an input.
-fn audio(s: &Settings, card: Option<&card::Node>) -> Option<audio::Loopback> {
+/// `card`: the card in use, read at each start (one found again after a
+/// pull, #40, may be on another port); None with `--test-pattern`, where
+/// only SRC can name an input.
+fn audio(s: &Settings, card: Arc<Mutex<Option<card::Node>>>) -> Option<audio::Loopback> {
     // AUDIO=mpv is refused before this (view_sh_only).
     if s.get("AUDIO") == "none" {
         return None;
@@ -95,8 +97,8 @@ fn audio(s: &Settings, card: Option<&card::Node>) -> Option<audio::Loopback> {
     // Validated: DELAY is 0..1 s, LAT_MS 1..1000.
     let delay_ms = (s.get("DELAY").parse::<f64>().unwrap_or(0.05) * 1000.0).round() as u32;
     let buffer_ms = s.get("LAT_MS").parse().unwrap_or(10);
-    let card = card.cloned();
     let start: audio::Start = Box::new(move |delay_ms| {
+        let card = card.lock().expect("the card's lock is never poisoned").clone();
         let source = if src.is_empty() { card_audio_input(card.as_ref())? } else { src.clone() };
         let a = audio::Audio::start(&source, sink.as_deref(), delay_ms, buffer_ms)?;
         Ok(Box::new(a))
@@ -229,7 +231,7 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
             let phase = wiz.borrow().phase();
             wiz.borrow_mut().running = phase;
             let outcome = match phase {
-                Phase::Choose => app::run(Box::new(wizard::Idle), opts(), quit),
+                Phase::Choose => app::run(Box::new(wizard::Idle), None, opts(), quit),
                 Phase::Feed => {
                     // One video window at a time, with view.sh too.
                     let session = match session::Session::start(&dir, desktop.clone())? {
@@ -256,7 +258,9 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
                     if let Some(s) = feed.session() {
                         s.announce()?;
                     }
-                    let outcome = app::run(source, opts(), quit);
+                    // No finder: a card pulled out mid-check is the
+                    // wizard's to say (#40).
+                    let outcome = app::run(source, None, opts(), quit);
                     feed.finish();
                     outcome
                 }
@@ -363,6 +367,33 @@ fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::
     }
     eprintln!("video device: {} ({})", picked.node.path.display(), picked.node.card_type);
     Ok((open_node(&picked.node, format)?, picked.node))
+}
+
+/// Finds the card again after it is pulled out (#40), on the capture
+/// thread: by the same pins as `open_card`, quiet while it is not plugged
+/// in. Each card found and opened becomes `card`, the audio's card.
+fn finder(s: &Settings, format: capture::Format, card: Arc<Mutex<Option<card::Node>>>) -> capture::Finder {
+    let (dev, serial, port, ignore) = (s.get("DEV").to_string(), s.get("CARD_SERIAL").to_string(), s.get("CARD_PORT").to_string(), s.get("IGNORE_CARDS_RE").to_string());
+    let (source, config) = (pin_source(s), s.config_file.display().to_string());
+    let mut warned = false;
+    Box::new(move || {
+        let pins = card::Pins { dev: &dev, serial: &serial, port: &port, ignore: &ignore, source: &source };
+        let picked = match card::pick(&card::list(), &pins, card::describe_dev(&dev), &config) {
+            Ok(p) => p,
+            Err(card::PickError::Missing(_)) => return Ok(None),
+            Err(card::PickError::Other(e)) => return Err(e),
+        };
+        // A DEV set aside, as at the start: said once, not every second.
+        if let Some(w) = &picked.warning
+            && !std::mem::replace(&mut warned, true)
+        {
+            eprintln!("warning: {w}");
+        }
+        let opened = open_node(&picked.node, format)?;
+        eprintln!("video device: {} ({})", picked.node.path.display(), picked.node.card_type);
+        *card.lock().expect("the card's lock is never poisoned") = Some(picked.node);
+        Ok(Some(opened))
+    })
 }
 
 /// The capture node opened at `format`, a busy card's error saying who
@@ -511,6 +542,10 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
         let (source, node) = opened?;
         (source, Some(node))
     };
+    // The card in use: the one opened, then each one found again after a
+    // pull (#40); the audio's starts look for its input on it.
+    let card = Arc::new(Mutex::new(node));
+    let find = card.lock().expect("the card's lock is never poisoned").is_some().then(|| finder(&s, format, card.clone()));
     if let Some(log) = debug_log.as_mut() {
         log.format(format, test_pattern);
         match debuglog::perf_every(env::var("DEBUG_PERF_INTERVAL").ok().as_deref()) {
@@ -521,7 +556,7 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
             }
         }
     }
-    match audio(&s, node.as_ref()) {
+    match audio(&s, card) {
         Some(loopback) => {
             let keys = feed.set_audio(loopback).keys();
             let now = app::audio_started(&live, &keys, keys.start(keys.delay_ms()));
@@ -590,7 +625,7 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
         }
         Err(e) => eprintln!("warning: no dashboard: {e}"),
     }
-    let outcome = app::run(source, opts, quit);
+    let outcome = app::run(source, find, opts, quit);
     if let (true, Some(a)) = (stats, feed.audio()) {
         for line in a.summary() {
             eprintln!("summary: audio {line}");

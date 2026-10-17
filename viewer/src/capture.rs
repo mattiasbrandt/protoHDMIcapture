@@ -19,7 +19,7 @@ mod usb_hub;
 mod v4l2;
 #[cfg(windows)]
 pub use mf::MediaFoundation;
-pub use policy::{Dropped, Event, Monotonic, Reason, Since, Signal, run};
+pub use policy::{Dropped, Event, Finder, Monotonic, Reason, Since, Signal, run, run_finding};
 #[cfg(target_os = "linux")]
 pub use v4l2::V4l2;
 

@@ -128,6 +128,7 @@ fn no_signal_detail(since: Since, reason: &Reason, wake: Option<&str>) -> String
     match (reason, since) {
         (Reason::Undecodable(why), _) => format!("The card's MJPEG frames do not decode: {why}. Pick a yuyv422 mode."),
         (Reason::Unusable(why), _) => format!("The card sends frames the viewer cannot use ({why})."),
+        (Reason::Unplugged(_), _) => "The capture card is unplugged. Plug it back in: the feed comes back by itself.".into(),
         (Reason::Nothing, Since::Never) => "Is the source on and connected?".into(),
         (Reason::Nothing, Since::Stopped) => match wake {
             Some(w) => {
@@ -360,6 +361,8 @@ mod tests {
         assert_eq!(o.no_signal().as_deref(), Some("The card's MJPEG frames do not decode: not a JPEG. Pick a yuyv422 mode."));
         o.signal = no(Since::Stopped, Reason::Unusable("flagged as bad by the driver".into()));
         assert_eq!(o.no_signal().as_deref(), Some("The card sends frames the viewer cannot use (flagged as bad by the driver)."));
+        o.signal = no(Since::Stopped, Reason::Unplugged("The video recording device is no longer present.".into()));
+        assert_eq!(o.no_signal().as_deref(), Some("The capture card is unplugged. Plug it back in: the feed comes back by itself."));
         o.toggle();
         assert_eq!(o.no_signal(), None, "hidden under the panel");
         o.toggle();
