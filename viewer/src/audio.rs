@@ -4,7 +4,7 @@
 //! buffers, DELAY. cpal is the seam for now; a native PipeWire path can
 //! replace it without touching the rest (decided in #10). On Windows (#18)
 //! the host is WASAPI and SRC/SINK name endpoints; the output's level keys
-//! are not there yet.
+//! set this process's audio session (`output_level`, #19).
 //!
 //! The delay is the ring's fill over one buffer (`target_frames`).
 //! Changing it live never inserts silence or drops a block: the output
@@ -308,10 +308,111 @@ fn output_level(change: Option<LevelChange>) -> Result<Level, String> {
     crate::pw::level(change)
 }
 
-/// No level keys on Windows yet (#18).
+/// The output's level on Windows (#19): this process's audio session on
+/// the render endpoint it plays to, as the Volume mixer shows and sets it,
+/// so the keys change the viewer's sound only, as PipeWire's stream volume
+/// does. Runs on the level thread (`Controls`), never the window's, so COM
+/// comes up multithreaded here for the call; a thread that has COM already
+/// (in either mode: cpal's own threads have it single-threaded) uses it.
 #[cfg(windows)]
-fn output_level(_: Option<LevelChange>) -> Result<Level, String> {
-    Err("volume and mute are not on Windows yet".into())
+fn output_level(change: Option<LevelChange>) -> Result<Level, String> {
+    use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
+    use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
+
+    // Safety: no reserved pointer; balanced by CoUninitialize below when it
+    // succeeded (S_FALSE, already up in this mode, counts too).
+    let init = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    if init.is_err() && init != RPC_E_CHANGED_MODE {
+        return Err(format!("COM: {}", windows::core::Error::from(init)));
+    }
+    let result = session_level(change);
+    if init.is_ok() {
+        // Safety: this call's CoInitializeEx, above; every COM object is gone.
+        unsafe { CoUninitialize() };
+    }
+    result
+}
+
+/// The session's volume in percent, as the Volume mixer's slider shows the
+/// session's scalar (linear, 0..1).
+#[cfg(any(windows, test))]
+fn session_percent(scalar: f32) -> u32 {
+    (f64::from(scalar.clamp(0.0, 1.0)) * 100.0).round() as u32
+}
+
+#[cfg(any(windows, test))]
+fn session_scalar(percent: u32) -> f32 {
+    percent.min(100) as f32 / 100.0
+}
+
+/// Reads, and with a change sets, the level of `our_session`.
+#[cfg(windows)]
+fn session_level(change: Option<LevelChange>) -> Result<Level, String> {
+    let volume = our_session()?;
+    let read = || -> Result<Level, String> {
+        // Safety: a live ISimpleAudioVolume on this thread's MTA.
+        let scalar = unsafe { volume.GetMasterVolume() }.map_err(|e| format!("the session's volume: {e}"))?;
+        let mute = unsafe { volume.GetMute() }.map_err(|e| format!("the session's mute: {e}"))?;
+        Ok(Level { volume: session_percent(scalar), mute: mute.as_bool() })
+    };
+    let now = read()?;
+    let Some(change) = change else { return Ok(now) };
+    let want = now.changed(change);
+    // Safety: as above; no event context (a null GUID pointer).
+    unsafe {
+        volume.SetMasterVolume(session_scalar(want.volume), std::ptr::null()).map_err(|e| format!("setting the volume: {e}"))?;
+        volume.SetMute(want.mute, std::ptr::null()).map_err(|e| format!("setting the mute: {e}"))?;
+    }
+    read()
+}
+
+/// This process's audio session on the active render endpoints: the one
+/// playing, where an earlier output left an inactive one elsewhere.
+#[cfg(windows)]
+fn our_session() -> Result<windows::Win32::Media::Audio::ISimpleAudioVolume, String> {
+    use windows::Win32::Media::Audio::{
+        AudioSessionStateActive, AudioSessionStateExpired, DEVICE_STATE_ACTIVE, IAudioSessionControl2, IAudioSessionManager2,
+        IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, eRender,
+    };
+    use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+    use windows::core::Interface;
+
+    let pid = std::process::id();
+    let mut found = Vec::new();
+    // Safety: COM calls on the caller's MTA (`output_level`); every object
+    // is dropped before it returns.
+    unsafe {
+        let endpoints: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(|e| format!("audio endpoints: {e}"))?;
+        let all = endpoints.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE).map_err(|e| format!("audio outputs: {e}"))?;
+        for i in 0..all.GetCount().map_err(|e| format!("audio outputs: {e}"))? {
+            let Ok(device) = all.Item(i) else { continue };
+            let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else { continue };
+            let Ok(sessions) = manager.GetSessionEnumerator() else { continue };
+            for j in 0..sessions.GetCount().unwrap_or(0) {
+                let Ok(control) = sessions.GetSession(j) else { continue };
+                let Ok(control2) = control.cast::<IAudioSessionControl2>() else { continue };
+                if control2.GetProcessId().ok() != Some(pid) {
+                    continue;
+                }
+                let state = control.GetState().map_err(|e| format!("the session's state: {e}"))?;
+                if state == AudioSessionStateExpired {
+                    continue;
+                }
+                let volume = control.cast::<ISimpleAudioVolume>().map_err(|e| format!("the session's volume: {e}"))?;
+                found.push((state == AudioSessionStateActive, volume));
+            }
+        }
+    }
+    if found.iter().any(|(active, _)| *active) {
+        found.retain(|(active, _)| *active);
+    }
+    let mut found = found.into_iter();
+    match (found.next(), found.next()) {
+        (Some((_, one)), None) => Ok(one),
+        (None, _) => Err("this viewer has no audio output stream".into()),
+        (Some(_), Some(_)) => Err("this viewer has more than one audio output stream".into()),
+    }
 }
 
 impl Drop for Audio {
@@ -853,6 +954,46 @@ pub mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_volume_is_the_mixers_percent() {
+        assert_eq!(session_percent(1.0), 100);
+        assert_eq!(session_percent(0.5), 50);
+        assert_eq!(session_percent(0.004), 0);
+        assert_eq!(session_percent(0.006), 1);
+        assert_eq!((session_percent(-0.1), session_percent(1.5)), (0, 100), "clamped");
+        for p in 0..=100 {
+            assert_eq!(session_percent(session_scalar(p)), p, "{p} % round trips");
+        }
+        assert_eq!(session_scalar(250), 1.0);
+    }
+
+    /// m, 9 and 0 on this process's WASAPI session while the card's loopback
+    /// plays: `cargo test --release -- --ignored level_on_wasapi --nocapture`.
+    /// Needs the MS2130's input; leaves the session at 100 %, unmuted.
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "needs the card's audio input and an output"]
+    fn level_on_wasapi() {
+        let audio = Audio::start("Microphone (USB Audio Device)", None, 50, 10).unwrap();
+        eprintln!("{}", audio.describe());
+        std::thread::sleep(Duration::from_millis(500));
+
+        let start = output_level(None).unwrap();
+        eprintln!("start: {start:?}");
+        let full = output_level(Some(LevelChange::Set(Level { volume: 100, mute: false }))).unwrap();
+        assert_eq!(full, Level { volume: 100, mute: false });
+        let down = output_level(Some(LevelChange::Volume(-5))).unwrap();
+        assert_eq!(down, Level { volume: 95, mute: false });
+        let muted = output_level(Some(LevelChange::Mute)).unwrap();
+        assert_eq!(muted, Level { volume: 95, mute: true });
+        assert_eq!(output_level(None).unwrap(), muted, "read back as set");
+        // Past 0 and 100: clamped, as lib/audio.sh does.
+        assert_eq!(output_level(Some(LevelChange::Volume(-200))).unwrap().volume, 0);
+        let back = output_level(Some(LevelChange::Set(Level { volume: 100, mute: false }))).unwrap();
+        assert_eq!(back, Level { volume: 100, mute: false });
+        eprintln!("left at {back:?}");
+    }
 
     /// m, 9 and 0 against PipeWire itself, read back through pactl as
     /// lib/audio.sh reads them: `cargo test -- --ignored level_on_pipewire`.
