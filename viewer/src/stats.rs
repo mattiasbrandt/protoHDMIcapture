@@ -210,6 +210,7 @@ impl Stats {
             self.skipped_refreshes
         );
         // wp_presentation_feedback.kind: 1 vsync, 2 hw_clock, 4 hw_completion, 8 zero_copy.
+        // DXGI (Windows): 0 unknown, else the presentation mode + 1 (present/dxgi.rs).
         let flags: Vec<String> = self.flags.iter().map(|(f, n)| format!("{f:#x}x{n}")).collect();
         eprintln!("summary: presentation flags {}", flags.join(" "));
     }

@@ -169,14 +169,26 @@ pub fn now_monotonic() -> Duration {
 /// Media Foundation's device timestamps are on too (in 100 ns units).
 #[cfg(windows)]
 pub fn now_monotonic() -> Duration {
-    use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
-    let (mut count, mut freq) = (0i64, 0i64);
-    // Safety: plain out-pointers; neither call fails on Windows XP or later.
+    use windows::Win32::System::Performance::QueryPerformanceCounter;
+    let mut count = 0i64;
+    // Safety: a plain out-pointer; it does not fail on Windows XP or later.
     unsafe {
         let _ = QueryPerformanceCounter(&mut count);
+    }
+    qpc_duration(count)
+}
+
+/// A performance counter reading as `now_monotonic` gives it: DXGI's
+/// frame statistics time vblanks on it (#19).
+#[cfg(windows)]
+pub fn qpc_duration(count: i64) -> Duration {
+    use windows::Win32::System::Performance::QueryPerformanceFrequency;
+    let mut freq = 0i64;
+    // Safety: as above.
+    unsafe {
         let _ = QueryPerformanceFrequency(&mut freq);
     }
-    let (count, freq) = (count as u128, freq.max(1) as u128);
+    let (count, freq) = (count.max(0) as u128, freq.max(1) as u128);
     Duration::from_nanos((count * 1_000_000_000 / freq) as u64)
 }
 

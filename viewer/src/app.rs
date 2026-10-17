@@ -609,12 +609,24 @@ fn feedback(window: &Window) -> Result<Option<Box<dyn Feedback>>, String> {
     Ok(feedback)
 }
 
-/// No presentation feedback off Linux yet (present.rs): DX12's waitable
-/// swapchain bounds the queue instead.
+/// On Windows the feedback needs the configured surface's swapchain:
+/// `frame_statistics`, after the first `configure`.
 #[cfg(not(target_os = "linux"))]
 fn feedback(_: &Window) -> Result<Option<Box<dyn Feedback>>, String> {
-    eprintln!("note: no presentation feedback on this platform; frames are paced by the swapchain only");
     Ok(None)
+}
+
+/// DXGI frame statistics on the configured surface (present.rs, #19):
+/// presents timed, paced by DX12's waitable swapchain as before.
+#[cfg(windows)]
+fn frame_statistics(surface: &wgpu::Surface) -> Option<Box<dyn Feedback>> {
+    match present::FrameStatistics::new(surface) {
+        Some(f) => Some(Box::new(f)),
+        None => {
+            eprintln!("note: no DXGI swapchain to time presents by; frames are paced by the swapchain only");
+            None
+        }
+    }
 }
 
 /// The filter scalers' passes (scale.rs): a polar filter's one, or an
@@ -729,6 +741,10 @@ impl App {
         };
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
+        // wgpu-hal keeps the swapchain across later configures (it resizes
+        // its buffers), so it is taken once, here.
+        #[cfg(windows)]
+        let feedback = feedback.or_else(|| frame_statistics(&surface));
         if self.opts.stats {
             let info = adapter.get_info();
             eprintln!("adapter: {} ({:?}, {:?})", info.name, info.backend, info.device_type);
@@ -738,7 +754,7 @@ impl App {
                 config.height,
                 config.format,
                 config.present_mode,
-                feedback.is_some()
+                feedback.as_ref().is_some_and(|f| f.paces())
             );
         }
 
@@ -1377,7 +1393,7 @@ impl App {
     /// compositor has taken the previous one (its frame callback). Meanwhile
     /// the slot keeps only the newest frame.
     fn render(&mut self) -> Result<(), String> {
-        let paced = self.gfx.as_ref().is_some_and(|g| g.feedback.is_some());
+        let paced = self.gfx.as_ref().and_then(|g| g.feedback.as_ref()).is_some_and(|f| f.paces());
         if paced && self.in_flight > 0 {
             if now_monotonic() - self.last_submit < PACE_TIMEOUT {
                 return Ok(());
@@ -1724,6 +1740,9 @@ impl ApplicationHandler<UserEvent> for App {
         // A screenshot still coming back is finished, not dropped.
         if let Some(gfx) = self.gfx.as_mut() {
             gfx.screenshot.finish(&gfx.device, &self.notify);
+            // Before the surface: DXGI's feedback holds a reference to its
+            // swapchain (present.rs), let go while wgpu's device still lives.
+            gfx.feedback = None;
         }
         self.gfx = None;
     }

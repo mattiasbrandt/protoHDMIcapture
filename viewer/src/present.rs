@@ -5,14 +5,18 @@
 //! moment `present()` returns is a submit time, not scanout; the compositor
 //! knows the real one.
 //!
-//! On Windows (#18) there is no feedback yet. wgpu's DX12 swapchain is a
-//! flip-model one (FLIP_DISCARD) with a frame-latency waitable object that
-//! acquiring the next texture waits on (wgpu-hal 30, dx12/mod.rs), so the
-//! frame latency app.rs asks for bounds the queue; there are no
-//! presentation times to measure with (DXGI frame statistics, #19).
+//! On Windows, wgpu's DX12 swapchain is a flip-model one (FLIP_DISCARD)
+//! with a frame-latency waitable object that acquiring the next texture
+//! waits on (wgpu-hal 30, dx12/mod.rs), so the frame latency app.rs asks
+//! for bounds the queue and paces the presents. DXGI frame statistics time
+//! them (dxgi.rs, #19); they do not pace.
 
 use std::time::Duration;
 
+#[cfg(any(windows, test))]
+mod dxgi;
+#[cfg(windows)]
+pub use dxgi::FrameStatistics;
 #[cfg(target_os = "linux")]
 mod wayland;
 #[cfg(target_os = "linux")]
@@ -36,6 +40,12 @@ pub trait Feedback {
     fn request(&mut self, tag: Tag) -> Result<(), String>;
     /// What has come back since the last call.
     fn drain(&mut self) -> Result<Vec<Outcome>, String>;
+    /// Whether presents wait for its `FrameDone` (Wayland's frame
+    /// callback). False: it only times them, and the swapchain paces
+    /// (DXGI, which has no frame callback).
+    fn paces(&self) -> bool {
+        true
+    }
 }
 
 pub enum Outcome {
