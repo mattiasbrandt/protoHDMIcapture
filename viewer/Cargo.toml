@@ -70,3 +70,6 @@ linuxvideo = { path = "vendor/linuxvideo" }
 
 [dev-dependencies]
 jpeg-encoder = "0.7.1"
+
+[build-dependencies]
+embed-resource = "3.0.12"

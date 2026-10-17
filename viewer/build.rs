@@ -33,7 +33,30 @@ fn embed(dir: &str, out: &str) {
     fs::write(Path::new(&env::var("OUT_DIR").unwrap()).join(out), text).expect("OUT_DIR is writable");
 }
 
+/// The app icon as the Windows exe's icon resource 1 (#35): Explorer,
+/// Start and the taskbar show it, and app.rs gives it to the window. A
+/// missing resource compiler (llvm-rc, or rc.exe on Windows) is a warning,
+/// so a plain `cargo check` for Windows still runs; a failed compile stops
+/// the build.
+fn windows_icon() {
+    // Not canonicalize: on Windows that gives a \\?\ path, which rc may not take.
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("viewer/ is in the repo");
+    let ico = repo.join("packaging/windows/protohdmicapture.ico");
+    println!("cargo:rerun-if-changed={}", ico.display());
+    fs::metadata(&ico).unwrap_or_else(|e| panic!("{}: {e}", ico.display()));
+    // Forward slashes: rc reads a backslash in a quoted name as an escape.
+    let rc = Path::new(&env::var("OUT_DIR").unwrap()).join("icon.rc");
+    fs::write(&rc, format!("1 ICON \"{}\"\n", ico.display().to_string().replace('\\', "/"))).expect("OUT_DIR is writable");
+    match embed_resource::compile(&rc, embed_resource::NONE) {
+        embed_resource::CompilationResult::NotAttempted(why) => println!("cargo:warning=no icon in the exe: {why}"),
+        r => r.manifest_optional().unwrap_or_else(|e| panic!("the exe's icon: {e}")),
+    }
+}
+
 fn main() {
     embed("../sources", "sources.rs");
     embed("../capture-cards", "capture_cards.rs");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        windows_icon();
+    }
 }
