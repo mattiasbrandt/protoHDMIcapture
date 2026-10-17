@@ -401,11 +401,8 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
     opts.scaling = scale::Scaling::from_settings(s.get("SCALING"))?;
     let format = capture::Format::from_settings(s.get("RES"), s.get("FPS"), s.get("FMT"))?;
 
-    // One video window at a time, with view.sh too (docs/run-dir.md); on
-    // Windows there is no view.sh to share the card with, and no session
-    // files yet (#18).
+    // One video window at a time, with view.sh too (docs/run-dir.md).
     let desktop = desktop::detect()?;
-    #[cfg(target_os = "linux")]
     let session = match session::Session::start(&session::run_dir(), desktop.clone())? {
         Ok(s) => Some(s),
         Err(running) => {
@@ -422,8 +419,6 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
             return Ok(());
         }
     };
-    #[cfg(not(target_os = "linux"))]
-    let session = None;
     // DEBUG≠off: the output into debug.log from here, with the lock held
     // (a refused second launch must not truncate the running one's), as
     // view.sh's debug_tee. Declared before the feed, so it outlives the
@@ -512,7 +507,6 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), String> {
         return Ok(());
     }
     // As view.sh writes it once its player is started.
-    #[cfg(target_os = "linux")]
     if let Some(session) = feed.session() {
         session.announce()?;
     }

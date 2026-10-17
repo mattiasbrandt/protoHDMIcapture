@@ -20,22 +20,21 @@
 //! orphan loopback is not stopped. The files only view.sh's dashboard
 //! reads are not written: the Rust viewer's dashboard reads
 //! `dashboard.sock` (dashboard.rs).
+//!
+//! On Windows (#19) the same `video.lock` (`LockFileEx` where Linux has
+//! flock) and `video.pid`, so a second launch, or the setup wizard's feed,
+//! finds the window taken. No view.sh runs there to leave an orphan
+//! player, and REFRESH=match is Hyprland's, so no `refresh.restore`.
 
-#[cfg(target_os = "linux")]
-use std::fs::{self, File, OpenOptions};
-#[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
+use std::fs::{self, File, OpenOptions, TryLockError};
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
-#[cfg(target_os = "linux")]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::thread;
 #[cfg(target_os = "linux")]
 use std::time::Duration;
 
-#[cfg(target_os = "linux")]
 use crate::desktop::Desktop;
 
 /// `${XDG_RUNTIME_DIR:-/tmp}/protohdmicapture`, as view.sh names it.
@@ -52,7 +51,6 @@ pub fn run_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()).map_or_else(std::env::temp_dir, PathBuf::from).join("protohdmicapture")
 }
 
-#[cfg(target_os = "linux")]
 pub struct Session {
     dir: PathBuf,
     /// Holds `video.lock` until dropped.
@@ -64,7 +62,6 @@ pub struct Session {
     announced: bool,
 }
 
-#[cfg(target_os = "linux")]
 /// Another session has the video window.
 #[derive(Debug, PartialEq)]
 pub struct AlreadyRunning {
@@ -72,7 +69,6 @@ pub struct AlreadyRunning {
     pub focused: bool,
 }
 
-#[cfg(target_os = "linux")]
 fn say(r: crate::desktop::Report) {
     match r {
         Ok(m) if !m.is_empty() => eprintln!("{m}"),
@@ -81,7 +77,6 @@ fn say(r: crate::desktop::Report) {
     }
 }
 
-#[cfg(target_os = "linux")]
 impl Session {
     /// Takes the video lock and recovers a killed session's refresh switch.
     pub fn start(dir: &Path, desktop: Desktop) -> Result<Result<Self, AlreadyRunning>, String> {
@@ -92,17 +87,18 @@ impl Session {
             .truncate(false)
             .open(dir.join("video.lock"))
             .map_err(|e| format!("cannot open {}: {e}", dir.join("video.lock").display()))?;
-        // Safety: flock on an fd this File owns.
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
-                return Err(format!("cannot lock {}: {err}", dir.join("video.lock").display()));
+        // flock(LOCK_EX | LOCK_NB) on Linux, view.sh's lock; LockFileEx on Windows.
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                let pid = fs::read_to_string(dir.join("video.pid")).ok().and_then(|p| p.trim().parse().ok());
+                let focused = pid.is_some_and(|p| desktop.focus_pid(p));
+                return Ok(Err(AlreadyRunning { pid, focused }));
             }
-            let pid = fs::read_to_string(dir.join("video.pid")).ok().and_then(|p| p.trim().parse().ok());
-            let focused = pid.is_some_and(|p| desktop.focus_pid(p));
-            return Ok(Err(AlreadyRunning { pid, focused }));
+            Err(TryLockError::Error(e)) => return Err(format!("cannot lock {}: {e}", dir.join("video.lock").display())),
         }
         // With the lock held, the session that wrote video.pid is gone.
+        #[cfg(target_os = "linux")]
         if let Some(m) = kill_orphan(&dir.join("video.pid"), &PLAYER_RE, "player") {
             eprintln!("warning: {m}");
         }
@@ -139,7 +135,6 @@ impl Session {
     }
 }
 
-#[cfg(target_os = "linux")]
 impl Drop for Session {
     /// The display back, then the files; the lock goes with the fd. A
     /// failed restore keeps the record for the next run of either viewer.
@@ -201,7 +196,7 @@ fn kill_orphan(pidfile: &Path, re: &regex::Regex, what: &str) -> Option<String> 
     Some(format!("stopped the {what} (pid {pid}) that a killed session left running"))
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -223,12 +218,20 @@ mod tests {
         let second = Session::start(&dir, Desktop::Generic).unwrap();
         assert_eq!(second.err(), Some(AlreadyRunning { pid: Some(std::process::id()), focused: false }));
         // view.sh's own test of the lock: flock -n on the same file fails.
-        let held = std::process::Command::new("flock").args(["-n"]).arg(dir.join("video.lock")).arg("true").status().unwrap();
-        assert!(!held.success(), "view.sh would see the lock held");
+        #[cfg(target_os = "linux")]
+        {
+            let held = std::process::Command::new("flock").args(["-n"]).arg(dir.join("video.lock")).arg("true").status().unwrap();
+            assert!(!held.success(), "view.sh would see the lock held");
+        }
         drop(first);
         assert!(!dir.join("video.pid").exists());
-        let free = std::process::Command::new("flock").args(["-n"]).arg(dir.join("video.lock")).arg("true").status().unwrap();
-        assert!(free.success(), "released at the end");
+        #[cfg(target_os = "linux")]
+        {
+            let free = std::process::Command::new("flock").args(["-n"]).arg(dir.join("video.lock")).arg("true").status().unwrap();
+            assert!(free.success(), "released at the end");
+        }
+        // Released at the end: the next session starts.
+        drop(Session::start(&dir, Desktop::Generic).unwrap().unwrap());
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -244,6 +247,7 @@ mod tests {
     }
 
     /// A stand-in process with this command line (argv[0] set by exec -a).
+    #[cfg(target_os = "linux")]
     fn stand_in(cmdline: &str) -> std::process::Child {
         let child = std::process::Command::new("bash").args(["-c", &format!("exec -a '{cmdline}' sleep 30")]).spawn().unwrap();
         // Until the exec has happened.
@@ -258,6 +262,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // runs bash, reads /proc
     fn a_killed_view_shs_player_is_stopped_and_nothing_else() {
         let dir = tmp("orphan");
         fs::create_dir_all(&dir).unwrap();

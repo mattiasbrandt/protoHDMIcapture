@@ -17,11 +17,8 @@
 use crate::audio::Loopback;
 use crate::dashboard::Server;
 
-/// The session part: `Session` on Linux; nothing yet on Windows (#18).
-#[cfg(target_os = "linux")]
+/// The session part.
 pub type SessionPart = crate::session::Session;
-#[cfg(not(target_os = "linux"))]
-pub type SessionPart = ();
 
 /// What a feed holds besides its window, ended by `finish`. The parts are
 /// type parameters so that tests can record the order.
