@@ -3,7 +3,8 @@
 //! dispatchers (Omarchy configures Hyprland in Lua, which rejects
 //! `hyprctl keyword` and the bare dispatch forms); any other desktop gets
 //! the generic adapter, which leaves the window to the toolkit and the
-//! display alone.
+//! display alone. On Windows the generic adapter still focuses the running
+//! viewer for a second launch (#37).
 //!
 //! Refresh matching keeps lib/desktop.sh's record (`refresh.restore`,
 //! `monitor|rate set|original rate|restore command`, docs/run-dir.md), so
@@ -43,9 +44,14 @@ pub type Report = Result<String, String>;
 
 impl Desktop {
     /// Raises the window of the process `pid`; false if this desktop cannot.
+    /// The generic adapter can on Windows (#37), through the window manager
+    /// every Windows desktop has.
     pub fn focus_pid(&self, pid: u32) -> bool {
         match self {
             Self::Hyprland(h) => h.dispatch(&format!("hl.dsp.focus({{ window = \"pid:{pid}\" }})")),
+            #[cfg(windows)]
+            Self::Generic => windows_focus::focus_pid(pid),
+            #[cfg(not(windows))]
             Self::Generic => false,
         }
     }
@@ -565,9 +571,111 @@ pub fn fmt_g(x: f64) -> String {
     }
 }
 
+/// A top-level window as the focus on Windows sees it (#37).
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TopWindow {
+    pid: u32,
+    visible: bool,
+    /// Owned by another window: a tool or IME window, not the viewer's.
+    owned: bool,
+}
+
+/// Which of `windows` (in Windows' z-order, topmost first) is the viewer's
+/// window: the first visible one of `pid` that no other window owns. The
+/// viewer has one video window; a minimised one still counts as visible.
+#[cfg(any(windows, test))]
+fn viewer_window(windows: &[TopWindow], pid: u32) -> Option<usize> {
+    windows.iter().position(|w| w.pid == pid && w.visible && !w.owned)
+}
+
+/// The generic adapter's focus on Windows (#37).
+#[cfg(windows)]
+mod windows_focus {
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, FLASHW_ALL, FLASHW_TIMERNOFG, FLASHWINFO, FlashWindowEx, GW_OWNER, GetWindow, GetWindowThreadProcessId, IsIconic,
+        IsWindowVisible, SW_RESTORE, SetForegroundWindow, ShowWindow,
+    };
+    use windows::core::BOOL;
+
+    use super::{TopWindow, viewer_window};
+
+    /// Restores the viewer's window if minimised and brings it to the
+    /// front. Where Windows' foreground lock refuses that (a launch that
+    /// is not from the foreground process), its taskbar button flashes
+    /// instead, and false: the caller then says only "already running".
+    /// A process launched from Explorer, a shortcut or the terminal in
+    /// front is allowed, so the first viewer needs no
+    /// `AllowSetForegroundWindow`.
+    pub fn focus_pid(pid: u32) -> bool {
+        let mut found: Vec<(HWND, TopWindow)> = Vec::new();
+        // Safety: `each` gets `found` back through lparam, only during this
+        // call, on this thread.
+        if let Err(e) = unsafe { EnumWindows(Some(each), LPARAM(&raw mut found as isize)) } {
+            eprintln!("warning: listing the windows, to focus the running viewer: {e}");
+            return false;
+        }
+        let list: Vec<TopWindow> = found.iter().map(|(_, w)| *w).collect();
+        let Some(i) = viewer_window(&list, pid) else {
+            eprintln!("note: the running viewer (pid {pid}) shows no window to focus yet");
+            return false;
+        };
+        let hwnd = found[i].0;
+        // Safety: a window handle just listed; a closed one makes these
+        // calls fail, not misbehave.
+        unsafe {
+            // ShowWindow returns whether it was visible before, not an error.
+            if IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+            if SetForegroundWindow(hwnd).as_bool() {
+                return true;
+            }
+            let flash = FLASHWINFO { cbSize: size_of::<FLASHWINFO>() as u32, hwnd, dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG, uCount: 0, dwTimeout: 0 };
+            // FlashWindowEx returns the window's state before, not an error.
+            let _ = FlashWindowEx(&flash);
+        }
+        eprintln!("note: Windows did not let this launch bring the viewer to the front; its taskbar button flashes");
+        false
+    }
+
+    /// EnumWindows' callback: each top-level window into the list.
+    extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // Safety: lparam is `focus_pid`'s list, alive for the whole listing.
+        let found = unsafe { &mut *(lparam.0 as *mut Vec<(HWND, TopWindow)>) };
+        let mut pid = 0u32;
+        // Safety: a window Windows is listing, and an out-pointer.
+        let (visible, owned) = unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&raw mut pid));
+            // No owner reads as an error from GetWindow: that is the answer.
+            (IsWindowVisible(hwnd).as_bool(), GetWindow(hwnd, GW_OWNER).is_ok())
+        };
+        found.push((hwnd, TopWindow { pid, visible, owned }));
+        BOOL::from(true)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_viewers_window_is_its_first_visible_unowned_one() {
+        let w = |pid, visible, owned| TopWindow { pid, visible, owned };
+        let windows = [
+            w(10, true, false), // another program, in front
+            w(42, false, false), // the viewer's hidden helper window
+            w(42, true, true),  // a window the viewer's owns (IME)
+            w(42, true, false), // the video window
+            w(42, true, false), // a later one of the same pid
+        ];
+        assert_eq!(viewer_window(&windows, 42), Some(3));
+        assert_eq!(viewer_window(&windows, 10), Some(0));
+        // No window yet (still starting), or another pid only.
+        assert_eq!(viewer_window(&windows[..3], 42), None);
+        assert_eq!(viewer_window(&windows, 7), None);
+    }
 
     #[test]
     fn g_formats_as_python() {
