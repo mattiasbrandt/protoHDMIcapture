@@ -101,6 +101,9 @@ pub enum Reason {
     Unusable(String),
     /// The card is unplugged, waited for (#40): the source's error.
     Unplugged(String),
+    /// Nothing arrives from a card opened again after a pull (#40): kept
+    /// open, as any card without a picture, but it may be stuck.
+    NothingSinceBack,
 }
 
 impl Reason {
@@ -124,6 +127,10 @@ impl fmt::Display for Signal {
             Reason::Undecodable(why) => write!(f, "no signal ({since}): MJPEG frames do not decode: {why}"),
             Reason::Unusable(why) => write!(f, "no signal ({since}): frames the viewer cannot use: {why}"),
             Reason::Unplugged(why) => write!(f, "no signal ({since}): the card is unplugged ({why})"),
+            Reason::NothingSinceBack => write!(
+                f,
+                "no signal ({since}): nothing arrives since the card came back; if it stays so, the card may be stuck: unplug all its cables for 10 s"
+            ),
         }
     }
 }
@@ -476,6 +483,9 @@ impl Policy {
         };
         let reason = match &self.last_drop {
             Some((t, r)) if now.saturating_sub(*t) < STOPPED_AFTER => r.clone(),
+            // A card opened again with no picture since (#40): kept open,
+            // not opened again, but it may be stuck.
+            _ if self.reopened.is_some() => Reason::NothingSinceBack,
             _ => Reason::Nothing,
         };
         let changed = match &self.state {
@@ -824,8 +834,8 @@ mod tests {
     /// A finder on a script (#40): the card whole within `whole` (time
     /// windows, end exclusive), its opens failing before `fails_until`,
     /// and quit set by a look at `quit_at`. An open that works gives
-    /// pictures from 1 s after it (a card's start-up) until `end`. Each
-    /// open's time is kept.
+    /// pictures from `startup` after it until `end` (none: a card that
+    /// opens and sends nothing). Each open's time is kept.
     struct CardScript {
         time: Time,
         quit: Arc<AtomicBool>,
@@ -833,6 +843,7 @@ mod tests {
         fails_until: Duration,
         end: Duration,
         quit_at: Option<Duration>,
+        startup: Duration,
         opens: Arc<std::sync::Mutex<Vec<Duration>>>,
     }
 
@@ -851,7 +862,7 @@ mod tests {
             if now < self.fails_until {
                 return Err("busy".into());
             }
-            let steps = frames(now + ms(1000), self.end, 0).into();
+            let steps = if now + self.startup < self.end { frames(now + self.startup, self.end, 0).into() } else { Default::default() };
             Ok(Box::new(Scripted { format: FORMAT, stride: 8, time: self.time.clone(), steps, end: self.end, gone: false, quit: self.quit.clone() }))
         }
     }
@@ -862,11 +873,16 @@ mod tests {
     /// `CardScript` with `whole`, `fails_until`, `end` and `quit_at`. The
     /// events, and the opens' times.
     fn run_pulled(whole: Vec<(Duration, Duration)>, fails_until: Duration, end: Duration, quit_at: Option<Duration>) -> (Vec<(Duration, Said)>, Vec<Duration>) {
+        run_pulled_with(ms(1000), whole, fails_until, end, quit_at)
+    }
+
+    /// `run_pulled`, the card's pictures `startup` after it is opened.
+    fn run_pulled_with(startup: Duration, whole: Vec<(Duration, Duration)>, fails_until: Duration, end: Duration, quit_at: Option<Duration>) -> (Vec<(Duration, Said)>, Vec<Duration>) {
         let time = Time::default();
         let quit = Arc::new(AtomicBool::new(false));
         let first = Scripted { format: FORMAT, stride: 8, time: time.clone(), steps: frames(ms(0), ms(1000), 100).into(), end: ms(1500), gone: true, quit: quit.clone() };
         let opens = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut find = CardScript { time: time.clone(), quit: quit.clone(), whole, fails_until, end, quit_at, opens: opens.clone() };
+        let mut find = CardScript { time: time.clone(), quit: quit.clone(), whole, fails_until, end, quit_at, startup, opens: opens.clone() };
         let mut said = Vec::new();
         run_finding(Box::new(first), &mut find, &time, &quit, &Dropped::default(), &mut |e| {
             let s = match e {
@@ -935,6 +951,23 @@ mod tests {
         let gap = opens[first_after + 1] - opens[first_after];
         assert!(gap >= ms(1000) && gap <= ms(1000) + POLL_SLICE, "{opens:?}");
         assert_eq!(signals(&said).last().map(|(_, s)| s.clone()), Some(Signal::Picture));
+    }
+
+    #[test]
+    fn a_card_opened_again_that_gives_nothing_stays_open_with_the_hint() {
+        // Back whole at 2 s, opened at about 4 s, then not one buffer until
+        // the run ends at 30 s (a stuck card, or nothing on its HDMI).
+        let (said, opens) = run_pulled_with(FOREVER, vec![(ms(2000), FOREVER)], Duration::ZERO, ms(30_000), None);
+        assert_eq!(opens.len(), 1, "not dropped and opened again: {opens:?}");
+        let s = signals(&said);
+        let states: Vec<Signal> = s.iter().map(|(_, s)| s.clone()).collect();
+        assert_eq!(
+            states,
+            [no_signal(Since::Stopped, Reason::Unplugged("the card is gone".into())), no_signal(Since::Stopped, Reason::NothingSinceBack)],
+            "the hint once, after the start-up grace"
+        );
+        assert!(s[1].0 >= opens[0] + NEVER_AFTER && s[1].0 < opens[0] + NEVER_AFTER + POLL_SLICE * 2, "{:?}", s[1].0);
+        assert!(s[1].1.to_string().ends_with("the card may be stuck: unplug all its cables for 10 s"));
     }
 
     #[test]

@@ -129,6 +129,12 @@ fn no_signal_detail(since: Since, reason: &Reason, wake: Option<&str>) -> String
         (Reason::Undecodable(why), _) => format!("The card's MJPEG frames do not decode: {why}. Pick a yuyv422 mode."),
         (Reason::Unusable(why), _) => format!("The card sends frames the viewer cannot use ({why})."),
         (Reason::Unplugged(_), _) => "The capture card is unplugged. Plug it back in: the feed comes back by itself.".into(),
+        // A card opened again after a pull (#40): as any card without a
+        // picture, and the card itself may be stuck (capture-cards/ms2130.md).
+        (Reason::NothingSinceBack, since) => format!(
+            "{}  If it stays without a picture, the card may be stuck: unplug all its cables for 10 s.",
+            no_signal_detail(since, &Reason::Nothing, wake)
+        ),
         (Reason::Nothing, Since::Never) => "Is the source on and connected?".into(),
         (Reason::Nothing, Since::Stopped) => match wake {
             Some(w) => {
@@ -363,6 +369,11 @@ mod tests {
         assert_eq!(o.no_signal().as_deref(), Some("The card sends frames the viewer cannot use (flagged as bad by the driver)."));
         o.signal = no(Since::Stopped, Reason::Unplugged("The video recording device is no longer present.".into()));
         assert_eq!(o.no_signal().as_deref(), Some("The capture card is unplugged. Plug it back in: the feed comes back by itself."));
+        o.signal = no(Since::Stopped, Reason::NothingSinceBack);
+        assert_eq!(
+            o.no_signal().as_deref(),
+            Some("The source stopped sending.  Press the PS button on the controller to wake it.  If it stays without a picture, the card may be stuck: unplug all its cables for 10 s.")
+        );
         o.toggle();
         assert_eq!(o.no_signal(), None, "hidden under the panel");
         o.toggle();

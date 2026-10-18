@@ -1153,6 +1153,10 @@ impl Wizard {
                 // Not sent here: the wizard's feed has no finder (#40), and
                 // a card pulled out ends it.
                 Some(Reason::Unplugged(why)) => (format!("the card is unplugged ({why})."), "Plug the card back in."),
+                Some(Reason::NothingSinceBack) => (
+                    "no frames since the card came back.".into(),
+                    "The card may be stuck: unplug all its cables for 10 s.",
+                ),
                 Some(Reason::Nothing) | None => (
                     "no frames in 6 seconds: no signal, or HDCP is on at the source.".into(),
                     "Check the source is on and outputting, HDCP is off, and the card is plugged in.",

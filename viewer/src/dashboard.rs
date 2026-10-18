@@ -362,6 +362,7 @@ fn signal_json(signal: &Signal) -> (&'static str, Value) {
         Reason::Undecodable(why) => json!(format!("MJPEG frames do not decode: {why}")),
         Reason::Unusable(why) => json!(format!("frames the viewer cannot use: {why}")),
         Reason::Unplugged(why) => json!(format!("the card is unplugged: {why}")),
+        Reason::NothingSinceBack => json!("nothing since the card came back; it may be stuck: unplug all its cables for 10 s"),
     };
     (name, why)
 }
@@ -1619,5 +1620,9 @@ mod tests {
         assert_eq!(signal_json(&no(Since::Stopped, Reason::Nothing)), ("stopped", Value::Null));
         assert_eq!(signal_json(&no(Since::Never, Reason::Unusable("short".into()))), ("never", json!("frames the viewer cannot use: short")));
         assert_eq!(signal_json(&no(Since::Stopped, Reason::Unplugged("gone".into()))), ("stopped", json!("the card is unplugged: gone")));
+        assert_eq!(
+            signal_json(&no(Since::Stopped, Reason::NothingSinceBack)),
+            ("stopped", json!("nothing since the card came back; it may be stuck: unplug all its cables for 10 s"))
+        );
     }
 }
