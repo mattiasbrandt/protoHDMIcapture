@@ -56,11 +56,11 @@ class Banded:
       now (its slope pivots on a point up to 4 windows back).
     - The warm-up: until the line has WARM samples, a step counts only what
       wander cannot be (past WARM_STEP periods, rounded down past 0.9 of
-      the wander); then the warm-up's frame numbers are found again, the
-      nearest places on a line of either slope (the phase's, the least-
-      squares), the set whose band is narrowest; taken, and the frames
-      beyond the steps' count said, only if that band is TIGHTER than the
-      steps' numbers give (a frame missed splits the band a period apart).
+      the wander); then a frame is added at the long step that narrows the
+      warm-up's band most (under either slope, the phase's or the least-
+      squares), again while one narrows it by TIGHTER: a frame missed splits
+      the band a period apart, and only the frame where it went closes it.
+      The frames added are said then.
     - The phase is taken in periods of the slope as it stood at each
       block's start: in FPS's, a card 0.5 % off smears the MS2130's band
       over the whole turn within a cycle.
@@ -172,21 +172,26 @@ class Banded:
         ks = [k - ref_k for k, _ in s.pts]
         ts = [t - ref_t for _, t in s.pts]
         old = list(ks)
-        # Both slopes: the phase's (a free one over a few seconds takes a
-        # frame lost in them for drift: one period in 300 samples is 0.33 %),
-        # and the least-squares (the phase's from a few blocks is shakiest
-        # at the widest drift). The numbers whose band is the narrowest.
+        # The band's width under either slope, the narrower: the phase's (a
+        # free one over a few seconds takes a frame lost in them for drift:
+        # one period in 300 samples is 0.33 %), and the least-squares (the
+        # phase's from a few blocks is shakiest at the widest drift).
         kinds = (True, False) if s.turn is not None else (False,)
-        cands = [s._labels(old, ts, phase) for phase in kinds]
-        width, ks = min(((min(s._width(c, ts, ph) for ph in kinds), c) for c in cands), key=lambda x: x[0])
+        width = lambda ks: min(s._width(ks, ts, ph) for ph in kinds)
+        # A frame lost and missed splits the band a period apart; a frame
+        # added where it went closes it. Greedily: one more frame at the
+        # long step (one of 1.5 periods or more: where a frame can have
+        # gone) that narrows the band most, while one narrows it by TIGHTER.
+        longs = [i for i in range(1, len(ts)) if ts[i] - ts[i - 1] >= 1.5 * s.p]
+        best = width(ks)
+        while True:
+            tries = [(width(c), c) for c in ([k + (j >= i) for j, k in enumerate(ks)] for i in longs)]
+            w, c = min(tries, key=lambda x: x[0], default=(best, ks))
+            if w > best - s.TIGHTER * s.p:
+                break
+            best, ks = w, c
         extra = ks[-1] - old[-1]
         if extra <= 0:
-            return 0
-        # Taken only if they explain the times better: a frame lost and
-        # missed leaves the warm-up's places against its line split a period
-        # apart, a band wider than the wander's, which the right numbers
-        # close; numbers made up do not.
-        if width > min(s._width(old, ts, ph) for ph in kinds) - s.TIGHTER * s.p:
             return 0
         s.pts = deque((k + ref_k, t + ref_t) for k, t in zip(ks, ts))
         s._rebase()
@@ -209,27 +214,15 @@ class Banded:
         b = min(max(b, s.p * (1 - s.SLOPE)), s.p * (1 + s.SLOPE))
         return (st - b * sk) / n, b
 
-    def _labels(s, ks, ts, phase):
-        """Each time's frame number again, the nearest place on the line
-        fitted with the last ones, until they settle."""
-        for _ in range(8):
-            a, b = s._fit(ks, ts, phase)
-            base = round((ts[0] - a) / b)
-            new = [0]
-            for t in ts[1:]:
-                new.append(max(round((t - a) / b) - base, new[-1] + 1))
-            if new == ks:
-                break
-            ks = new
-        return ks
-
     def _width(s, ks, ts, phase):
-        """The 5th-95th percentile width of the places of `ts` against a line
-        fitted to them with these frame numbers."""
+        """The full width of the places of `ts` against a line fitted to
+        them with these frame numbers. Untrimmed, unlike the live band: a
+        frame lost a few samples before the warm-up's end leaves fewer than
+        a trim's worth past the split; and a frame added lowers every later
+        place by a period, which no stray time can make look right."""
         a, b = s._fit(ks, ts, phase)
-        n = len(ks)
-        band = sorted(t - (a + b * k) for k, t in zip(ks, ts))
-        return band[-1 - n // 20] - band[n // 20]
+        places = [t - (a + b * k) for k, t in zip(ks, ts)]
+        return max(places) - min(places)
 
     def lost(s, t):
         if s.k is None:
