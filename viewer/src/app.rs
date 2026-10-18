@@ -279,6 +279,15 @@ struct Gfx {
     feedback: Option<Box<dyn Feedback>>,
 }
 
+impl Drop for Gfx {
+    /// The feedback before the surface, however `Gfx` goes: DXGI's holds a
+    /// reference to the surface's swapchain (present.rs), and fields drop
+    /// in their order, the surface first.
+    fn drop(&mut self) {
+        self.feedback = None;
+    }
+}
+
 struct App {
     /// This window's number (`WINDOWS`).
     window_no: u64,
@@ -1751,9 +1760,6 @@ impl ApplicationHandler<UserEvent> for App {
         // A screenshot still coming back is finished, not dropped.
         if let Some(gfx) = self.gfx.as_mut() {
             gfx.screenshot.finish(&gfx.device, &self.notify);
-            // Before the surface: DXGI's feedback holds a reference to its
-            // swapchain (present.rs), let go while wgpu's device still lives.
-            gfx.feedback = None;
         }
         self.gfx = None;
     }
