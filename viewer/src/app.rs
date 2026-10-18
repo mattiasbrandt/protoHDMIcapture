@@ -469,7 +469,7 @@ fn posts(pending: &AtomicBool, w: &Wake) -> bool {
 
 /// One window over `source` (run.rs), on winit: until it ends, and why.
 /// With `find`, a card pulled out is waited for (#40).
-pub fn run(source: Box<dyn FrameSource>, find: Option<crate::capture::Finder>, opts: Options, quit: &Quit) -> Outcome {
+pub fn run(source: Box<dyn FrameSource>, find: Option<Box<dyn crate::capture::Finder>>, opts: Options, quit: &Quit) -> Outcome {
     let plan = Plan {
         seconds: opts.seconds.map(Duration::from_secs),
         live: opts.live.clone(),

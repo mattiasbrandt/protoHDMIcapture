@@ -126,6 +126,15 @@ fn card_audio_input(card: Option<&card::Node>) -> Result<String, String> {
 /// "USB Audio Device" (the #18 VM run); else SRC must name it.
 #[cfg(windows)]
 fn card_audio_input(card: Option<&card::Node>) -> Result<String, String> {
+    let (id, name) = card_audio(card)?;
+    eprintln!("audio: the card's input: {name}");
+    Ok(id)
+}
+
+/// `card_audio_input`'s finding, quiet: the card's input (endpoint id,
+/// name). The finder asks it every second while the card is out (#40).
+#[cfg(windows)]
+fn card_audio(card: Option<&card::Node>) -> Result<(String, String), String> {
     let inputs: Vec<(String, String, Option<u128>)> =
         audio::inputs()?.into_iter().map(|i| (i.name, i.id, i.container)).collect();
     let set_src = || format!("set SRC to one of: {}", inputs.iter().map(|i| i.0.as_str()).collect::<Vec<_>>().join(" | "));
@@ -134,8 +143,17 @@ fn card_audio_input(card: Option<&card::Node>) -> Result<String, String> {
         .map_err(|e| format!("the card's audio input cannot be found: {e}; {}", set_src()))?
         .to_u128();
     let id = card_input(container, &inputs).map_err(|e| format!("{e} ({}); {}", card.card_type, set_src()))?;
-    eprintln!("audio: the card's input: {}", inputs.iter().find(|i| i.1 == id).map_or(id, |i| i.0.as_str()));
-    Ok(id.to_string())
+    let name = inputs.iter().find(|i| i.1 == id).map_or(id, |i| i.0.as_str());
+    Ok((id.to_string(), name.to_string()))
+}
+
+/// Whether the card's audio function is there (#40): the input its
+/// audio start would find, looked for quietly.
+fn card_has_audio(card: &card::Node) -> bool {
+    #[cfg(target_os = "linux")]
+    return card_audio_input(Some(card)).is_ok();
+    #[cfg(windows)]
+    return card_audio(Some(card)).is_ok();
 }
 
 /// The one input (name, endpoint id, container id) in the card's
@@ -370,30 +388,82 @@ fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::
 }
 
 /// Finds the card again after it is pulled out (#40), on the capture
-/// thread: by the same pins as `open_card`, quiet while it is not plugged
-/// in. Each card found and opened becomes `card`, the audio's card.
-fn finder(s: &Settings, format: capture::Format, card: Arc<Mutex<Option<card::Node>>>) -> capture::Finder {
-    let (dev, serial, port, ignore) = (s.get("DEV").to_string(), s.get("CARD_SERIAL").to_string(), s.get("CARD_PORT").to_string(), s.get("IGNORE_CARDS_RE").to_string());
-    let (source, config) = (pin_source(s), s.config_file.display().to_string());
-    let mut warned = false;
-    Box::new(move || {
-        let pins = card::Pins { dev: &dev, serial: &serial, port: &port, ignore: &ignore, source: &source };
-        let picked = match card::pick(&card::list(), &pins, card::describe_dev(&dev), &config) {
+/// thread: by the same pins as `open_card`, and whole only once its audio
+/// function is back too, where it had one at the start (a card opened
+/// while it was still coming back most likely got stuck). Quiet while it
+/// is not there. Each card opened becomes `card`, the audio's card.
+struct CardFinder {
+    dev: String,
+    serial: String,
+    port: String,
+    ignore: String,
+    source: String,
+    config: String,
+    format: capture::Format,
+    card: Arc<Mutex<Option<card::Node>>>,
+    /// The card had its audio function at the start: wait for it too.
+    with_audio: bool,
+    /// The card's node at the last look that found it whole.
+    found: Option<card::Node>,
+    /// A DEV set aside, as at the start: said once, not every second.
+    warned: bool,
+    /// The last pick error said, by its first line.
+    said: Option<String>,
+}
+
+fn finder(s: &Settings, format: capture::Format, card: Arc<Mutex<Option<card::Node>>>) -> Box<dyn capture::Finder> {
+    let with_audio = card.lock().expect("the card's lock is never poisoned").as_ref().is_some_and(card_has_audio);
+    Box::new(CardFinder {
+        dev: s.get("DEV").to_string(),
+        serial: s.get("CARD_SERIAL").to_string(),
+        port: s.get("CARD_PORT").to_string(),
+        ignore: s.get("IGNORE_CARDS_RE").to_string(),
+        source: pin_source(s),
+        config: s.config_file.display().to_string(),
+        format,
+        card,
+        with_audio,
+        found: None,
+        warned: false,
+        said: None,
+    })
+}
+
+impl capture::Finder for CardFinder {
+    fn whole(&mut self) -> bool {
+        self.found = None;
+        let pins = card::Pins { dev: &self.dev, serial: &self.serial, port: &self.port, ignore: &self.ignore, source: &self.source };
+        let picked = match card::pick(&card::list(), &pins, card::describe_dev(&self.dev), &self.config) {
             Ok(p) => p,
-            Err(card::PickError::Missing(_)) => return Ok(None),
-            Err(card::PickError::Other(e)) => return Err(e),
+            Err(card::PickError::Missing(_)) => return false,
+            Err(card::PickError::Other(e)) => {
+                let first = e.lines().next().unwrap_or_default().to_string();
+                if self.said.as_ref() != Some(&first) {
+                    eprintln!("warning: {e}; still waiting for the card");
+                    self.said = Some(first);
+                }
+                return false;
+            }
         };
-        // A DEV set aside, as at the start: said once, not every second.
         if let Some(w) = &picked.warning
-            && !std::mem::replace(&mut warned, true)
+            && !std::mem::replace(&mut self.warned, true)
         {
             eprintln!("warning: {w}");
         }
-        let opened = open_node(&picked.node, format)?;
-        eprintln!("video device: {} ({})", picked.node.path.display(), picked.node.card_type);
-        *card.lock().expect("the card's lock is never poisoned") = Some(picked.node);
-        Ok(Some(opened))
-    })
+        if self.with_audio && !card_has_audio(&picked.node) {
+            return false;
+        }
+        self.found = Some(picked.node);
+        true
+    }
+
+    fn open(&mut self) -> Result<Box<dyn capture::FrameSource>, String> {
+        let node = self.found.clone().ok_or("the card was not there whole at the last look")?;
+        let opened = open_node(&node, self.format)?;
+        eprintln!("video device: {} ({})", node.path.display(), node.card_type);
+        *self.card.lock().expect("the card's lock is never poisoned") = Some(node);
+        Ok(opened)
+    }
 }
 
 /// The capture node opened at `format`, a busy card's error saying who

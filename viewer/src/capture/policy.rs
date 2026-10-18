@@ -14,8 +14,9 @@
 //!   before the first picture (the card's start-up).
 //! - **Quit,** seen within `POLL_SLICE`: no wait is longer.
 //! - **The card pulled out** (#40), with a `Finder`: no signal, the card
-//!   unplugged, while it is looked for about once a second; found, the
-//!   feed goes on from the fresh source.
+//!   unplugged, while it is looked for about once a second. It is opened
+//!   only once it is back whole and settled, with a backoff between
+//!   opens; opened, the feed goes on from the fresh source.
 
 use std::fmt;
 use std::io;
@@ -32,13 +33,24 @@ pub const NEVER_AFTER: Duration = Duration::from_secs(5);
 /// No picture this long after the last one: no signal, "stopped". Also how
 /// recent a dropped buffer must be to be the reason.
 pub const STOPPED_AFTER: Duration = Duration::from_secs(2);
-/// How often a card pulled out is looked for (#40).
+/// How often a card pulled out is looked for (#40): a look only lists the
+/// devices; it never opens the card.
 const FIND_EVERY: Duration = Duration::from_secs(1);
+/// How long the card must be back whole before it is opened (#40): a card
+/// opened while it was still coming back most likely got stuck.
+const SETTLE: Duration = Duration::from_secs(2);
+/// The longest wait between two opens of a card back whole that cannot be
+/// opened (#40): 1 s, 2 s, 4 s, then this.
+const OPEN_BACKOFF_MAX: Duration = Duration::from_secs(8);
 
-/// Finds the card again once it is gone (#40), on the capture thread:
-/// `Ok(Some)` a fresh source at the same format, `Ok(None)` not plugged in
-/// yet, `Err` there but it cannot be opened (why).
-pub type Finder = Box<dyn FnMut() -> Result<Option<Box<dyn FrameSource>>, String> + Send>;
+/// Finds the card again once it is gone (#40), on the capture thread.
+pub trait Finder: Send {
+    /// Whether the card is plugged in whole: its video node by its pins
+    /// and, where it has one, its audio function. Quiet: it only looks.
+    fn whole(&mut self) -> bool;
+    /// Opens it at the same format as before; Err: why it cannot be.
+    fn open(&mut self) -> Result<Box<dyn FrameSource>, String>;
+}
 
 /// A picture, valid only inside the callback.
 pub struct Frame<'a> {
@@ -155,11 +167,11 @@ pub fn run(
 }
 
 /// `run`, but a source that fails is the card pulled out (#40): no signal,
-/// the card unplugged, while `find` looks for it every `FIND_EVERY`; found,
-/// the feed goes on from the fresh source. It ends only at `quit`.
+/// the card unplugged, while `find` looks for it (`look_for`); opened
+/// again, the feed goes on from the fresh source. It ends only at `quit`.
 pub fn run_finding(
     mut source: Box<dyn FrameSource>,
-    find: &mut Finder,
+    find: &mut dyn Finder,
     clock: &dyn Clock,
     quit: &AtomicBool,
     dropped: &Dropped,
@@ -186,17 +198,35 @@ pub fn run_finding(
     }
 }
 
-/// `find` every `FIND_EVERY` until it finds the card or `quit` is set
-/// (None). A card there that cannot be opened is said once for each new
-/// reason, and looked for on.
-fn look_for(find: &mut Finder, clock: &dyn Clock, quit: &AtomicBool) -> Option<Box<dyn FrameSource>> {
+/// The card opened again, or None at `quit` (#40). Every `FIND_EVERY` it
+/// looks whether the card is back whole; once it has been whole for
+/// `SETTLE`, it opens it. An open that fails waits 1 s, 2 s, 4 s, then
+/// `OPEN_BACKOFF_MAX` before the next, and is said once for each new
+/// reason; a card seen gone again starts over (the settling and 1 s).
+fn look_for(find: &mut dyn Finder, clock: &dyn Clock, quit: &AtomicBool) -> Option<Box<dyn FrameSource>> {
     let mut said: Option<String> = None;
-    let mut next = clock.now();
+    let mut next_look = clock.now();
+    let mut whole_since: Option<Duration> = None;
+    let mut next_open = Duration::ZERO;
+    let mut backoff = FIND_EVERY;
     while !quit.load(Ordering::Relaxed) {
-        if clock.now() >= next {
-            match find() {
-                Ok(Some(source)) => return Some(source),
-                Ok(None) => {}
+        let now = clock.now();
+        if now >= next_look {
+            next_look = now + FIND_EVERY;
+            if find.whole() {
+                whole_since.get_or_insert(now);
+            } else {
+                whole_since = None;
+                backoff = FIND_EVERY;
+                next_open = Duration::ZERO;
+            }
+        }
+        if let Some(since) = whole_since
+            && now.saturating_sub(since) >= SETTLE
+            && now >= next_open
+        {
+            match find.open() {
+                Ok(source) => return Some(source),
                 Err(why) => {
                     // Its first line: a device list after it may vary.
                     let first = why.lines().next().unwrap_or_default().to_string();
@@ -204,9 +234,10 @@ fn look_for(find: &mut Finder, clock: &dyn Clock, quit: &AtomicBool) -> Option<B
                         eprintln!("warning: the card cannot be opened yet: {why}; still waiting for it");
                         said = Some(first);
                     }
+                    next_open = clock.now() + backoff;
+                    backoff = (backoff * 2).min(OPEN_BACKOFF_MAX);
                 }
             }
-            next = clock.now() + FIND_EVERY;
         }
         clock.sleep(POLL_SLICE);
     }
@@ -790,30 +821,54 @@ mod tests {
         assert_eq!(result.unwrap_err().to_string(), "the card is gone");
     }
 
-    /// `run_finding`: pictures to 1 s, the card pulled out at 1.5 s, not
-    /// found (or found but failing, `failing`) until `back`, then pictures
-    /// again from a fresh source, numbered from 0, 2.5 s after it is found
-    /// (a card's start-up), until `end`.
-    fn run_pulled(back: Duration, failing: bool, end: Duration) -> (Vec<(Duration, Said)>, io::Result<()>, Arc<AtomicU64>) {
+    /// A finder on a script (#40): the card whole within `whole` (time
+    /// windows, end exclusive), its opens failing before `fails_until`,
+    /// and quit set by a look at `quit_at`. An open that works gives
+    /// pictures from 1 s after it (a card's start-up) until `end`. Each
+    /// open's time is kept.
+    struct CardScript {
+        time: Time,
+        quit: Arc<AtomicBool>,
+        whole: Vec<(Duration, Duration)>,
+        fails_until: Duration,
+        end: Duration,
+        quit_at: Option<Duration>,
+        opens: Arc<std::sync::Mutex<Vec<Duration>>>,
+    }
+
+    impl Finder for CardScript {
+        fn whole(&mut self) -> bool {
+            let now = self.time.now();
+            if self.quit_at.is_some_and(|t| now >= t) {
+                self.quit.store(true, Ordering::Relaxed);
+            }
+            self.whole.iter().any(|&(from, to)| now >= from && now < to)
+        }
+
+        fn open(&mut self) -> Result<Box<dyn FrameSource>, String> {
+            let now = self.time.now();
+            self.opens.lock().unwrap().push(now);
+            if now < self.fails_until {
+                return Err("busy".into());
+            }
+            let steps = frames(now + ms(1000), self.end, 0).into();
+            Ok(Box::new(Scripted { format: FORMAT, stride: 8, time: self.time.clone(), steps, end: self.end, gone: false, quit: self.quit.clone() }))
+        }
+    }
+
+    const FOREVER: Duration = Duration::from_secs(3600);
+
+    /// `run_finding`: pictures to 1 s, the card pulled out at 1.5 s, then
+    /// `CardScript` with `whole`, `fails_until`, `end` and `quit_at`. The
+    /// events, and the opens' times.
+    fn run_pulled(whole: Vec<(Duration, Duration)>, fails_until: Duration, end: Duration, quit_at: Option<Duration>) -> (Vec<(Duration, Said)>, Vec<Duration>) {
         let time = Time::default();
         let quit = Arc::new(AtomicBool::new(false));
         let first = Scripted { format: FORMAT, stride: 8, time: time.clone(), steps: frames(ms(0), ms(1000), 100).into(), end: ms(1500), gone: true, quit: quit.clone() };
-        let tries = Arc::new(AtomicU64::new(0));
-        let mut find: Finder = {
-            let (time, quit, tries) = (time.clone(), quit.clone(), tries.clone());
-            Box::new(move || {
-                tries.fetch_add(1, Ordering::Relaxed);
-                let now = time.now();
-                if now < back {
-                    return if failing { Err("busy".into()) } else { Ok(None) };
-                }
-                let steps = frames(now + ms(2500), end, 0).into();
-                Ok(Some(Box::new(Scripted { format: FORMAT, stride: 8, time: time.clone(), steps, end, gone: false, quit: quit.clone() })))
-            })
-        };
-        let dropped = Dropped::default();
+        let opens = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut find = CardScript { time: time.clone(), quit: quit.clone(), whole, fails_until, end, quit_at, opens: opens.clone() };
         let mut said = Vec::new();
-        let result = run_finding(Box::new(first), &mut find, &time, &quit, &dropped, &mut |e| {
+        run_finding(Box::new(first), &mut find, &time, &quit, &Dropped::default(), &mut |e| {
             let s = match e {
                 Event::Frame(f) => Said::Frame(f.data.to_vec()),
                 Event::Signal(s) => Said::Signal(s),
@@ -821,60 +876,74 @@ mod tests {
                 Event::CardBack => Said::CardBack,
             };
             said.push((time.now(), s));
-        });
-        (said, result, tries)
+        })
+        .unwrap();
+        let opens = opens.lock().unwrap().clone();
+        (said, opens)
+    }
+
+    /// `d` within one look and one wait of `want`.
+    fn about(d: Duration, want: Duration) -> bool {
+        d >= want && d <= want + FIND_EVERY + POLL_SLICE
     }
 
     #[test]
-    fn a_card_pulled_out_is_waited_for_and_the_feed_goes_on() {
-        let (said, result, tries) = run_pulled(ms(4000), false, ms(8000));
-        result.unwrap();
+    fn a_card_pulled_out_is_opened_once_when_back_whole_and_settled() {
+        let (said, opens) = run_pulled(vec![(ms(4000), FOREVER)], Duration::ZERO, ms(10_000), None);
+        // Opened once, SETTLE after it was seen back whole, not before.
+        assert_eq!(opens.len(), 1, "{opens:?}");
+        assert!(about(opens[0], ms(4000) + ms(2000)), "2 s after it was whole: {opens:?}");
+        // Unplugged once, at once, then the picture back; no "nothing
+        // arrives" while the fresh card starts up.
         let s: Vec<Signal> = signals(&said).into_iter().map(|(_, s)| s).collect();
-        // Unplugged once, at once (not "stopped, nothing arrives" first),
-        // then the picture back; no "nothing arrives" while the fresh card
-        // starts up.
         assert_eq!(s, [no_signal(Since::Stopped, Reason::Unplugged("the card is gone".into())), Signal::Picture]);
         let back = said.iter().position(|(_, x)| *x == Said::CardBack).expect("the card back");
-        assert!(said[back].0 >= ms(4000) && said[back].0 < ms(4000) + FIND_EVERY + POLL_SLICE, "{:?}", said[back].0);
+        assert_eq!(said[back].0, opens[0]);
         assert!(matches!(said[back + 1].1, Said::Signal(Signal::Picture)));
-        // About once a second while it was out.
-        let n = tries.load(Ordering::Relaxed);
-        assert!((3..=4).contains(&n), "{n} tries");
         // The fresh source's numbers start over: no gap across the pull.
         assert!(!said.iter().any(|(_, x)| matches!(x, Said::Gap(..))));
-        assert!(said[back..].iter().filter(|(_, x)| matches!(x, Said::Frame(_))).count() > 30);
+        assert!(said[back..].iter().filter(|(_, x)| matches!(x, Said::Frame(_))).count() > 60);
     }
 
     #[test]
-    fn a_card_there_but_failing_to_open_is_waited_for_too() {
-        let (said, result, _) = run_pulled(ms(3000), true, ms(7000));
-        result.unwrap();
-        assert!(said.iter().any(|(_, x)| *x == Said::CardBack));
+    fn a_card_not_whole_or_whole_for_under_2_s_is_not_opened() {
+        // Whole for about a second (its video back, its audio not yet, say),
+        // then gone, then back whole for good.
+        let (_, opens) = run_pulled(vec![(ms(2400), ms(3600)), (ms(6000), FOREVER)], Duration::ZERO, ms(12_000), None);
+        assert_eq!(opens.len(), 1, "{opens:?}");
+        assert!(about(opens[0], ms(6000) + ms(2000)), "{opens:?}");
+    }
+
+    #[test]
+    fn opens_that_fail_back_off_1_2_4_8_8_s() {
+        let (_, opens) = run_pulled(vec![(ms(2000), FOREVER)], FOREVER, FOREVER, Some(ms(30_000)));
+        let gaps: Vec<Duration> = opens.windows(2).map(|w| w[1] - w[0]).collect();
+        let want = [1, 2, 4, 8, 8].map(Duration::from_secs);
+        assert!(gaps.len() >= want.len(), "{opens:?}");
+        for (got, want) in gaps.iter().zip(want) {
+            assert!(*got >= want && *got <= want + POLL_SLICE, "{gaps:?}");
+        }
+    }
+
+    #[test]
+    fn a_card_gone_and_back_again_starts_the_backoff_over() {
+        // Back whole at 2 s, its opens failing; gone at 8 s; back at 12 s.
+        let (said, opens) = run_pulled(vec![(ms(2000), ms(8000)), (ms(12_000), FOREVER)], ms(15_000), ms(20_000), None);
+        let first_after = opens.iter().position(|&t| t >= ms(12_000)).expect("opens after the return");
+        assert!(about(opens[first_after], ms(12_000) + ms(2000)), "settled again: {opens:?}");
+        // Its next open 1 s on, not where the first round's backoff was.
+        let gap = opens[first_after + 1] - opens[first_after];
+        assert!(gap >= ms(1000) && gap <= ms(1000) + POLL_SLICE, "{opens:?}");
         assert_eq!(signals(&said).last().map(|(_, s)| s.clone()), Some(Signal::Picture));
     }
 
     #[test]
     fn quit_while_the_card_is_out_ends_the_run() {
-        let time = Time::default();
-        let quit = Arc::new(AtomicBool::new(false));
-        let first = Scripted { format: FORMAT, stride: 8, time: time.clone(), steps: frames(ms(0), ms(100), 0).into(), end: ms(200), gone: true, quit: quit.clone() };
-        let quit_at = Arc::new(AtomicU64::new(0));
-        let mut find: Finder = {
-            let (time, quit, quit_at) = (time.clone(), quit.clone(), quit_at.clone());
-            Box::new(move || {
-                if time.now() >= ms(3000) && !quit.swap(true, Ordering::Relaxed) {
-                    quit_at.store(time.now().as_nanos() as u64, Ordering::Relaxed);
-                }
-                Ok(None)
-            })
-        };
-        let result = run_finding(Box::new(first), &mut find, &time, &quit, &Dropped::default(), &mut |_| {});
-        result.unwrap();
-        let quit_at = Duration::from_nanos(quit_at.load(Ordering::Relaxed));
-        assert!(quit_at >= ms(3000), "quit was set");
-        assert!(time.now() <= quit_at + POLL_SLICE, "ended {:?} after quit", time.now() - quit_at);
+        let (said, opens) = run_pulled(Vec::new(), Duration::ZERO, FOREVER, Some(ms(3000)));
+        assert!(opens.is_empty());
+        let last = said.last().unwrap().0;
+        assert!(last < ms(3000), "nothing after quit: {last:?}");
     }
-
     #[test]
     fn the_unplugged_state_is_said_as_the_glossary_has_it() {
         let s = no_signal(Since::Stopped, Reason::Unplugged("The video recording device is no longer present.".into()));

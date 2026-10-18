@@ -137,7 +137,7 @@ pub struct Plan {
     /// Finds the card again when it is pulled out (#40): the run waits for
     /// it instead of ending `CaptureEnded`. None: the source failing ends
     /// the run (the setup wizard's feed, which says so on its page).
-    pub find: Option<Finder>,
+    pub find: Option<Box<dyn Finder>>,
 }
 
 /// One window over `source`, until it ends; why it did.
@@ -224,7 +224,7 @@ pub fn run(host: &mut dyn Host, mut source: Box<dyn FrameSource>, plan: Plan, qu
                 }
             };
             let result = match find {
-                Some(mut find) => capture::run_finding(source, &mut find, &capture::Monotonic, &stop, &live.dropped, &mut on_event),
+                Some(mut find) => capture::run_finding(source, &mut *find, &capture::Monotonic, &stop, &live.dropped, &mut on_event),
                 None => capture::run(&mut *source, &capture::Monotonic, &stop, &live.dropped, &mut on_event),
             };
             // The run ends with its capture, unless it ended first.
@@ -446,18 +446,26 @@ mod tests {
         Plan { seconds, live: Arc::new(Live::new()), log_signal: false, stats: false, find: None }
     }
 
-    /// `plan`, with a finder that finds nothing `misses` times, then a
+    /// A card that is back whole (`back`) or never is, and opens as a
     /// fresh card of `frames` frames.
-    fn finding(seconds: Option<Duration>, misses: u32, frames: u32) -> Plan {
-        let mut left = misses;
-        let find: Finder = Box::new(move || {
-            if left == 0 {
-                return Ok(Some(card(frames, false)));
-            }
-            left -= 1;
-            Ok(None)
-        });
-        Plan { find: Some(find), ..plan(seconds) }
+    struct Back {
+        back: bool,
+        frames: u32,
+    }
+
+    impl Finder for Back {
+        fn whole(&mut self) -> bool {
+            self.back
+        }
+
+        fn open(&mut self) -> Result<Box<dyn FrameSource>, String> {
+            Ok(card(self.frames, false))
+        }
+    }
+
+    /// `plan`, with a finder: the card back whole at once (`back`), or never.
+    fn finding(seconds: Option<Duration>, back: bool, frames: u32) -> Plan {
+        Plan { find: Some(Box::new(Back { back, frames })), ..plan(seconds) }
     }
 
     fn card(frames: u32, fail: bool) -> Box<dyn FrameSource> {
@@ -491,14 +499,14 @@ mod tests {
         // Gone after 2 frames, found again at once: the window sees the
         // fresh card's frames and closes after 20 in all.
         let mut host = Scripted::new([Act::CloseAfter(20)]);
-        let p = finding(None, 0, 100);
+        let p = finding(None, true, 100);
         let live = p.live.clone();
         assert_eq!(run(&mut host, card(2, true), p, &quit), Outcome::Closed);
         assert_eq!(host.frames, 20);
         assert!(live.counts().frames >= 20);
         // Never found: --seconds and a signal still end the run as before.
         let mut host = Scripted::new([Act::Wait, Act::Wait]);
-        assert_eq!(run(&mut host, card(2, true), finding(Some(Duration::from_millis(300)), u32::MAX, 0), &quit), Outcome::TimeUp);
+        assert_eq!(run(&mut host, card(2, true), finding(Some(Duration::from_millis(300)), false, 0), &quit), Outcome::TimeUp);
         let signal = {
             let quit = quit.clone();
             thread::spawn(move || {
@@ -506,7 +514,7 @@ mod tests {
                 quit.request();
             })
         };
-        assert_eq!(run(&mut host, card(2, true), finding(None, u32::MAX, 0), &quit), Outcome::Signal);
+        assert_eq!(run(&mut host, card(2, true), finding(None, false, 0), &quit), Outcome::Signal);
         signal.join().unwrap();
     }
 
