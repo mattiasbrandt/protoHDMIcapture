@@ -1,7 +1,7 @@
 # protoHDMIcapture
 
 A low-latency viewer for playing an HDMI device through a cheap USB capture
-card on Linux. It shows the picture and plays the sound; it does not record
+card on Linux and Windows. It shows the picture and plays the sound; it does not record
 or stream.
 
 ## Language

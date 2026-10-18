@@ -2,6 +2,8 @@
 
 Research note, 2026-10-13. Scope: what the vendor capture apps offer, what
 protoHDMIcapture does today, and what is worth building on Linux.
+The README sections it cites are the README before its 2026-10-19
+rewrite, at [`418f167`](https://github.com/mattiasbrandt/protoHDMIcapture/blob/418f167/README.md).
 
 Verification key: **[fetched]** = read from the page this session;
 **[snippet]** = seen only in search-result text (page not opened, or

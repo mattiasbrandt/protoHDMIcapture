@@ -1,8 +1,9 @@
 # Installing the Rust viewer
 
-The Rust viewer (`protohdmicapture`, in `viewer/`) is the coming replacement
-for `view.sh` + mpv (#10). It is opt-in until it does everything view.sh
-does; both read the same settings file, `~/.config/protohdmicapture/config`.
+The Rust viewer (`protohdmicapture`, in `viewer/`) is the viewer the
+releases ship; `view.sh` + mpv, run from a checkout, is the older
+alternative ([docs/view-sh.md](../docs/view-sh.md)). Both read the same
+settings file, `~/.config/protohdmicapture/config`.
 With no settings file, it opens the setup wizard in its window.
 
 On Linux it needs a Wayland desktop with a Vulkan driver, and PipeWire for
