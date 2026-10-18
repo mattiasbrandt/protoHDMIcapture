@@ -614,6 +614,79 @@ impl Drop for Running<'_> {
     }
 }
 
+/// The card's sample times recorded for the lost-frame counter (#34), and
+/// whatever Media Foundation says of each sample, to look for a cue of a
+/// lost frame other than the times.
+#[cfg(test)]
+mod trace {
+    use std::collections::BTreeSet;
+    use std::io::Write;
+
+    use windows::Win32::Media::MediaFoundation::MFSampleExtension_Discontinuity;
+    use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+
+    use super::*;
+
+    /// One CSV row a sample: the sample time and the device time stamp
+    /// (100 ns), when it was dequeued (ns, QPC like `now_monotonic`), the
+    /// reader's flags, and `MFSampleExtension_Discontinuity` (-1: not set).
+    /// Every attribute set the samples carry is said on stderr when it
+    /// changes. The card: `CARD_SERIAL`, else the first device listed.
+    ///
+    /// `TRACE_SECONDS=600 TRACE_OUT=…\trace.csv cargo test --release -- --ignored record_sample_trace --nocapture`
+    #[test]
+    #[ignore = "opens the card, for TRACE_SECONDS (default 600)"]
+    fn record_sample_trace() {
+        let seconds: u64 = std::env::var("TRACE_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(600);
+        let out = std::env::var("TRACE_OUT").expect("TRACE_OUT, the CSV to write");
+        let serial = std::env::var("CARD_SERIAL").unwrap_or_default();
+        let node = list().into_iter().find(|n| serial.is_empty() || n.serial == serial).expect("the card");
+        let link = node.path.to_string_lossy().into_owned();
+        let want = Format::from_settings("1920x1080", "60", "yuyv422").unwrap();
+        on_mta_thread(move || {
+            let (reader, _) = reader(&link, want, None)?;
+            let mut csv = std::io::BufWriter::new(std::fs::File::create(&out).map_err(|e| e.to_string())?);
+            writeln!(csv, "time_100ns,device_100ns,dequeued_ns,flags,discontinuity").map_err(|e| e.to_string())?;
+            let end = std::time::Instant::now() + Duration::from_secs(seconds);
+            let (mut rows, mut set) = (0u64, BTreeSet::new());
+            while std::time::Instant::now() < end {
+                let (mut flags, mut time) = (0u32, 0i64);
+                let mut sample: Option<IMFSample> = None;
+                // Safety: out-pointers on a live reader; synchronous.
+                unsafe { reader.ReadSample(STREAM, 0, None, Some(&mut flags), Some(&mut time), Some(&mut sample)) }.map_err(|e| e.to_string())?;
+                let dequeued = now_monotonic().as_nanos();
+                let Some(s) = sample else {
+                    writeln!(csv, "{time},,{dequeued},{flags:#x},").map_err(|e| e.to_string())?;
+                    continue;
+                };
+                // Safety: reads of a live sample's attributes.
+                let (device, disc, now_set) = unsafe {
+                    let device = s.GetUINT64(&MFSampleExtension_DeviceTimestamp).map_or(String::new(), |d| d.to_string());
+                    let disc = s.GetUINT32(&MFSampleExtension_Discontinuity).map_or(-1i64, i64::from);
+                    let mut keys = BTreeSet::new();
+                    for i in 0..s.GetCount().unwrap_or(0) {
+                        let mut key = GUID::zeroed();
+                        if s.GetItemByIndex(i, &mut key, None::<*mut PROPVARIANT>).is_ok() {
+                            keys.insert(format!("{key:?}"));
+                        }
+                    }
+                    (device, disc, keys)
+                };
+                if now_set != set {
+                    eprintln!("sample {rows}: attributes {now_set:?}");
+                    set = now_set;
+                }
+                writeln!(csv, "{time},{device},{dequeued},{flags:#x},{disc}").map_err(|e| e.to_string())?;
+                rows += 1;
+            }
+            csv.flush().map_err(|e| e.to_string())?;
+            eprintln!("{rows} samples in {seconds} s");
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{link_usb_id, usb_id, usb_serial};
