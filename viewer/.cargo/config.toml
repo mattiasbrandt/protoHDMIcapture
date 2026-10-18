@@ -1,0 +1,5 @@
+# The MSVC C runtime linked in (#14): the Windows exe then needs no
+# VCRUNTIME140.dll or Visual C++ Redistributable, and runs on a clean
+# Windows from its MSI. Other targets are untouched.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
