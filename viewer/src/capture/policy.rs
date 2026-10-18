@@ -161,8 +161,8 @@ pub fn run(
 ///   block's start: in FPS's, a card 0.5 % off smears the MS2130's band
 ///   over the whole turn within one of its cycles.
 /// - **The warm-up:** until `WARM` samples, a step counts only what wander
-///   cannot be; then the warm-up's frame numbers are found again (`relabel`),
-///   and the frames lost in it beyond those are said then.
+///   cannot be; then a frame is added at each long step where one closes
+///   the warm-up's band (`relabel`), and those frames are said then.
 /// - **The slope stays within `SLOPE` of FPS's period:** the MS2130's times
 ///   also fit a line 4 % off FPS, each long step a frame lost; a mode is
 ///   opened only within 0.5 % of FPS (mf.rs).
@@ -170,9 +170,10 @@ pub fn run(
 /// A loss is said at the sample after it (in the warm-up, up to `WARM`
 /// samples late). Simulated: no made-up loss and every run right on #34's
 /// matrix (flat, jittered and wandering times, the ticket's and the
-/// MS2130's as traced, drift -0.5 to +0.5 %); on the MS2130's real 10
-/// minute trace, 1343 where its cadence says 1340.3 +- 1.4
-/// (`the_real_trace_counts_its_cadences_losses`).
+/// MS2130's as traced, drift -0.5 to +0.5 %; seeds 7, 11 and 13), and so
+/// here (`the_matrix_makes_up_no_loss_and_counts_every_run`); on the
+/// MS2130's real 10 minute trace, 1344 where its cadence says 1340.3 +-
+/// 1.4 (`the_real_trace_counts_its_cadences_losses`).
 struct TimeGaps {
     period: f64,
     /// The first sample's time: the others are taken from it, in f64.
@@ -973,7 +974,7 @@ mod tests {
     /// two frames a second really lost: the frames its cadence says were
     /// sent less those received. Its 24-frame cycles with no step over 1.5
     /// periods but the closing long one give the card's period (60.0005 Hz),
-    /// 1340.3 +- 1.4 lost at two sigma. The counter says 1343 (the
+    /// 1340.3 +- 1.4 lost at two sigma. The counter says 1344 (the
     /// simulator too): the few over are steps of 1.87-1.94 periods, where
     /// the wander's long step (1.877) and a frame lost in a short one (1.96)
     /// are 0.05-0.09 apart; a line of the cadence's own slope says 1342.
