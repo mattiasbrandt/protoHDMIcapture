@@ -715,9 +715,9 @@ mpv)
     # renderer, which say nothing about this pipeline.
     [ "$DEBUG" != off ] && args+=("--msg-level=all=v,vo/gpu-next/libplacebo=info,osd/libass=warn,clipboard=warn")
     info "mpv ${args[*]}"
-    # MANGOHUD=1 is set globally in ~/.config/environment.d/99-proton-amd.conf and
-    # MangoHud is an *implicit* Vulkan layer, so it injects into gpu-next and adds
-    # an overlay draw to every frame. Not wanted in a latency path.
+    # A session-wide MANGOHUD=1 (often set for gaming) injects MangoHud, an
+    # *implicit* Vulkan layer, into gpu-next, adding an overlay draw to every
+    # frame. Not wanted in a latency path.
     # The VIDIOC_QBUF line is libavdevice's noisy v4l2 teardown on exit; it is
     # harmless (verified: no re-enumeration) and only that exact line is dropped.
     ( _close_locks; MANGOHUD=0 exec mpv "${args[@]}" ) \
