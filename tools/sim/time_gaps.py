@@ -56,8 +56,14 @@ class Banded:
       now (its slope pivots on a point up to 4 windows back).
     - The warm-up: until the line has WARM samples, a step counts only what
       wander cannot be (past WARM_STEP periods, rounded down past 0.9 of
-      the wander); then the warm-up's frame numbers are found again from the
-      phase-sloped line, and the frames lost in it beyond those are said.
+      the wander); then the warm-up's frame numbers are found again, the
+      nearest places on a line of either slope (the phase's, the least-
+      squares), the set whose band is narrowest; taken, and the frames
+      beyond the steps' count said, only if that band is TIGHTER than the
+      steps' numbers give (a frame missed splits the band a period apart).
+    - The phase is taken in periods of the slope as it stood at each
+      block's start: in FPS's, a card 0.5 % off smears the MS2130's band
+      over the whole turn within a cycle.
     - The slope stays within SLOPE of FPS's period: the MS2130's 23 short
       steps make a second line 4 % off FPS fit the same times, each long
       step a frame lost; a mode is opened only within 0.5 % of FPS.
@@ -84,6 +90,7 @@ class Banded:
         s.acc = [0.0, 0.0, 0, 0.0]  # this block: cos, sin, samples, time sum
         s.centres = deque(maxlen=s.PHASE_BLOCKS)  # (mean time, unwrapped centre)
         s.turn = None  # the centres' turning a time unit, once known
+        s.frame = s.p  # the period this block's phases are taken in
 
     # The least-squares sums, kept relative to `ref` for their precision.
     def _sum(s, k, t, sign):
@@ -107,21 +114,26 @@ class Banded:
             s._rebase()
 
     def _phase(s, t):
-        """This sample into the phase's blocks: their centres, unwrapped."""
-        a = 2 * math.pi * (t - s.t0) / s.p
+        """This sample into the phase's blocks. A block's phases are taken
+        in periods of the slope as it stood at the block's start (`frame`),
+        not FPS's: off by 0.5 %, FPS's period smears the MS2130's 0.88-wide
+        band over the whole turn within one cycle, and its circular mean
+        then means nothing. Each centre is turned back into FPS's periods
+        for keeping, and unwrapped against where the slope puts it."""
+        if s.acc[2] == 0:
+            s.frame = s._slope() if s.sums[0] >= 2 else s.p
+        a = 2 * math.pi * (t - s.t0) / s.frame
         s.acc[0] += math.cos(a)
         s.acc[1] += math.sin(a)
         s.acc[2] += 1
         s.acc[3] += t
         if s.acc[2] == s.BLOCK:
-            c = math.atan2(s.acc[1], s.acc[0]) / (2 * math.pi)
             tm = s.acc[3] / s.BLOCK
+            # In the frame's periods, then FPS's: phi_p = phi_f - (t - t0)(1/f - 1/p).
+            c = math.atan2(s.acc[1], s.acc[0]) / (2 * math.pi) - (tm - s.t0) * (1 / s.frame - 1 / s.p)
             if s.centres:
-                # Unwrapped against where the turning so far puts it: a card
-                # 0.5 % off turns a quarter turn a block, near the half turn
-                # an unwrap against the last centre alone can slip.
                 lt, lc = s.centres[-1]
-                pred = lc + (s.turn or 0.0) * (tm - lt)
+                pred = lc + (1 / s.p - 1 / s.frame) * (tm - lt)
                 c = pred + ((c - pred + 0.5) % 1.0 - 0.5)
             s.centres.append((tm, c))
             s.acc = [0.0, 0.0, 0, 0.0]
@@ -159,19 +171,49 @@ class Banded:
         ref_k, ref_t = s.pts[0]
         ks = [k - ref_k for k, _ in s.pts]
         ts = [t - ref_t for _, t in s.pts]
+        old = list(ks)
+        # Both slopes: the phase's (a free one over a few seconds takes a
+        # frame lost in them for drift: one period in 300 samples is 0.33 %),
+        # and the least-squares (the phase's from a few blocks is shakiest
+        # at the widest drift). The numbers whose band is the narrowest.
+        kinds = (True, False) if s.turn is not None else (False,)
+        cands = [s._labels(old, ts, phase) for phase in kinds]
+        width, ks = min(((min(s._width(c, ts, ph) for ph in kinds), c) for c in cands), key=lambda x: x[0])
+        extra = ks[-1] - old[-1]
+        if extra <= 0:
+            return 0
+        # Taken only if they explain the times better: a frame lost and
+        # missed leaves the warm-up's places against its line split a period
+        # apart, a band wider than the wander's, which the right numbers
+        # close; numbers made up do not.
+        if width > min(s._width(old, ts, ph) for ph in kinds) - s.TIGHTER * s.p:
+            return 0
+        s.pts = deque((k + ref_k, t + ref_t) for k, t in zip(ks, ts))
+        s._rebase()
+        s.k = s.pts[-1][0]
+        return extra
+
+    TIGHTER = 0.05  # periods the warm-up's band must narrow by to re-label
+
+    def _fit(s, ks, ts, phase):
+        """A line through (ks, ts): the phase's slope or the least-squares
+        one, within SLOPE; (time at frame 0, slope)."""
+        n = len(ks)
+        sk, st = sum(ks), sum(ts)
+        if phase:
+            b = 1 / (1 / s.p - s.turn)
+        else:
+            skk = sum(k * k for k in ks)
+            skt = sum(k * t for k, t in zip(ks, ts))
+            b = (n * skt - sk * st) / (n * skk - sk * sk)
+        b = min(max(b, s.p * (1 - s.SLOPE)), s.p * (1 + s.SLOPE))
+        return (st - b * sk) / n, b
+
+    def _labels(s, ks, ts, phase):
+        """Each time's frame number again, the nearest place on the line
+        fitted with the last ones, until they settle."""
         for _ in range(8):
-            n = len(ks)
-            sk, st = sum(ks), sum(ts)
-            if s.turn is not None:
-                # The phase's: a free slope over a few seconds takes a frame
-                # lost in them for drift (one period in 300 samples is 0.33 %).
-                b = 1 / (1 / s.p - s.turn)
-            else:
-                skk = sum(k * k for k in ks)
-                skt = sum(k * t for k, t in zip(ks, ts))
-                b = (n * skt - sk * st) / (n * skk - sk * sk)
-            b = min(max(b, s.p * (1 - s.SLOPE)), s.p * (1 + s.SLOPE))
-            a = (st - b * sk) / n
+            a, b = s._fit(ks, ts, phase)
             base = round((ts[0] - a) / b)
             new = [0]
             for t in ts[1:]:
@@ -179,13 +221,15 @@ class Banded:
             if new == ks:
                 break
             ks = new
-        extra = ks[-1] - (s.pts[-1][0] - ref_k)
-        if extra <= 0:
-            return 0
-        s.pts = deque((k + ref_k, t + ref_t) for k, t in zip(ks, ts))
-        s._rebase()
-        s.k = s.pts[-1][0]
-        return extra
+        return ks
+
+    def _width(s, ks, ts, phase):
+        """The 5th-95th percentile width of the places of `ts` against a line
+        fitted to them with these frame numbers."""
+        a, b = s._fit(ks, ts, phase)
+        n = len(ks)
+        band = sorted(t - (a + b * k) for k, t in zip(ks, ts))
+        return band[-1 - n // 20] - band[n // 20]
 
     def lost(s, t):
         if s.k is None:
@@ -225,14 +269,22 @@ class Banded:
 def card(n, drift_pct, shape, rng):
     """The ticket's models. flat: on the grid; jit: 5 % of a period of noise
     per time; saw: 16.03 ms 24 times then 31.4 ms (mean scaled to the
-    period). drift_pct > 0 is a slow card."""
+    period). And ms24, the MS2130 as the real trace has it: 23 steps of
+    16.028 ms, one of 31.285 (the medians of its clean cycles), mean
+    scaled to the period. drift_pct > 0 is a slow card."""
     m = (24 * 160300 + 314000) / 25
+    m24 = (23 * 160276.5 + 312849) / 24
     ph = rng.randrange(25)
     t = rng.uniform(0, 1e6)
     out = [t]
     for i in range(1, n):
         j = (i + ph) % 25
-        d = ((314000 if j == 0 else 160300) / m * P) if shape == 'saw' else P
+        if shape == 'saw':
+            d = (314000 if j == 0 else 160300) / m * P
+        elif shape == 'ms24':
+            d = (312849 if (i + ph) % 24 == 0 else 160276.5) / m24 * P
+        else:
+            d = P
         t += d * (1 + drift_pct / 100)
         out.append(t)
     if shape == 'jit':
@@ -254,10 +306,10 @@ def total(counter, times):
     return sum(c.lost(t) for t in times)
 
 
-def matrix(counter, seed=7):
+def matrix(counter, seed=7, shapes=('flat', 'saw', 'jit')):
     rng = random.Random(seed)
     phantom = wrong = runs = 0
-    for shape in ['flat', 'saw', 'jit']:
+    for shape in shapes:
         for d in [-0.5, -0.3, -0.13, -0.05, 0, 0.05, 0.13, 0.3, 0.5]:
             for _ in range(3):
                 base = card(5000, d, shape, rng)
@@ -300,6 +352,7 @@ def truth(times):
 if __name__ == '__main__':
     for c in (Leaky, Banded):
         print('%s: phantom losses %d, runs counted wrong %d of %d' % ((c.__name__,) + matrix(c)))
+        print('  the MS2130 as traced (ms24): phantom losses %d, runs counted wrong %d of %d' % matrix(c, shapes=('ms24',)))
     if len(sys.argv) > 1:
         times = trace(sys.argv[1])
         lost, err, rate = truth(times)
