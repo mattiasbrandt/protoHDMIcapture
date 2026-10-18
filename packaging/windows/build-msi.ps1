@@ -51,7 +51,7 @@ if ($crt) {
     throw "build-msi: $exe imports the C runtime ($(($crt | ForEach-Object Trim) -join ', ')): viewer\.cargo\config.toml's +crt-static did not apply"
 }
 
-$wixVersion = (wix --version) -replace '\+.*$', ''
+$wixVersion = (Invoke-Native 'wix --version' { wix --version }) -replace '\+.*$', ''
 if ($wixVersion -notlike '7.*') { throw "build-msi: WiX 7 is needed, found $wixVersion" }
 
 New-Item -ItemType Directory -Force $OutDir | Out-Null
