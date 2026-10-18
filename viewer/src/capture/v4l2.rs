@@ -118,5 +118,7 @@ impl Stream for Running<'_> {
             take(Raw { data: &buf[..], captured: buf.timestamp(), dequeued, mark: Mark::Sequence(buf.sequence()), flagged: buf.is_error() });
             Ok(())
         })
+        // The node gone under the dequeue: the card unplugged, as POLLERR above.
+        .map_err(|e| if e.raw_os_error() == Some(libc::ENODEV) { io::Error::other(format!("dequeue: {e} (the card is gone?)")) } else { e })
     }
 }
