@@ -10,16 +10,22 @@
   <a href="https://github.com/mattiasbrandt/protoHDMIcapture/actions/workflows/release.yml"><img alt="release" src="https://github.com/mattiasbrandt/protoHDMIcapture/actions/workflows/release.yml/badge.svg"></a>
 </p>
 
-A low-latency viewer for an HDMI source (a console, a camera, another PC)
-through a cheap USB capture card, on Linux and Windows. It shows the picture
-and plays the sound; it does not record or stream.
+Play a console, a camera or another PC on your screen through a USB capture
+card, on Linux and Windows. protoHDMIcapture shows the picture and plays the
+sound, and nothing else: no recording, no streaming.
 
-- **Fast:** about 45 ms median from a frame reaching the PC to the screen at
-  1080p60 (p99 54 ms), with the sound beside the picture, not in its way.
-- **One program:** capture, renderer, audio loopback, overlay, setup wizard
-  and dashboard in one binary, `protohdmicapture`.
-- **Generic:** any UVC capture card and any HDMI source; capture card
-  profiles and source profiles carry what is known about each.
+- **No bloated vendor app.** No account, no streaming suite, no background
+  service. One program that opens straight to the picture.
+- **Simple and open source.** One binary, one plain-text settings file, and
+  a setup wizard that asks only what it needs. MIT or Apache-2.0, built in
+  the open.
+- **Built for low latency.** About 45 ms from a frame reaching the PC to the
+  screen at 1080p60. The GPU does the picture work, and the sound runs
+  beside the picture instead of holding it back.
+- **Made for cheap no-name capture cards.** The capture cards sold under
+  dozens of names for the price of a game, with a MacroSilicon chip inside.
+  The viewer recognises the chip by its USB id, knows its quirks, and picks
+  its best mode.
 
 It started as a way to play a PS5 in a window, so most measurements were
 taken with a PS5, the MS2130 and the MS2109. Nothing in it is PS5-specific.
