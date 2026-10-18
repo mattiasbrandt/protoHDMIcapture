@@ -1,8 +1,7 @@
 # Maintainer: Mattias Brandt <mattias@protonic.net>
 #
 # The Rust viewer (viewer/), built from a tagged release (#14). On a new
-# tag: set pkgver, then `updpkgsums` and `makepkg --printsrcinfo > .SRCINFO`
-# (b2sums stays SKIP here because no release is tagged yet).
+# tag: set pkgver, then `updpkgsums` and `makepkg --printsrcinfo > .SRCINFO`.
 
 pkgname=protohdmicapture
 pkgver=0.1.0
@@ -39,7 +38,7 @@ optdepends=(
 # Rust's own optimisation is unaffected.
 options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-b2sums=('SKIP')
+b2sums=('96b0f25cc27d89ad55ff45180adc8f5536dcbbb45a3cdf270b8ffaef0148f47f91f76fe650185a19ba92694cf538b98ef4af9751fc36534940fc95f449303183')
 
 _src="protoHDMIcapture-$pkgver"
 

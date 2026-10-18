@@ -22,6 +22,6 @@ pkgbase = protohdmicapture
 	optdepends = hyprland: refresh matching and window placement
 	options = !lto
 	source = protohdmicapture-0.1.0.tar.gz::https://github.com/mattiasbrandt/protoHDMIcapture/archive/refs/tags/v0.1.0.tar.gz
-	b2sums = SKIP
+	b2sums = 96b0f25cc27d89ad55ff45180adc8f5536dcbbb45a3cdf270b8ffaef0148f47f91f76fe650185a19ba92694cf538b98ef4af9751fc36534940fc95f449303183
 
 pkgname = protohdmicapture
