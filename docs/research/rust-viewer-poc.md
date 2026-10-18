@@ -2,8 +2,11 @@
 
 Research note, 2026-10-14. Scope: whether a single-process Rust viewer
 (capture, display and audio in one program) meets #5's go criteria on Linux
-with the MS2130 and a PS5. The code is `poc/rust/` (`hdmipoc capture | view |
-audio`); the run logs it cites are `poc/rust/runs/`. Measured on: RX 9070 XT
+with the MS2130 and a PS5. The code was `poc/rust/` (`hdmipoc capture | view |
+audio`), and the run logs it cites were `poc/rust/runs/`; both left the tree
+once `viewer/` replaced the PoC, and are kept at
+[`418f167`](https://github.com/mattiasbrandt/protoHDMIcapture/tree/418f167/poc/rust),
+where every `poc/rust/` path below resolves. Measured on: RX 9070 XT
 (RADV, Mesa 26.2.2), Hyprland, wgpu 30.0.1, winit 0.30.13, cpal 0.18.2,
 PipeWire; every run with `MANGOHUD=0` (see "What broke").
 
@@ -187,7 +190,7 @@ PoC it too matched the PoC's own timing exactly (41.50 / 49.77 / 51.01).
 - view.sh for a full 10 minutes (~90 s; the user quit it) and mpv's frame
   identity (the comparison uses the lower bound above).
 - Offering the `linuxvideo` patch upstream
-  (`poc/rust/vendor/linuxvideo-timestamp-sequence.patch`): not done.
+  (`viewer/vendor/linuxvideo-timestamp-sequence.patch`): not done.
 
 ## Open questions for Windows
 
