@@ -463,6 +463,8 @@ struct Policy {
     /// The latest buffer that was no picture: when, and why.
     last_drop: Option<(Duration, Reason)>,
     state: Signal,
+    /// When the last buffer of any kind arrived.
+    last_buffer: Option<Duration>,
     /// The last mark seen, and the count `Mark::Time` gaps are numbered by.
     last_mark: Option<Mark>,
     counted: u32,
@@ -482,6 +484,7 @@ impl Policy {
             last_picture: None,
             last_drop: None,
             state: Signal::Picture,
+            last_buffer: None,
             last_mark: None,
             counted: 0,
             time_gaps: TimeGaps::new(format.fps),
@@ -491,6 +494,16 @@ impl Policy {
     }
 
     fn buffer(&mut self, raw: Raw<'_>, dropped: &Dropped, on_event: &mut dyn FnMut(Event<'_>)) {
+        // Nothing arrived for STOPPED_AFTER: the signal stopped (an HDMI
+        // pull, the source asleep). The frames that never came then are no
+        // capture losses (#20: a 26 s pull was said as 1553 lost), so the
+        // counting starts afresh: no step across the silence, and a new
+        // grid for sample times.
+        if self.last_buffer.is_some_and(|t| raw.dequeued.saturating_sub(t) >= STOPPED_AFTER) {
+            self.last_mark = None;
+            self.time_gaps = TimeGaps::new(self.format.fps);
+        }
+        self.last_buffer = Some(raw.dequeued);
         if let Some(gap) = self.gap(raw.mark) {
             on_event(gap);
         }
@@ -784,6 +797,41 @@ mod tests {
         let gaps: Vec<&Said> = said.iter().map(|(_, s)| s).filter(|s| matches!(s, Said::Gap(..))).collect();
         // Jitter under 1.5 periods is no gap; 2p -> 5p skips 2.
         assert_eq!(gaps, [&Said::Gap(3, 6, 2)]);
+    }
+
+    /// The gaps said in `said`.
+    fn gaps_in(said: &[(Duration, Said)]) -> Vec<&Said> {
+        said.iter().map(|(_, s)| s).filter(|s| matches!(s, Said::Gap(..))).collect()
+    }
+
+    #[test]
+    fn the_frames_that_never_came_while_the_signal_stopped_are_no_gap() {
+        // #20: the HDMI pulled for 26 s, then back. Sample times (Windows):
+        // the times go on 26 s later, on a grid of their own.
+        let p: i64 = 166_667;
+        let timed = |i: u64, at_ms: u64, t: i64| Step { at: ms(at_ms) + Duration::from_nanos(i * P), data: vec![16; FORMAT.frame_size()], mark: Mark::Time(t), flagged: false };
+        let mut steps: Vec<Step> = (0..60).map(|i| timed(i, 0, i as i64 * p)).collect();
+        let back = 27_000_u64;
+        steps.extend((0..60).map(|i| timed(i, back, (back as i64 * 10_000) + 12_345 + i as i64 * p)));
+        let (said, _, result) = run_script(FORMAT, 8, steps, ms(back + 1100), false);
+        result.unwrap();
+        assert_eq!(gaps_in(&said), Vec::<&Said>::new(), "no 1553 lost across the pull");
+        // A real loss after it is still said: 3 frames out of the new grid.
+        let mut steps: Vec<Step> = (0..60).map(|i| timed(i, 0, i as i64 * p)).collect();
+        steps.extend((0..60).map(|i| timed(i, back, (back as i64 * 10_000) + if i < 30 { i as i64 * p } else { (i as i64 + 3) * p })));
+        let (said, _, _) = run_script(FORMAT, 8, steps, ms(back + 1100), false);
+        assert_eq!(gaps_in(&said).len(), 1, "{:?}", gaps_in(&said));
+        assert!(matches!(gaps_in(&said)[0], Said::Gap(_, _, 3)), "{:?}", gaps_in(&said));
+        // Sequence numbers (Linux) that jump across the silence: no gap
+        // either; a jump without a silence still is one.
+        let mut steps = frames(ms(0), ms(1000), 0);
+        steps.extend(frames(ms(4000), ms(4100), 500));
+        let (said, _, _) = run_script(FORMAT, 8, steps, ms(5000), false);
+        assert_eq!(gaps_in(&said), Vec::<&Said>::new());
+        let mut steps = frames(ms(0), ms(1000), 0);
+        steps.extend(frames(ms(1000) + Duration::from_nanos(P), ms(1100), 70));
+        let (said, _, _) = run_script(FORMAT, 8, steps, ms(1200), false);
+        assert_eq!(gaps_in(&said), [&Said::Gap(59, 70, 10)]);
     }
 
     /// The lost frames `TimeGaps` finds in `times` (100 ns units) at 60 fps.
