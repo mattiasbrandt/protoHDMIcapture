@@ -1,12 +1,15 @@
 # The release packages (#14). A v* tag:
-#   draft    creates the GitHub release as a draft (or finds it on a re-run);
+#   draft    checks the tag is v<viewer/Cargo.toml's version> (the assets are
+#            named by it), then creates the GitHub release as a draft, or
+#            finds the draft on a re-run; a published release is refused;
 #   archive  builds the Linux archive (packaging/release-archive.sh, on Arch);
 #   msi      builds the Windows installer (packaging/windows/build-msi.ps1:
 #            WiX 7, ICE validation) and smoke-tests it (test-msi.ps1: install,
 #            check, uninstall) on Windows;
 #   publish  adds SHA256SUMS over every asset and publishes the release.
 # Nothing is public until every asset is in: a failed job leaves a draft,
-# and a re-run replaces its assets (--clobber). The PKGBUILD and AUR half of
+# and a re-run replaces a draft's assets (--clobber). A published release is
+# never changed: its files and SHA256SUMS are what users downloaded. The PKGBUILD and AUR half of
 # #14 stays by hand (updpkgsums, .SRCINFO, the AUR push).
 # Linux packages: the viewer's build (as check.yml), python3 for the
 # script's cargo-metadata parse, binutils for strip, github-cli for the
@@ -34,10 +37,25 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --verify-tag --generate-notes
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' viewer/Cargo.toml | head -1)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::the tag $TAG is not v$version, viewer/Cargo.toml's version (the assets are named by it)"
+            exit 1
+          fi
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != true ]; then
+              echo "::error::the release $TAG is published; a re-run would replace what users downloaded"
+              exit 1
+            fi
+          else
+            gh release create "$TAG" --draft --verify-tag --generate-notes
+          fi
 
   archive:
     needs: draft
