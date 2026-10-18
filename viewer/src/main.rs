@@ -615,7 +615,11 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     // The card in use: the one opened, then each one found again after a
     // pull (#40); the audio's starts look for its input on it.
     let card = Arc::new(Mutex::new(node));
-    let find = card.lock().expect("the card's lock is never poisoned").is_some().then(|| finder(&s, format, card.clone()));
+    // Read first, so the lock is let go: `finder` takes it too, and a
+    // guard kept to the statement's end (as a temporary in this `let` is)
+    // made the viewer wait on itself before its window opened.
+    let have_card = card.lock().expect("the card's lock is never poisoned").is_some();
+    let find = have_card.then(|| finder(&s, format, card.clone()));
     if let Some(log) = debug_log.as_mut() {
         log.format(format, test_pattern);
         match debuglog::perf_every(env::var("DEBUG_PERF_INTERVAL").ok().as_deref()) {
