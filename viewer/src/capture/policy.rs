@@ -593,8 +593,10 @@ impl Policy {
         let prev = self.last_mark.replace(mark);
         let gap = match (prev, mark) {
             (Some(Mark::Sequence(prev)), Mark::Sequence(seq)) => {
+                // A repeat (0) or a restart (a step back, read as one past
+                // half the range) lost nothing: the next step counts from it.
                 let step = seq.wrapping_sub(prev);
-                (step != 1).then(|| Event::Gap { from: prev, to: seq, lost: step.wrapping_sub(1) })
+                (step > 1 && step <= u32::MAX / 2).then(|| Event::Gap { from: prev, to: seq, lost: step - 1 })
             }
             // The first time too: it sets the grid.
             (_, Mark::Time(t)) => {
@@ -835,6 +837,27 @@ mod tests {
         let gaps: Vec<&Said> = said.iter().map(|(_, s)| s).filter(|s| matches!(s, Said::Gap(..))).collect();
         assert_eq!(gaps, [&Said::Gap(22, 25, 2)]);
         assert_eq!(dropped.unusable.load(Ordering::Relaxed), 1, "the flagged one");
+    }
+
+    #[test]
+    fn a_repeated_or_restarted_sequence_number_is_no_gap() {
+        // A repeat (same number) and a restart (lower number) mean no
+        // frame was lost: no gap of 4294967295, the counter takes the new
+        // number as its base, and the next loss is still said.
+        let mut steps = frames(ms(0), ms(100), 10);
+        steps[3].mark = Mark::Sequence(12);
+        for (i, s) in steps.iter_mut().enumerate().skip(4) {
+            s.mark = Mark::Sequence(i as u32 - 4);
+        }
+        let last = steps.len() - 1;
+        steps[last].mark = match steps[last].mark {
+            Mark::Sequence(n) => Mark::Sequence(n + 3),
+            m => m,
+        };
+        assert_eq!(last, 5, "frames 10, 11, 12, 12, 0, 4");
+        let (said, _, result) = run_script(FORMAT, 8, steps, ms(200), false);
+        result.unwrap();
+        assert_eq!(gaps_in(&said), [&Said::Gap(0, 4, 3)]);
     }
 
     #[test]
