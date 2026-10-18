@@ -343,9 +343,10 @@ fn reader(link: &str, want: Format, callback: Option<&IMFSourceReaderCallback>) 
         let name = Pixels::ALL.into_iter().map(subtype).find(|(g, _)| *g == sub).map_or("other", |(_, name)| name);
         offered.push(format!("{w}x{h} {name} {fps:.3}"));
         // FPS may be fractional (59.94 = 60000/1001), as on V4L2. Within
-        // 0.4 %: the lost frames counted from times hold to about there
-        // (policy.rs `LATE_LEAK`).
-        if sub == want_sub && (w, h) == (want.width, want.height) && (fps - want.fps).abs() <= want.fps * 0.004 {
+        // 0.5 %: the lost frames counted from times hold across it (#34's
+        // matrix, drift -0.5 to +0.5 %), and their line's slope is kept
+        // within 0.6 % of FPS (policy.rs `TimeGaps::SLOPE`).
+        if sub == want_sub && (w, h) == (want.width, want.height) && (fps - want.fps).abs() <= want.fps * 0.005 {
             unsafe { reader.SetCurrentMediaType(STREAM, None, &t) }.map_err(at)?;
             let stride = match want.pixels {
                 Pixels::Yuyv => match unsafe { t.GetUINT32(&MF_MT_DEFAULT_STRIDE) } {
