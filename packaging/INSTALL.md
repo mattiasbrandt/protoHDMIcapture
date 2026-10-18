@@ -5,9 +5,9 @@ for `view.sh` + mpv (#10). It is opt-in until it does everything view.sh
 does; both read the same settings file, `~/.config/protohdmicapture/config`.
 With no settings file, it opens the setup wizard in its window.
 
-It needs a Wayland desktop with a Vulkan driver, and PipeWire for the sound.
-Refresh matching and window placement need Hyprland; other desktops get the
-feed without them.
+On Linux it needs a Wayland desktop with a Vulkan driver, and PipeWire for
+the sound. Refresh matching and window placement need Hyprland; other
+desktops get the feed without them. Windows: see [Windows](#windows).
 
 ## Arch Linux
 
@@ -35,6 +35,37 @@ loader (libvulkan) and a Vulkan driver.
 
 To build the archive: `packaging/release-archive.sh [OUT_DIR]` (Rust
 toolchain, clang and the libraries' development files).
+
+## Windows
+
+Download `protohdmicapture-<version>-x86_64-windows.msi` from the GitHub
+release and double-click it. It installs for your user only, with no
+administrator prompt, into `%LOCALAPPDATA%\Programs\protoHDMIcapture`, and
+adds **protoHDMIcapture** to the Start menu. The first start opens the setup
+wizard. A newer version installed over it replaces it; Settings → Apps
+removes it. Your settings (`%APPDATA%\protohdmicapture`) stay when it is
+removed.
+
+The installer is not signed, so Windows SmartScreen may say it does not
+know the publisher: **More info → Run anyway**.
+
+It needs Windows 10 or 11 (x64) with a DirectX 12 graphics driver. Nothing
+else: the Visual C++ runtime is built in. On Windows the viewer captures
+through Media Foundation and plays the card's sound through WASAPI;
+refresh matching and `--monitor` are Hyprland only.
+
+To check a download: `SHA256SUMS` on the release lists every file's
+SHA-256 (`Get-FileHash <file>` in PowerShell, `sha256sum -c SHA256SUMS`
+on Linux).
+
+To build the installer: `packaging\windows\build-msi.ps1 [-OutDir dist]`
+(the Rust toolchain for x86_64-pc-windows-msvc, Visual Studio's C++ build
+tools, and WiX 7: `dotnet tool install --global wix --version 7.0.0`; WiX 7's
+[Open Source Maintenance Fee](https://docs.firegiant.com/wix/osmf/) EULA is
+accepted for this project in the script). `packaging\windows\test-msi.ps1
+-Msi <file>` installs, checks and removes it. A `v*` tag builds and tests
+both packages in CI (`.github/workflows/release.yml`) and publishes them
+with `SHA256SUMS`.
 
 ## From source
 

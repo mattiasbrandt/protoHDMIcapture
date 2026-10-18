@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Windows installer (#14): a per-user MSI, built by build-msi.ps1 with
+  WiX 7 (and by .github/workflows/release.yml on a v* tag); test-msi.ps1
+  installs, checks and removes it.
+
+  - Per-user by default (perUserOrMachine with MSIINSTALLPERUSER): it goes
+    to %LOCALAPPDATA%\Programs\protoHDMIcapture with no administrator
+    prompt, and Program Files redirects there.
+  - A Start menu shortcut, the licenses beside the exe, and an entry in
+    Settings > Apps with the app's icon to remove it.
+  - The UpgradeCode never changes: a later version replaces this one.
+  - No dialogs: a double-click installs with a progress bar only.
+
+  The settings (%APPDATA%\protohdmicapture) and the run dir
+  (%LOCALAPPDATA%\protohdmicapture) are the user's: an uninstall leaves them.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="protoHDMIcapture"
+           Manufacturer="Mattias Brandt"
+           Version="$(Version)"
+           UpgradeCode="899C424B-5876-407C-9B10-ECE3C055A417"
+           Scope="perUserOrMachine"
+           Compressed="yes">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of protoHDMIcapture is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="$(Icon)" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/mattiasbrandt/protoHDMIcapture" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="protoHDMIcapture" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="Files" Directory="INSTALLFOLDER">
+      <Component>
+        <File Id="Exe" Source="$(Exe)" Name="protohdmicapture.exe" KeyPath="yes" />
+      </Component>
+      <Component>
+        <File Source="$(Root)\LICENSE-MIT" Name="LICENSE-MIT.txt" />
+      </Component>
+      <Component>
+        <File Source="$(Root)\LICENSE-APACHE" Name="LICENSE-APACHE.txt" />
+      </Component>
+    </ComponentGroup>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut">
+        <Shortcut Id="AppShortcut"
+                  Name="protoHDMIcapture"
+                  Description="Low-latency HDMI capture card viewer"
+                  Target="[INSTALLFOLDER]protohdmicapture.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKCU" Key="Software\protoHDMIcapture" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="Viewer">
+      <ComponentGroupRef Id="Files" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Package>
+</Wix>
