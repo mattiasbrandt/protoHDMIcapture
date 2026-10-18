@@ -365,6 +365,17 @@ fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::
     Ok((open_node(&picked.node, format)?, picked.node))
 }
 
+/// The viewer's end when its capture ended on its own: the card pulled out
+/// (#40). It is not opened again: a card reopened as it came back got
+/// stuck, and only a power-off cleared it (capture-cards/ms2130.md). The
+/// source's own "(the card is gone?)" is left out: this says it.
+fn card_gone(error: &str) -> String {
+    let error = error.strip_suffix(" (the card is gone?)").unwrap_or(error);
+    format!(
+        "capture: the card was unplugged ({error}). Plug it back in and start the viewer again; if it then shows no picture, the card is stuck: take out its USB cable and its DC5V power for 10 s."
+    )
+}
+
 /// The capture node opened at `format`, a busy card's error saying who
 /// holds it where that can be read (Linux).
 fn open_node(node: &card::Node, format: capture::Format) -> Result<Box<dyn capture::FrameSource>, String> {
@@ -600,7 +611,7 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     // Every way the viewer's window ends is the end of the viewer.
     let result = match outcome {
         run::Outcome::Closed | run::Outcome::Signal | run::Outcome::TimeUp => Ok(()),
-        run::Outcome::CaptureEnded(e) => Err(format!("capture: {e}")),
+        run::Outcome::CaptureEnded(e) => Err(card_gone(&e)),
         run::Outcome::Failed(e) => Err(e),
     };
     if let Some(log) = &debug_log {
@@ -849,6 +860,17 @@ mod tests {
         // No serial: the port is the pin, and its own source is said.
         assert_eq!(super::pin_source(&resolve(&[("CARD_SERIAL", ""), ("CARD_PORT", "pci-c")])), "from the environment");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_card_pulled_out_ends_the_viewer_with_how_to_start_it_again() {
+        // The laptop's card pulled out (#40): Media Foundation's error.
+        assert_eq!(
+            super::card_gone(r"\\?\usb#vid_1e4e&pid_7016: The video recording device is no longer present. (0xC00D3EA2) (the card is gone?)"),
+            r"capture: the card was unplugged (\\?\usb#vid_1e4e&pid_7016: The video recording device is no longer present. (0xC00D3EA2)). Plug it back in and start the viewer again; if it then shows no picture, the card is stuck: take out its USB cable and its DC5V power for 10 s."
+        );
+        // A source that ended without an error (run.rs) says so the same way.
+        assert!(super::card_gone("the capture stopped").starts_with("capture: the card was unplugged (the capture stopped). Plug it back in"));
     }
 
     #[test]
