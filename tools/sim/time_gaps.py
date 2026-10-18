@@ -55,12 +55,14 @@ class Banded:
       95th percentile of the last BAND samples against the line as it is
       now (its slope pivots on a point up to 4 windows back).
     - The warm-up: until the line has WARM samples, a step counts only what
-      wander cannot be (past WARM_STEP periods, rounded down past 0.9 of
-      the wander); then a frame is added at the long step that narrows the
-      warm-up's band most (under either slope, the phase's or the least-
-      squares), again while one narrows it by TIGHTER: a frame missed splits
-      the band a period apart, and only the frame where it went closes it.
-      The frames added are said then.
+      wander cannot be (past WARM_STEP periods, rounded down past a whole
+      period: wander stays under one); then the warm-up's frame numbers are
+      found again from its times alone (`_relabel`): the slope, within
+      SLOPE, whose wrapped times sit in the narrowest arc numbers them, and
+      the frames beyond the steps' count are said then. The phase's centres
+      are taken again with that slope: frames missed had tilted the slope
+      they were unwrapped with. A run or a signal that stops before WARM
+      settles its warm-up the same way (`settle`), from BAND samples on.
     - The phase is taken in periods of the slope as it stood at each
       block's start: in FPS's, a card 0.5 % off smears the MS2130's band
       over the whole turn within a cycle.
@@ -69,7 +71,7 @@ class Banded:
       step a frame lost; a mode is opened only within 0.5 % of FPS.
 
     A loss is said at the sample after it, at once (in the warm-up, up to
-    WARM samples late)."""
+    WARM samples late, or when it settles)."""
     WINDOW = 600       # samples the intercept is fitted over: 10 s at 60 fps
     BAND = 100         # samples the band is taken over: four MS2130 cycles
     WARM = 300         # samples before the line decides: 5 s
@@ -78,6 +80,8 @@ class Banded:
     BLOCK = 50          # samples a phase centre is taken over
     PHASE_BLOCKS = 120  # centres kept for the phase's turning: 100 s
     MIN_BLOCKS = 5      # centres before the turning is used: by the warm-up's end
+    WANDER = 1.0        # periods wander stays under: a warm-up step counts past it
+    STEPS = 240         # slopes the warm-up's re-label tries across +-SLOPE: 0.005 % apart
 
     def __init__(s, fps=60.0):
         s.p = 1e7 / fps
@@ -165,64 +169,78 @@ class Banded:
         b = s._slope()
         return (st - b * sk) / n, b
 
+    @staticmethod
+    def _arc(ts, b):
+        """Times wrapped onto period b: the narrowest arc holding them, in
+        periods, and each time's frame number from the arc's start (the
+        first's 0)."""
+        x = [t / b for t in ts]
+        f = sorted(v % 1.0 for v in x)
+        # The widest gap between neighbours on the circle; the arc starts after it.
+        gaps = [(f[(j + 1) % len(f)] - f[j]) % 1.0 for j in range(len(f))]
+        j = max(range(len(f)), key=lambda j: gaps[j])
+        start = f[(j + 1) % len(f)]
+        ks = [math.floor(v - start + 1e-12) for v in x]
+        return 1.0 - gaps[j], [k - ks[0] for k in ks]
+
     def _relabel(s):
-        """The warm-up's frame numbers again from a line fitted to them,
-        refitted until they settle: the frames beyond the steps' count."""
+        """The warm-up's frame numbers found again from its times alone: on
+        the card's period its times sit in a band under a period wide (the
+        MS2130's wander: 0.88), and wrapped onto it they keep to an arc that
+        narrow, each a frame on from the arc's start. Every slope within
+        SLOPE is tried (STEPS apart, the first of the narrowest taken), the
+        ones that put two samples on one frame passed over. A greedy re-label
+        a frame at a time stalled on several frames lost (#34, Codex: 4 lost
+        counted as 0 to 2). The frames beyond the steps' count, said now;
+        none: the steps' numbers stay (said already, they cannot be taken
+        back)."""
         ref_k, ref_t = s.pts[0]
-        ks = [k - ref_k for k, _ in s.pts]
+        old = [k - ref_k for k, _ in s.pts]
         ts = [t - ref_t for _, t in s.pts]
-        old = list(ks)
-        # The band's width under either slope, the narrower: the phase's (a
-        # free one over a few seconds takes a frame lost in them for drift:
-        # one period in 300 samples is 0.33 %), and the least-squares (the
-        # phase's from a few blocks is shakiest at the widest drift).
-        kinds = (True, False) if s.turn is not None else (False,)
-        width = lambda ks: min(s._width(ks, ts, ph) for ph in kinds)
-        # A frame lost and missed splits the band a period apart; a frame
-        # added where it went closes it. Greedily: one more frame at the
-        # long step (one of 1.5 periods or more: where a frame can have
-        # gone) that narrows the band most, while one narrows it by TIGHTER.
-        longs = [i for i in range(1, len(ts)) if ts[i] - ts[i - 1] >= 1.5 * s.p]
-        best = width(ks)
-        while True:
-            tries = [(width(c), c) for c in ([k + (j >= i) for j, k in enumerate(ks)] for i in longs)]
-            w, c = min(tries, key=lambda x: x[0], default=(best, ks))
-            if w > best - s.TIGHTER * s.p:
-                break
-            best, ks = w, c
+        best = None
+        for i in range(s.STEPS + 1):
+            b = s.p * (1 - s.SLOPE + 2 * s.SLOPE * i / s.STEPS)
+            arc, ks = s._arc(ts, b)
+            if any(ks[j] <= ks[j - 1] for j in range(1, len(ks))):
+                continue
+            if best is None or arc < best[0]:
+                best = (arc, b, ks)
+        if best is None:
+            return 0
+        _, b, ks = best
         extra = ks[-1] - old[-1]
         if extra <= 0:
             return 0
         s.pts = deque((k + ref_k, t + ref_t) for k, t in zip(ks, ts))
         s._rebase()
         s.k = s.pts[-1][0]
+        s._rephase(b)
         return extra
 
-    TIGHTER = 0.05  # periods the warm-up's band must narrow by to re-label
+    def _rephase(s, b):
+        """The phase's centres again over the kept times, each block's
+        phases taken in periods of b (the frames found again): frames missed
+        tilt the least-squares slope the warm-up's blocks were unwrapped
+        with, by up to a frame in WARM samples, half a turn a block, and the
+        turning then misread a card 0.5 % fast as 0.8 % slow."""
+        s.centres.clear()
+        s.acc = [0.0, 0.0, 0, 0.0]
+        s._slope = lambda: b
+        try:
+            for _, t in list(s.pts):
+                s._phase(t)
+        finally:
+            del s._slope
+        s.turn = s._turn()
 
-    def _fit(s, ks, ts, phase):
-        """A line through (ks, ts): the phase's slope or the least-squares
-        one, within SLOPE; (time at frame 0, slope)."""
-        n = len(ks)
-        sk, st = sum(ks), sum(ts)
-        if phase:
-            b = 1 / (1 / s.p - s.turn)
-        else:
-            skk = sum(k * k for k in ks)
-            skt = sum(k * t for k, t in zip(ks, ts))
-            b = (n * skt - sk * st) / (n * skk - sk * sk)
-        b = min(max(b, s.p * (1 - s.SLOPE)), s.p * (1 + s.SLOPE))
-        return (st - b * sk) / n, b
-
-    def _width(s, ks, ts, phase):
-        """The full width of the places of `ts` against a line fitted to
-        them with these frame numbers. Untrimmed, unlike the live band: a
-        frame lost a few samples before the warm-up's end leaves fewer than
-        a trim's worth past the split; and a frame added lowers every later
-        place by a period, which no stray time can make look right."""
-        a, b = s._fit(ks, ts, phase)
-        places = [t - (a + b * k) for k, t in zip(ks, ts)]
-        return max(places) - min(places)
+    def settle(s):
+        """A warm-up cut short (the signal stopped, the run ended): its
+        frame numbers found again as at WARM, from BAND samples on (fewer
+        say too little of the card's band); the frames beyond the steps'
+        count. None after the warm-up: the line has said them."""
+        if s.k is None or not s.BAND <= len(s.pts) < s.WARM:
+            return 0
+        return s._relabel()
 
     def lost(s, t):
         if s.k is None:
@@ -233,13 +251,13 @@ class Banded:
             return 0
         k = s.k + 1
         if len(s.pts) < s.WARM:
-            # Only what wander cannot be: it adds up to 0.9 of a period to a
-            # step (the MS2130's long one), so rounding would count one too
-            # many there. The re-label at the warm-up's end adds what this
-            # leaves; it cannot take back.
+            # Only what wander cannot be: it adds up to 0.88 of a period to
+            # a step (the MS2130's long one) and drift a little more, so
+            # rounding would count one too many there. The re-label at the
+            # warm-up's end adds what this leaves; it cannot take back.
             step = (t - s.prev) / s.p
             if step >= s.WARM_STEP:
-                k = s.k + 1 + math.floor(step - 0.9)
+                k = s.k + 1 + math.floor(step - s.WANDER)
         else:
             a, b = s._line()
             line = lambda kk: a + b * (kk - s.ref[0])
@@ -315,6 +333,50 @@ def matrix(counter, seed=7, shapes=('flat', 'saw', 'jit')):
     return phantom, wrong, runs
 
 
+def warm_matrix(counter, seed=7, shapes=('flat', 'saw', 'jit')):
+    """The matrix's losses in the warm-up, from its 5th sample: the main
+    matrix's start at 200 left a greedy re-label's stall unseen (Codex)."""
+    rng = random.Random(seed)
+    phantom = wrong = runs = 0
+    for shape in shapes:
+        for d in [-0.5, -0.3, -0.13, -0.05, 0, 0.05, 0.13, 0.3, 0.5]:
+            for _ in range(2):
+                base = card(1500, d, shape, rng)
+                phantom += total(counter, base)
+                for _ in range(8):
+                    ks = sorted(rng.sample(range(5, 300), rng.randint(1, 4)))
+                    bs = [rng.randint(1, 3) for _ in ks]
+                    runs += 1
+                    wrong += total(counter, drop(base, list(zip(ks, bs)))) != sum(bs)
+    return phantom, wrong, runs
+
+
+def settled(counter, times):
+    """The losses in times, then those its settle finds (the signal
+    stopping, or the run ending, before the warm-up's end)."""
+    c = counter()
+    return sum(c.lost(t) for t in times) + c.settle()
+
+
+def short_matrix(counter, seed=7, shapes=('flat', 'saw', 'jit', 'ms24')):
+    """Stretches of picture shorter than the warm-up, each settled: clean
+    ones must say nothing, ones with losses (from the 5th sample) their
+    count."""
+    rng = random.Random(seed)
+    phantom = wrong = runs = 0
+    for shape in shapes:
+        for d in [-0.5, -0.3, -0.13, -0.05, 0, 0.05, 0.13, 0.3, 0.5]:
+            for _ in range(4):
+                n = rng.randrange(Banded.BAND + 10, Banded.WARM)
+                base = card(n, d, shape, rng)
+                phantom += settled(counter, base)
+                ks = sorted(rng.sample(range(5, n - 5), rng.randint(1, 3)))
+                bs = [rng.randint(1, 3) for _ in ks]
+                runs += 1
+                wrong += settled(counter, drop(base, list(zip(ks, bs)))) != sum(bs)
+    return phantom, wrong, runs
+
+
 def trace(path):
     """The fixture's device times, from its steps."""
     times, t = [], 0
@@ -346,6 +408,9 @@ if __name__ == '__main__':
     for c in (Leaky, Banded):
         print('%s: phantom losses %d, runs counted wrong %d of %d' % ((c.__name__,) + matrix(c)))
         print('  the MS2130 as traced (ms24): phantom losses %d, runs counted wrong %d of %d' % matrix(c, shapes=('ms24',)))
+    print('Banded, losses in the warm-up: phantom losses %d, runs counted wrong %d of %d' % warm_matrix(Banded))
+    print('  the MS2130 as traced (ms24): phantom losses %d, runs counted wrong %d of %d' % warm_matrix(Banded, shapes=('ms24',)))
+    print('Banded, stretches shorter than the warm-up, settled: phantom losses %d, runs counted wrong %d of %d' % short_matrix(Banded))
     if len(sys.argv) > 1:
         times = trace(sys.argv[1])
         lost, err, rate = truth(times)

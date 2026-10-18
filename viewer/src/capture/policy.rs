@@ -133,11 +133,19 @@ pub fn run(
 ) -> io::Result<()> {
     let mut policy = Policy::new(source.format(), source.stride(), clock.now());
     let mut stream = source.start()?;
+    let mut ended = Ok(());
     while !quit.load(Ordering::Relaxed) {
-        stream.next(POLL_SLICE, &mut |raw| policy.buffer(raw, dropped, on_event))?;
+        if let Err(e) = stream.next(POLL_SLICE, &mut |raw| policy.buffer(raw, dropped, on_event)) {
+            ended = Err(e);
+            break;
+        }
         policy.tick(clock.now(), on_event);
     }
-    Ok(())
+    // A run that ends in the warm-up: its losses still said.
+    if let Some(gap) = policy.settle() {
+        on_event(gap);
+    }
+    ended
 }
 
 /// Lost frames from sample times (100 ns units), where a source has times
@@ -161,19 +169,25 @@ pub fn run(
 ///   block's start: in FPS's, a card 0.5 % off smears the MS2130's band
 ///   over the whole turn within one of its cycles.
 /// - **The warm-up:** until `WARM` samples, a step counts only what wander
-///   cannot be; then a frame is added at each long step where one closes
-///   the warm-up's band (`relabel`), and those frames are said then.
+///   cannot be; then the warm-up's frame numbers are found again from its
+///   times alone (`relabel`: the slope whose wrapped times keep to the
+///   narrowest arc), those frames said then, and the phase taken again
+///   with that slope. A warm-up cut short by a stopped signal or the run's
+///   end is settled the same way (`settle`).
 /// - **The slope stays within `SLOPE` of FPS's period:** the MS2130's times
 ///   also fit a line 4 % off FPS, each long step a frame lost; a mode is
 ///   opened only within 0.5 % of FPS (mf.rs).
 ///
 /// A loss is said at the sample after it (in the warm-up, up to `WARM`
-/// samples late). Simulated: no made-up loss and every run right on #34's
-/// matrix (flat, jittered and wandering times, the ticket's and the
-/// MS2130's as traced, drift -0.5 to +0.5 %; seeds 7, 11 and 13), and so
-/// here (`the_matrix_makes_up_no_loss_and_counts_every_run`); on the
-/// MS2130's real 10 minute trace, 1344 where its cadence says 1340.3 +-
-/// 1.4 (`the_real_trace_counts_its_cadences_losses`).
+/// samples late, or when it settles). Simulated: no made-up loss and every
+/// run right on #34's matrix (flat, jittered and wandering times, the
+/// ticket's and the MS2130's as traced, drift -0.5 to +0.5 %; seeds 7, 11
+/// and 13), on the same with every loss in the warm-up, and on stretches
+/// shorter than it, settled; and so here
+/// (`the_matrix_makes_up_no_loss_and_counts_every_run`,
+/// `losses_in_the_warm_up_count_however_many`); on the MS2130's real 10
+/// minute trace, 1343 where its cadence says 1340.3 +- 1.4
+/// (`the_real_trace_counts_its_cadences_losses`).
 struct TimeGaps {
     period: f64,
     /// The first sample's time: the others are taken from it, in f64.
@@ -207,9 +221,10 @@ impl TimeGaps {
     const WARM: usize = 300;
     /// Periods a warm-up step must reach to count a loss.
     const WARM_STEP: f64 = 2.5;
-    /// The most wander adds to a step, in periods (the MS2130's long one,
-    /// 0.88): a warm-up step counts only past it.
-    const WANDER: f64 = 0.9;
+    /// Periods wander stays under (the MS2130's long step adds 0.88, drift
+    /// a little more): a warm-up step counts only past it, and the re-label
+    /// adds what that leaves.
+    const WANDER: f64 = 1.0;
     /// The slope's furthest from FPS's period, a fraction.
     const SLOPE: f64 = 0.006;
     /// Samples a phase centre is taken over.
@@ -218,8 +233,8 @@ impl TimeGaps {
     const PHASE_BLOCKS: usize = 120;
     /// Centres before the turning is used: by the warm-up's end.
     const MIN_BLOCKS: usize = 5;
-    /// Periods the warm-up's band must narrow by for its re-label to be taken.
-    const TIGHTER: f64 = 0.05;
+    /// Slopes the warm-up's re-label tries across `SLOPE`: 0.005 % apart.
+    const STEPS: usize = 240;
 
     fn new(fps: f64) -> Self {
         Self {
@@ -322,8 +337,13 @@ impl TimeGaps {
     /// means nothing. Each centre is turned back into FPS's periods for
     /// keeping, and unwrapped against where the slope puts it.
     fn phase(&mut self, t: f64) {
+        self.phase_in(t, None);
+    }
+
+    /// `phase`, its blocks taken in periods of `frame` where given.
+    fn phase_in(&mut self, t: f64, frame: Option<f64>) {
         if self.block.2 == 0 {
-            self.frame = if self.sums[0] >= 2.0 { self.line().1 } else { self.period };
+            self.frame = frame.unwrap_or_else(|| if self.sums[0] >= 2.0 { self.line().1 } else { self.period });
         }
         let a = std::f64::consts::TAU * t / self.frame;
         self.block.0 += a.cos();
@@ -383,36 +403,33 @@ impl TimeGaps {
         ((st - b * sk) / n, b)
     }
 
-    /// The warm-up's frame numbers found again. A frame lost and missed
-    /// splits the band a period apart; a frame added where it went closes
-    /// it. Greedily: one frame more at the long step (1.5 periods or more:
-    /// where a frame can have gone) that narrows the band most, again while
-    /// one narrows it by `TIGHTER`. The band's width is the narrower under
-    /// either slope, the phase's (a free one over a few seconds takes a
-    /// frame lost in them for drift: a period in 300 samples is 0.33 %) or
-    /// the least-squares (the phase's from a few blocks is shakiest at the
-    /// widest drift). The frames beyond the steps' count, said now; none:
-    /// the steps' numbers stay (said already, they cannot be taken back).
+    /// The warm-up's frame numbers found again from its times alone: on the
+    /// card's period its times sit in a band under a period wide (the
+    /// MS2130's wander: 0.88), and wrapped onto it they keep to an arc that
+    /// narrow, each a frame on from the arc's start. Every slope within
+    /// `SLOPE` is tried (`STEPS` apart, the first of the narrowest taken,
+    /// as the simulator), the ones that put two samples on one frame passed
+    /// over. A greedy re-label a frame at a time stalled on several frames
+    /// lost (#34, the Codex review: 4 lost counted as 0 to 2). The frames
+    /// beyond the steps' count, said now; none: the steps' numbers stay
+    /// (said already, they cannot be taken back).
     fn relabel(&mut self) -> i64 {
         let (k0, t0) = self.pts[0];
         let ts: Vec<f64> = self.pts.iter().map(|&(_, t)| t - t0).collect();
-        let old: Vec<i64> = self.pts.iter().map(|&(k, _)| k - k0).collect();
-        let kinds: &[bool] = if self.turn.is_some() { &[true, false] } else { &[false] };
-        let width_of = |ks: &[i64]| kinds.iter().map(|&phase| self.width(ks, &ts, phase)).fold(f64::INFINITY, f64::min);
-        let longs: Vec<usize> = (1..ts.len()).filter(|&i| ts[i] - ts[i - 1] >= 1.5 * self.period).collect();
-        let mut ks = old.clone();
-        let mut best = width_of(&ks);
-        // The first of the narrowest, as the simulator's min() takes it.
-        while let Some((w, c)) = longs
-            .iter()
-            .map(|&i| ks.iter().enumerate().map(|(j, &k)| k + i64::from(j >= i)).collect::<Vec<i64>>())
-            .map(|c| (width_of(&c), c))
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            && w <= best - Self::TIGHTER * self.period
-        {
-            (best, ks) = (w, c);
+        let old = self.pts[self.pts.len() - 1].0 - k0;
+        let mut best: Option<(f64, f64, Vec<i64>)> = None;
+        for i in 0..=Self::STEPS {
+            let b = self.period * (1.0 - Self::SLOPE + 2.0 * Self::SLOPE * i as f64 / Self::STEPS as f64);
+            let (arc, ks) = Self::arc(&ts, b);
+            if ks.windows(2).any(|w| w[1] <= w[0]) {
+                continue;
+            }
+            if best.as_ref().is_none_or(|(w, _, _)| arc < *w) {
+                best = Some((arc, b, ks));
+            }
         }
-        let extra = ks[ks.len() - 1] - old[old.len() - 1];
+        let Some((_, b, ks)) = best else { return 0 };
+        let extra = ks[ks.len() - 1] - old;
         if extra <= 0 {
             return 0;
         }
@@ -420,38 +437,57 @@ impl TimeGaps {
         self.rebase();
         let (k, t) = self.pts[self.pts.len() - 1];
         self.last = Some((k, t));
+        self.rephase(b);
         extra
     }
 
-    /// A line through (ks, ts): the phase's slope or the least-squares one,
-    /// within `SLOPE`; (time at frame 0, slope).
-    fn fit(&self, ks: &[i64], ts: &[f64], phase: bool) -> (f64, f64) {
-        let n = ks.len() as f64;
-        let sk: f64 = ks.iter().map(|&k| k as f64).sum();
-        let st: f64 = ts.iter().sum();
-        let ls = || {
-            let skk: f64 = ks.iter().map(|&k| (k * k) as f64).sum();
-            let skt: f64 = ks.iter().zip(ts).map(|(&k, &t)| k as f64 * t).sum();
-            (n * skt - sk * st) / (n * skk - sk * sk)
-        };
-        let b = match (phase, self.turn) {
-            (true, Some(turn)) => 1.0 / (1.0 / self.period - turn),
-            _ => ls(),
-        };
-        let b = b.clamp(self.period * (1.0 - Self::SLOPE), self.period * (1.0 + Self::SLOPE));
-        ((st - b * sk) / n, b)
+    /// Times wrapped onto period `b`: the narrowest arc holding them, in
+    /// periods, and each time's frame number from the arc's start (the
+    /// first's 0).
+    fn arc(ts: &[f64], b: f64) -> (f64, Vec<i64>) {
+        let x: Vec<f64> = ts.iter().map(|t| t / b).collect();
+        let mut f: Vec<f64> = x.iter().map(|v| v.rem_euclid(1.0)).collect();
+        f.sort_unstable_by(f64::total_cmp);
+        // The widest gap between neighbours on the circle (the first of
+        // the widest); the arc starts after it.
+        let n = f.len();
+        let gap = |j: usize| (f[(j + 1) % n] - f[j]).rem_euclid(1.0);
+        let mut widest = 0;
+        for j in 1..n {
+            if gap(j) > gap(widest) {
+                widest = j;
+            }
+        }
+        let start = f[(widest + 1) % n];
+        let ks: Vec<i64> = x.iter().map(|v| (v - start + 1e-12).floor() as i64).collect();
+        let first = ks[0];
+        (1.0 - gap(widest), ks.into_iter().map(|k| k - first).collect())
     }
 
-    /// The full width of the places of `ts` against a line fitted to them
-    /// with these frame numbers. Untrimmed, unlike the live band: a frame
-    /// lost a few samples before the warm-up's end leaves fewer than a
-    /// trim's worth past the split; and a frame added lowers every later
-    /// place by a period, which no stray time can make look right.
-    fn width(&self, ks: &[i64], ts: &[f64], phase: bool) -> f64 {
-        let (a, b) = self.fit(ks, ts, phase);
-        let places = ks.iter().zip(ts).map(|(&k, &t)| t - (a + b * k as f64));
-        let (lo, hi) = places.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), x| (lo.min(x), hi.max(x)));
-        hi - lo
+    /// The phase's centres again over the kept times, each block's phases
+    /// taken in periods of `b` (the frames found again): frames missed tilt
+    /// the least-squares slope the warm-up's blocks were unwrapped with, by
+    /// up to a frame in `WARM` samples, half a turn a block, and the turning
+    /// then misread a card 0.5 % fast as 0.8 % slow.
+    fn rephase(&mut self, b: f64) {
+        self.centres.clear();
+        self.block = (0.0, 0.0, 0, 0.0);
+        let times: Vec<f64> = self.pts.iter().map(|&(_, t)| t).collect();
+        for t in times {
+            self.phase_in(t, Some(b));
+        }
+        self.turn = self.turning();
+    }
+
+    /// A warm-up cut short (the signal stopped, the run ended): its frame
+    /// numbers found again as at `WARM`, from `BAND` samples on (fewer say
+    /// too little of the card's band); the frames beyond the steps' count.
+    /// None after the warm-up: the line has said them.
+    fn settle(&mut self) -> u32 {
+        if self.last.is_none() || !(Self::BAND..Self::WARM).contains(&self.pts.len()) {
+            return 0;
+        }
+        self.relabel() as u32
     }
 }
 
@@ -500,6 +536,11 @@ impl Policy {
         // counting starts afresh: no step across the silence, and a new
         // grid for sample times.
         if self.last_buffer.is_some_and(|t| raw.dequeued.saturating_sub(t) >= STOPPED_AFTER) {
+            // A warm-up the silence cut short: its losses said first (the
+            // Codex review: one deferred to the warm-up's end went unsaid).
+            if let Some(gap) = self.settle() {
+                on_event(gap);
+            }
             self.last_mark = None;
             self.time_gaps = TimeGaps::new(self.format.fps);
         }
@@ -568,6 +609,15 @@ impl Policy {
             self.counted = self.counted.wrapping_add(1);
         }
         gap.filter(|_| self.last_picture.is_some())
+    }
+
+    /// The losses a warm-up cut short still holds (`TimeGaps::settle`), as a
+    /// gap after the last sample counted; none before the first picture.
+    fn settle(&mut self) -> Option<Event<'static>> {
+        let lost = self.time_gaps.settle();
+        let from = self.counted;
+        self.counted = self.counted.wrapping_add(lost);
+        (lost > 0 && self.last_picture.is_some()).then(|| Event::Gap { from, to: from.wrapping_add(lost + 1), lost })
     }
 
     /// Time passing: the signal state, sent when it or its reason changes.
@@ -834,6 +884,54 @@ mod tests {
         assert_eq!(gaps_in(&said), [&Said::Gap(59, 70, 10)]);
     }
 
+    /// Sample times on 60 fps scaled by `scale`, `lost` indices taken out.
+    fn without(n: usize, scale: f64, lost: &[usize]) -> Vec<i64> {
+        (0..n).filter(|i| !lost.contains(i)).map(|i| (i as f64 * 166_667.0 * scale) as i64).collect()
+    }
+
+    #[test]
+    fn several_frames_lost_early_in_the_warm_up_all_count() {
+        // The Codex review's cases: a greedy re-label, a frame at a time,
+        // counted 2 and 0 of these 4.
+        assert_eq!(lost_in(without(3000, 1.0, &[6, 23, 194, 237])).iter().sum::<u32>(), 4);
+        assert_eq!(lost_in(without(3000, 0.995, &[9, 97, 173, 294])).iter().sum::<u32>(), 4);
+        // And none made up where none went.
+        assert_eq!(lost_in(without(3000, 0.995, &[])).iter().sum::<u32>(), 0);
+    }
+
+    #[test]
+    fn a_warm_up_cut_short_still_says_its_losses() {
+        let p = 166_667_i64;
+        let timed = |at: Duration, t: i64| Step { at, data: vec![16; FORMAT.frame_size()], mark: Mark::Time(t), flagged: false };
+        // 200 samples, one frame lost at the 100th (a step wander could
+        // hide, left for the warm-up's end), then the signal stops for 3 s
+        // and comes back on a grid of its own. The Codex review: the reset
+        // dropped it.
+        let stretch = |from_ms: u64, base: i64, n: i64, lost_at: Option<i64>| -> Vec<Step> {
+            (0..n)
+                .map(|i| {
+                    let k = i + lost_at.map_or(0, |at| i64::from(i >= at));
+                    timed(ms(from_ms) + Duration::from_nanos(k as u64 * P), base + k * p)
+                })
+                .collect()
+        };
+        let mut steps = stretch(0, 0, 200, Some(100));
+        steps.extend(stretch(7000, 70_000_000, 400, None));
+        let (said, _, result) = run_script(FORMAT, 8, steps, ms(15_000), false);
+        result.unwrap();
+        assert_eq!(gaps_in(&said).len(), 1, "{:?}", gaps_in(&said));
+        assert!(matches!(gaps_in(&said)[0], Said::Gap(_, _, 1)), "{:?}", gaps_in(&said));
+        // The same with nothing lost says nothing.
+        let mut steps = stretch(0, 0, 200, None);
+        steps.extend(stretch(7000, 70_000_000, 400, None));
+        let (said, _, _) = run_script(FORMAT, 8, steps, ms(15_000), false);
+        assert_eq!(gaps_in(&said), Vec::<&Said>::new());
+        // A run that ends inside its warm-up says it at the end.
+        let (said, _, result) = run_script(FORMAT, 8, stretch(0, 0, 200, Some(100)), ms(4000), false);
+        result.unwrap();
+        assert_eq!(gaps_in(&said).len(), 1, "{:?}", gaps_in(&said));
+    }
+
     /// The lost frames `TimeGaps` finds in `times` (100 ns units) at 60 fps.
     fn lost_in(times: impl IntoIterator<Item = i64>) -> Vec<u32> {
         let mut g = TimeGaps::new(60.0);
@@ -867,9 +965,9 @@ mod tests {
         late[500] += 166_667 * 4 / 10;
         assert_eq!(said(&lost_in(late)), []);
         // In the warm-up: what wander cannot be at once (a step of 4 periods
-        // is 3 lost even with 0.9 of wander in it); a frame wander could
-        // hide, at the warm-up's end (WARM samples), when its frame numbers
-        // are found again.
+        // is 3 lost even with up to a period of wander in it); a frame
+        // wander could hide, at the warm-up's end (WARM samples), when its
+        // frame numbers are found again.
         assert_eq!(said(&lost_in(grid(1000, &[(100, 3)]))), [(100, 3)]);
         assert_eq!(said(&lost_in(grid(1000, &[(100, 1)]))), [(TimeGaps::WARM - 1, 1)]);
     }
@@ -1018,12 +1116,66 @@ mod tests {
         assert!(wrong.is_empty(), "{} of {runs} counted wrong: {wrong:?}", wrong.len());
     }
 
+    /// The matrix with every loss in the warm-up, from its 5th sample (the
+    /// main matrix's start at 200 left a greedy re-label's stall unseen:
+    /// the Codex review); and stretches shorter than the warm-up, settled
+    /// as a stopped signal or the run's end settles them: clean ones say
+    /// nothing, the rest their losses. In a debug build, one card of three,
+    /// as the main matrix.
+    #[test]
+    fn losses_in_the_warm_up_count_however_many() {
+        let checked = if cfg!(debug_assertions) { 1 } else { 3 };
+        let mut rng = Rng(11);
+        let (mut phantom, mut wrong, mut runs) = (0, Vec::new(), 0);
+        for shape in ["flat", "saw", "jit", "ms24"] {
+            for drift in [-0.5, -0.3, -0.13, -0.05, 0.0, 0.05, 0.13, 0.3, 0.5] {
+                for nth in 0..3 {
+                    let base = card(1000, drift, shape, &mut rng);
+                    let short = 110 + rng.below(TimeGaps::WARM - 110);
+                    let draw = |n: usize, rng: &mut Rng| -> Vec<(usize, u32)> {
+                        let mut at: Vec<usize> = (0..1 + rng.below(4)).map(|_| 5 + rng.below(n - 10)).collect();
+                        at.sort_unstable();
+                        at.dedup();
+                        at.into_iter().map(|i| (i, 1 + rng.below(3) as u32)).collect()
+                    };
+                    let warm: Vec<Vec<(usize, u32)>> = (0..4).map(|_| draw(TimeGaps::WARM, &mut rng)).collect();
+                    let cut = draw(short, &mut rng);
+                    if nth >= checked {
+                        continue;
+                    }
+                    let settled = |times: Vec<i64>| {
+                        let mut g = TimeGaps::new(60.0);
+                        times.into_iter().map(|t| g.lost(t)).sum::<u32>() + g.settle()
+                    };
+                    phantom += lost_in(base.iter().map(|&t| t as i64)).iter().sum::<u32>();
+                    phantom += settled(base[..short].iter().map(|&t| t as i64).collect());
+                    for losses in warm.iter().chain([&cut]) {
+                        let want: u32 = losses.iter().map(|l| l.1).sum();
+                        let got = if std::ptr::eq(losses, &cut) {
+                            settled(drop_frames(&base[..short], losses))
+                        } else {
+                            lost_in(drop_frames(&base, losses)).iter().sum()
+                        };
+                        runs += 1;
+                        if got != want {
+                            wrong.push((shape, drift, losses.clone(), got));
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(runs, 180 * checked);
+        assert_eq!(phantom, 0, "losses made up");
+        assert!(wrong.is_empty(), "{} of {runs} counted wrong: {wrong:?}", wrong.len());
+    }
+
     /// The MS2130's 10 minute trace on the laptop (#34), idle, so with about
     /// two frames a second really lost: the frames its cadence says were
     /// sent less those received. Its 24-frame cycles with no step over 1.5
     /// periods but the closing long one give the card's period (60.0005 Hz),
-    /// 1340.3 +- 1.4 lost at two sigma. The counter says 1344 (the
-    /// simulator too): the few over are steps of 1.87-1.94 periods, where
+    /// 1340.3 +- 1.4 lost at two sigma. The counter says 1343 (the
+    /// simulator too; 1344 before the warm-up's re-label searched the
+    /// slopes): the few over are steps of 1.87-1.94 periods, where
     /// the wander's long step (1.877) and a frame lost in a short one (1.96)
     /// are 0.05-0.09 apart; a line of the cadence's own slope says 1342.
     #[test]
