@@ -174,24 +174,12 @@ pub fn run_finding(
         // The old source let go before the card is looked for: a card that
         // is still there (a passing error) is opened again, not twice.
         drop(source);
-        if std::mem::take(&mut policy.gave_nothing) {
-            // Found again but no picture (opened too soon after Windows saw
-            // it, or nothing on its HDMI): still gone. Said once until a
-            // picture comes; the unplugged state still stands.
-            if !std::mem::replace(&mut policy.retrying, true) {
-                eprintln!("{gone}; looking for it again");
-            }
-        } else {
-            policy.unplugged(gone.to_string(), on_event);
-        }
+        policy.unplugged(gone.to_string(), on_event);
         match look_for(find, clock, quit) {
             Some(found) => {
                 source = found;
                 policy.reopened(source.stride(), clock.now());
-                // Quiet while retrying a card that gives nothing.
-                if !policy.retrying {
-                    on_event(Event::CardBack);
-                }
+                on_event(Event::CardBack);
             }
             None => return Ok(()),
         }
@@ -314,12 +302,6 @@ struct Policy {
     /// The card found again at this time (#40), no picture since: the
     /// unplugged state stands until a picture, or `NEVER_AFTER`.
     reopened: Option<Duration>,
-    /// No picture `NEVER_AFTER` after the card was found again: `feed`
-    /// ends, and the card is looked for again (#40).
-    gave_nothing: bool,
-    /// A card found again gave nothing, and no picture has come since:
-    /// the rounds after the first are quiet.
-    retrying: bool,
 }
 
 impl Policy {
@@ -338,13 +320,10 @@ impl Policy {
             decoder,
             out: vec![0; format.frame_size()],
             reopened: None,
-            gave_nothing: false,
-            retrying: false,
         }
     }
 
-    /// `source`'s stream until `quit` (Ok) or the source fails (Err); also
-    /// Err when a card found again gives no picture (`gave_nothing`).
+    /// `source`'s stream until `quit` (Ok) or the source fails (Err).
     fn feed(
         &mut self,
         source: &mut dyn FrameSource,
@@ -357,9 +336,6 @@ impl Policy {
         while !quit.load(Ordering::Relaxed) {
             stream.next(POLL_SLICE, &mut |raw| self.buffer(raw, dropped, on_event))?;
             self.tick(clock.now(), on_event);
-            if self.gave_nothing {
-                return Err(io::Error::other("the card gave no picture after it came back"));
-            }
         }
         Ok(())
     }
@@ -412,7 +388,6 @@ impl Policy {
             Ok(data) => {
                 self.last_picture = Some(raw.dequeued);
                 self.reopened = None;
-                self.retrying = false;
                 if self.state != Signal::Picture {
                     self.state = Signal::Picture;
                     on_event(Event::Signal(Signal::Picture));
@@ -458,12 +433,8 @@ impl Policy {
 
     /// Time passing: the signal state, sent when it or its reason changes.
     fn tick(&mut self, now: Duration, on_event: &mut dyn FnMut(Event<'_>)) {
-        // The card just found again: its first picture is on the way, or,
-        // past `NEVER_AFTER`, the card is still as good as gone (#40).
-        if let Some(t) = self.reopened {
-            if now.saturating_sub(t) >= NEVER_AFTER {
-                self.gave_nothing = true;
-            }
+        // The card just found again: its first picture is on the way.
+        if self.reopened.is_some_and(|t| now.saturating_sub(t) < NEVER_AFTER) {
             return;
         }
         let since = match self.last_picture {
@@ -902,72 +873,6 @@ mod tests {
         let quit_at = Duration::from_nanos(quit_at.load(Ordering::Relaxed));
         assert!(quit_at >= ms(3000), "quit was set");
         assert!(time.now() <= quit_at + POLL_SLICE, "ended {:?} after quit", time.now() - quit_at);
-    }
-
-    /// `run_finding` after a pull at 1.5 s, with a finder that finds the
-    /// card at once, opening it as a source that never delivers for the
-    /// first `dead` finds, then as one with pictures from 1 s after it is
-    /// found, until `end`. With `quit_after`, the finder sets quit once
-    /// the time passes it. The events, and how often the card was found.
-    fn run_found_dead(dead: u64, quit_after: Option<Duration>, end: Duration) -> (Vec<(Duration, Said)>, u64) {
-        let time = Time::default();
-        let quit = Arc::new(AtomicBool::new(false));
-        let first = Scripted { format: FORMAT, stride: 8, time: time.clone(), steps: frames(ms(0), ms(1000), 100).into(), end: ms(1500), gone: true, quit: quit.clone() };
-        let found = Arc::new(AtomicU64::new(0));
-        let mut find: Finder = {
-            let (time, quit, found) = (time.clone(), quit.clone(), found.clone());
-            Box::new(move || {
-                let now = time.now();
-                if quit_after.is_some_and(|t| now >= t) {
-                    quit.store(true, Ordering::Relaxed);
-                    return Ok(None);
-                }
-                let n = found.fetch_add(1, Ordering::Relaxed);
-                let steps = if n < dead { Default::default() } else { frames(now + ms(1000), end, 0).into() };
-                // A dead one never ends on its own: only quit or the policy end it.
-                let until = if n < dead { ms(3_600_000) } else { end };
-                Ok(Some(Box::new(Scripted { format: FORMAT, stride: 8, time: time.clone(), steps, end: until, gone: false, quit: quit.clone() })))
-            })
-        };
-        let mut said = Vec::new();
-        run_finding(Box::new(first), &mut find, &time, &quit, &Dropped::default(), &mut |e| {
-            let s = match e {
-                Event::Frame(f) => Said::Frame(f.data.to_vec()),
-                Event::Signal(s) => Said::Signal(s),
-                Event::Gap { from, to, lost } => Said::Gap(from, to, lost),
-                Event::CardBack => Said::CardBack,
-            };
-            said.push((time.now(), s));
-        })
-        .unwrap();
-        (said, found.load(Ordering::Relaxed))
-    }
-
-    #[test]
-    fn a_card_found_again_that_gives_nothing_is_let_go_and_looked_for_again() {
-        // The laptop (#40): found and opened, then not one buffer, and
-        // "no signal (stopped): nothing arrives" until q.
-        let (said, found) = run_found_dead(1, None, ms(12_000));
-        assert_eq!(found, 2, "the dead one let go after NEVER_AFTER, the next one kept");
-        // The unplugged state all along, never "nothing arrives", then the
-        // picture from the second.
-        let s: Vec<Signal> = signals(&said).into_iter().map(|(_, s)| s).collect();
-        assert_eq!(s, [no_signal(Since::Stopped, Reason::Unplugged("the card is gone".into())), Signal::Picture]);
-        let picture = said.iter().position(|(_, x)| *x == Said::Signal(Signal::Picture)).unwrap();
-        assert!(said[picture..].iter().filter(|(_, x)| matches!(x, Said::Frame(_))).count() > 60);
-        // "The card is back" for the first find only: the retry is quiet.
-        assert_eq!(said.iter().filter(|(_, x)| *x == Said::CardBack).count(), 1);
-    }
-
-    #[test]
-    fn a_card_that_keeps_giving_nothing_is_retried_until_quit() {
-        // The MS2130 with nothing on its HDMI sends no frames at all.
-        let (said, found) = run_found_dead(u64::MAX, Some(ms(30_000)), ms(60_000));
-        assert!((4..=6).contains(&found), "about every NEVER_AFTER + FIND_EVERY: {found}");
-        let s: Vec<Signal> = signals(&said).into_iter().map(|(_, s)| s).collect();
-        assert_eq!(s, [no_signal(Since::Stopped, Reason::Unplugged("the card is gone".into()))], "said once, no flapping");
-        assert_eq!(said.iter().filter(|(_, x)| *x == Said::CardBack).count(), 1);
-        assert!(said.last().unwrap().0 <= ms(30_000) + FIND_EVERY + POLL_SLICE * 2, "quit ends it: {:?}", said.last());
     }
 
     #[test]
