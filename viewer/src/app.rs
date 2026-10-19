@@ -28,16 +28,17 @@ use crate::capture::{Format, FrameSource, Signal, now_monotonic};
 use crate::desktop::Desktop;
 use crate::gputime::GpuTimer;
 use crate::keys::{self, Action};
+use crate::live_changes::LiveChanges;
 use crate::osd::{Osd, PageKind, Scene};
 use crate::overlay::{self, Notify, Overlay, Page};
-use crate::picture::{self, Colour, Picture};
+use crate::picture::{self, Colour};
 #[cfg(target_os = "linux")]
 use crate::present::Presentation;
 use crate::present::{self, Feedback, Tag};
 use crate::run::{End, Host, Outcome, Plan, Quit, Slot, Wake, Waker};
-use crate::scale::{self, Axis, Filter, Scaling};
+use crate::scale::{self, Axis, Filter};
 use crate::screenshot::Screenshot;
-use crate::settings::{Row, Settings};
+use crate::settings::Settings;
 use crate::sources;
 use crate::stats::Stats;
 use crate::wizard::Wizard;
@@ -84,20 +85,16 @@ impl WindowMode {
 }
 
 pub struct Options {
-    pub window: WindowMode,
+    /// WINDOW, WINDOW_SIZE, LEVELS, the colour values and SCALING at
+    /// start, and what w saves of them.
+    pub live_changes: LiveChanges,
     /// Fullscreen on this output instead of the focused one (measurements).
     pub monitor: Option<String>,
     /// End this window after this long (measurements): `Outcome::TimeUp`.
     pub seconds: Option<u64>,
     /// Print timing every 10 s and a summary (measurements).
     pub stats: bool,
-    /// LEVELS and the colour values at start.
-    pub picture: Picture,
-    /// SCALING at start.
-    pub scaling: Scaling,
     pub audio: AudioSetup,
-    /// WINDOW_SIZE, for f's windowed mode.
-    pub window_size: (u32, u32),
     /// Finishes the window's shape where the toolkit's requests are ignored.
     pub desktop: Desktop,
     /// SOURCE: whose setup tips the overlay opens on.
@@ -182,7 +179,7 @@ fn no_sound(why: String) {
 
 impl WindowMode {
     /// f: fullscreen -> borderless -> windowed (WINDOW's order).
-    fn next(self, size: (u32, u32)) -> Self {
+    pub fn next(self, size: (u32, u32)) -> Self {
         match self {
             Self::Fullscreen => Self::Borderless,
             Self::Borderless => Self::Windowed { width: size.0, height: size.1 },
@@ -191,28 +188,13 @@ impl WindowMode {
     }
 
     /// As the settings spell it, and as the panel names it.
-    fn names(self) -> (&'static str, &'static str) {
+    pub fn names(self) -> (&'static str, &'static str) {
         match self {
             Self::Fullscreen => ("fullscreen", "Fullscreen"),
             Self::Borderless => ("borderless", "Borderless"),
             Self::Windowed { .. } => ("windowed", "Windowed"),
         }
     }
-}
-
-/// The settings the overlay's w saves (flagged `save` in lib/settings.sh),
-/// in that file's order, as the static names `now` holds. Each has a live
-/// value, DELAY only while the loopback runs: a flagged name with none is a
-/// defect here, and it fails loudly instead of never being saved.
-fn saveable(rows: &[Row], now: &overlay::Values, loopback: bool) -> Vec<&'static str> {
-    rows.iter()
-        .filter(|r| r.has_flag("save"))
-        .filter_map(|r| match now.keys().find(|k| **k == r.name) {
-            Some(k) => Some(*k),
-            None if r.name == "DELAY" && !loopback => None,
-            None => panic!("{} is flagged save in lib/settings.sh but has no live value in App::values", r.name),
-        })
-        .collect()
 }
 
 /// The overlay's text for one frame (osd.rs draws it).
@@ -297,11 +279,7 @@ struct App {
     format: Format,
     slot: Arc<Mutex<Slot>>,
     gfx: Option<Gfx>,
-    picture: Picture,
-    scaling: Scaling,
     overlay: Overlay,
-    /// The saveable settings at start or at the last save: what w compares.
-    baseline: overlay::Values,
     /// Messages from other threads, taken on `UserEvent::Notice`.
     notices: Arc<Mutex<Vec<(String, Duration)>>>,
     notify: Notify,
@@ -543,10 +521,7 @@ impl Host for Winit {
             frame_wake: self.frame_wake.clone(),
             format,
             stats: Stats::new(start, opts.stats, opts.live.clone()),
-            picture: opts.picture,
-            scaling: opts.scaling,
             overlay: Overlay::new(&opts.source, Instant::now()),
-            baseline: overlay::Values::new(),
             notices,
             notify,
             repaint: false,
@@ -563,7 +538,8 @@ impl Host for Winit {
             last_submit: start,
             end: end.clone(),
         };
-        app.baseline = app.values();
+        let delay_ms = app.delay_ms();
+        app.opts.live_changes.mark_baseline(delay_ms);
         // Ended before it began (a signal as the run started): no window.
         if !end.is_set()
             && let Err(e) = event_loop.run_app_on_demand(&mut app)
@@ -677,7 +653,7 @@ impl App {
                 (Err(e), _) | (_, Err(e)) => eprintln!("warning: the window's icon: {e}"),
             }
         }
-        attrs = match self.opts.window {
+        attrs = match self.opts.live_changes.window() {
             WindowMode::Fullscreen => {
                 let monitor = match &self.opts.monitor {
                     None => None,
@@ -800,7 +776,7 @@ impl App {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&picture_buffer, 0, &picture::bytes(&self.picture.uniform(w, h, self.format.coding())));
+        queue.write_buffer(&picture_buffer, 0, &picture::bytes(&self.opts.live_changes.picture().uniform(w, h, self.format.coding())));
         let convert_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("convert"),
             layout: &convert_layout,
@@ -914,7 +890,7 @@ impl App {
         let frame = (self.format.width, self.format.height);
         gfx.viewport = letterbox((gfx.config.width, gfx.config.height), frame);
         let [_, _, vw, vh] = gfx.viewport;
-        gfx.filter = scale::filter(self.scaling, frame, (vw, vh));
+        gfx.filter = scale::filter(self.opts.live_changes.scaling(), frame, (vw, vh));
         gfx.filters.down = None;
         if let Some(f) = &gfx.filter {
             gfx.queue.write_buffer(&gfx.filters.buffer, 0, &f.bytes(frame, Axis::X));
@@ -948,7 +924,7 @@ impl App {
         if self.opts.stats {
             eprintln!(
                 "scaling: {} -> {vw}x{vh}, {}",
-                self.scaling.as_str(),
+                self.opts.live_changes.scaling().as_str(),
                 gfx.filter.as_ref().map_or("bilinear sampler", |f| f.name)
             );
         }
@@ -956,14 +932,13 @@ impl App {
 
     /// A colour key (mpv's 1..8): the next frame shows the change.
     fn adjust_colour(&mut self, colour: Colour, by: i32) {
-        self.picture.adjust(colour, by);
-        let p = self.picture;
+        let v = self.opts.live_changes.adjust_colour(colour, by);
         // mpv's message for its colour keys.
-        let (name, v) = match colour {
-            Colour::Contrast => ("Contrast", p.contrast),
-            Colour::Brightness => ("Brightness", p.brightness),
-            Colour::Gamma => ("Gamma", p.gamma),
-            Colour::Saturation => ("Saturation", p.saturation),
+        let name = match colour {
+            Colour::Contrast => "Contrast",
+            Colour::Brightness => "Brightness",
+            Colour::Gamma => "Gamma",
+            Colour::Saturation => "Saturation",
         };
         self.overlay.message(format!("{name}: {v}"), Duration::from_millis(1500), Instant::now());
         self.picture_changed();
@@ -971,7 +946,7 @@ impl App {
 
     fn picture_changed(&mut self) {
         if let Some(gfx) = &self.gfx {
-            let u = self.picture.uniform(self.format.width, self.format.height, self.format.coding());
+            let u = self.opts.live_changes.picture().uniform(self.format.width, self.format.height, self.format.coding());
             gfx.queue.write_buffer(&gfx.picture_buffer, 0, &picture::bytes(&u));
         }
         self.repaint = true;
@@ -1010,15 +985,15 @@ impl App {
             Action::CloseOverlay => self.overlay.page = None,
             Action::CycleTips(by) => self.overlay.cycle_source(by),
             Action::CycleLevels => {
-                self.picture.cycle_levels();
+                self.opts.live_changes.cycle_levels();
                 self.picture_changed();
             }
             Action::CycleScaling => {
-                self.scaling = self.scaling.next();
+                self.opts.live_changes.cycle_scaling();
                 self.relayout();
             }
             Action::ResetColour => {
-                self.picture.reset_colour();
+                self.opts.live_changes.reset_colour();
                 self.picture_changed();
             }
             Action::Save => self.save(),
@@ -1179,8 +1154,7 @@ impl App {
     /// adapter, as the mpv script sets mpv's properties and then runs
     /// `view.sh --place-window`.
     fn cycle_display(&mut self) {
-        let mode = self.opts.window.next(self.opts.window_size);
-        self.opts.window = mode;
+        let mode = self.opts.live_changes.cycle_window();
         if let Some(gfx) = &self.gfx {
             let w = &gfx.window;
             match mode {
@@ -1260,62 +1234,29 @@ impl App {
             tx
         });
         let refocus = self.opts.refocus.take();
-        let _ = placer.send(Placement { mode: self.opts.window.names().0, size: self.opts.window_size, dashboard, refocus });
+        let (mode, size) = (self.opts.live_changes.window().names().0, self.opts.live_changes.window_size());
+        let _ = placer.send(Placement { mode, size, dashboard, refocus });
     }
 
-    /// The saveable settings' live values, spelled as the settings file
-    /// spells them (DELAY in seconds, as the mpv script writes it).
-    fn values(&self) -> overlay::Values {
-        self.values_with(self.loopback().map(Controls::delay_ms))
-    }
-
-    /// `values`, with the loopback's delay in ms while it runs.
-    fn values_with(&self, delay_ms: Option<u32>) -> overlay::Values {
-        let p = &self.picture;
-        let mut v: overlay::Values = [
-            ("WINDOW", self.opts.window.names().0.to_string()),
-            ("LEVELS", p.levels.as_str().to_string()),
-            ("SCALING", self.scaling.as_str().to_string()),
-            ("BRIGHTNESS", p.brightness.to_string()),
-            ("CONTRAST", p.contrast.to_string()),
-            ("SATURATION", p.saturation.to_string()),
-            ("GAMMA", p.gamma.to_string()),
-        ]
-        .into();
-        if let Some(ms) = delay_ms {
-            v.insert("DELAY", format!("{:.3}", f64::from(ms) / 1000.0));
-        }
-        v
-    }
-
-    fn saveable(&self) -> Vec<&'static str> {
-        let Some(s) = &self.opts.settings else { return Vec::new() };
-        saveable(&s.rows, &self.values(), self.loopback().is_some())
+    /// The loopback's delay while it runs: DELAY's live value.
+    fn delay_ms(&self) -> Option<u32> {
+        self.loopback().map(Controls::delay_ms)
     }
 
     /// w: what changed since the start (or the last save), as `view.sh
     /// --save` writes it.
     fn save(&mut self) {
         let now = Instant::now();
-        let values = self.values();
-        let loopback = self.loopback().is_some();
-        let changed = overlay::changes(&self.saveable(), &self.baseline, &values, loopback);
-        if changed.is_empty() {
-            self.overlay.message("Nothing changed since the feed started", Duration::from_secs(2), now);
-            return;
-        }
+        let delay_ms = self.delay_ms();
         let result = match &self.opts.settings {
-            Some(s) => {
-                let pairs: Vec<(&str, &str)> = changed.iter().filter_map(|kv| kv.split_once('=')).collect();
-                s.save(&pairs)
-            }
+            Some(s) => self.opts.live_changes.save(s, delay_ms),
             None => Err("no settings to save to".to_string()),
         };
         match result {
-            Ok(()) => {
-                self.baseline = values;
-                self.overlay.message(format!("Saved: {}", changed.join(" ")), Duration::from_secs(3), now);
+            Ok(changed) if changed.is_empty() => {
+                self.overlay.message("Nothing changed since the feed started", Duration::from_secs(2), now);
             }
+            Ok(changed) => self.overlay.message(format!("Saved: {}", changed.join(" ")), Duration::from_secs(3), now),
             Err(e) => {
                 eprintln!("save failed: {e}");
                 self.overlay.message(format!("Save failed: {e}"), Duration::from_secs(5), now);
@@ -1347,14 +1288,13 @@ impl App {
                 Some(overlay::tips_lines(id, sources::get(id).as_ref()))
             }
             Some(Page::Panel) => {
-                let values = self.values();
-                let changes = overlay::changes(&self.saveable(), &self.baseline, &values, loopback);
+                let changes = self.opts.live_changes.changes(self.delay_ms());
                 let id = &self.overlay.tips_id;
-                let p = &self.picture;
+                let p = self.opts.live_changes.picture();
                 Some(overlay::panel_lines(&overlay::Panel {
-                    display: self.opts.window.names().1,
+                    display: self.opts.live_changes.window().names().1,
                     levels: p.levels.as_str(),
-                    scaling: self.scaling.as_str(),
+                    scaling: self.opts.live_changes.scaling().as_str(),
                     colour: [p.contrast, p.brightness, p.gamma, p.saturation],
                     audio: match &self.opts.audio {
                         AudioSetup::Off(v) => overlay::Audio::Other(v.clone()),
@@ -1781,10 +1721,7 @@ mod tests {
         std::fs::write(&file, config).unwrap();
         let path = file.display().to_string();
         let s = Settings::resolve_with(&move |k| (k == "CONFIG_FILE").then(|| path.clone()));
-        let picture =
-            Picture::from_settings(s.get("LEVELS"), s.get("CONTRAST"), s.get("BRIGHTNESS"), s.get("GAMMA"), s.get("SATURATION"))
-                .unwrap();
-        let scaling = Scaling::from_settings(s.get("SCALING")).unwrap();
+        let live_changes = LiveChanges::read(&s).unwrap();
         let format = Format { width: 1920, height: 1080, fps: 60.0, pixels: crate::capture::Pixels::Yuyv };
         let mut app = App {
             window_no: 0,
@@ -1792,10 +1729,7 @@ mod tests {
             format,
             slot: Arc::new(Mutex::new(Slot { data: Vec::new(), tag: None, superseded: 0 })),
             gfx: None,
-            picture,
-            scaling,
             overlay: Overlay::new("ps5", Instant::now()),
-            baseline: overlay::Values::new(),
             notices: Arc::default(),
             notify: Arc::new(|_| {}),
             repaint: false,
@@ -1810,14 +1744,11 @@ mod tests {
             last_submit: Duration::ZERO,
             end: End::new(Arc::new(|_| {})),
             opts: Options {
-                window: WindowMode::Fullscreen,
+                live_changes,
                 monitor: None,
                 seconds: None,
                 stats: false,
-                picture,
-                scaling,
                 audio: AudioSetup::Off("none".into()),
-                window_size: (1280, 720),
                 desktop: Desktop::Generic,
                 source: "ps5".into(),
                 settings: Some(s),
@@ -1827,7 +1758,7 @@ mod tests {
                 refocus: None,
             },
         };
-        app.baseline = app.values();
+        app.opts.live_changes.mark_baseline(None);
         (app, file)
     }
 
@@ -2008,22 +1939,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "# mine\nLEVELS=limited\nCONTRAST=2\nSCALING=fast\n");
         assert_eq!(app.overlay.current_message(Instant::now()), Some("Saved: SCALING=fast LEVELS=limited"));
         assert_eq!(panel(&app)[9], "w     Save         nothing changed", "the save is the new baseline");
-        // view.sh reads what w wrote as saved and valid (Linux: view.sh is bash).
-        #[cfg(target_os = "linux")]
-        {
-            let out = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../view.sh"))
-                .arg("--settings")
-                .env("CONFIG_FILE", &file)
-                .output()
-                .unwrap();
-            let report = String::from_utf8_lossy(&out.stdout);
-            let row =
-                |k: &str| report.lines().find(|l| l.split_whitespace().next() == Some(k)).unwrap_or("").split_whitespace().collect::<Vec<_>>();
-            assert_eq!(row("LEVELS"), ["LEVELS", "limited", "saved"], "{report}");
-            assert_eq!(row("SCALING"), ["SCALING", "fast", "saved"], "{report}");
-            assert!(out.status.success() && report.contains("all valid"), "{report}");
-        }
-
         assert!(press(&mut app, "r"));
         assert_eq!(panel(&app)[9], "w     Save         CONTRAST=0");
         assert!(press(&mut app, "t"));
@@ -2042,9 +1957,9 @@ mod tests {
         assert_eq!(panel(&app)[2], "f     Display      Borderless");
         assert!(panel(&app)[9].contains("WINDOW=borderless"));
         press(&mut app, "f");
-        assert_eq!(app.opts.window, WindowMode::Windowed { width: 1280, height: 720 });
+        assert_eq!(app.opts.live_changes.window(), WindowMode::Windowed { width: 1280, height: 720 });
         press(&mut app, "f");
-        assert_eq!(app.opts.window, WindowMode::Fullscreen);
+        assert_eq!(app.opts.live_changes.window(), WindowMode::Fullscreen);
         press(&mut app, "Esc");
         press(&mut app, "f");
         assert_eq!(app.overlay.current_message(Instant::now()), Some("Display: Borderless"));
@@ -2058,38 +1973,6 @@ mod tests {
         for f in [file, quiet_file] {
             std::fs::remove_dir_all(f.parent().unwrap()).unwrap();
         }
-    }
-
-    #[test]
-    fn every_saveable_setting_has_a_live_value() {
-        let (app, file) = app_with("# saveable\n");
-        let rows = crate::settings::rows();
-        let flagged: Vec<&str> = rows.iter().filter(|r| r.has_flag("save")).map(|r| r.name.as_str()).collect();
-        assert!(flagged.contains(&"DELAY") && flagged.contains(&"WINDOW"), "{flagged:?}");
-        let without_delay: Vec<&str> = flagged.iter().copied().filter(|n| *n != "DELAY").collect();
-        assert_eq!(saveable(&rows, &app.values_with(None), false), without_delay);
-        assert_eq!(saveable(&rows, &app.values_with(Some(50)), true), flagged);
-        assert_eq!(app.values_with(Some(50))["DELAY"], "0.050", "in seconds, as the mpv script writes it");
-        std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
-    }
-
-    /// Live values for these names, all empty.
-    fn live(names: &[&'static str]) -> overlay::Values {
-        names.iter().map(|n| (*n, String::new())).collect()
-    }
-
-    const LIVE: [&str; 7] = ["WINDOW", "SCALING", "LEVELS", "BRIGHTNESS", "CONTRAST", "SATURATION", "GAMMA"];
-
-    #[test]
-    #[should_panic(expected = "GAMMA is flagged save in lib/settings.sh but has no live value")]
-    fn a_saveable_setting_without_a_live_value_fails_loudly() {
-        saveable(&crate::settings::rows(), &live(&LIVE[..6]), false);
-    }
-
-    #[test]
-    #[should_panic(expected = "DELAY is flagged save")]
-    fn the_delay_has_a_live_value_while_the_loopback_runs() {
-        saveable(&crate::settings::rows(), &live(&LIVE), true);
     }
 
     #[test]

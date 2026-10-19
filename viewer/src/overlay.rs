@@ -4,7 +4,6 @@
 //! messages), the no-signal banner, and what w would save. Text only: osd.rs
 //! draws it.
 
-use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use crate::capture::{Reason, Since, Signal};
@@ -254,23 +253,6 @@ pub fn tips_lines(id: &str, profile: Option<&Profile>) -> Vec<String> {
     out
 }
 
-/// The saveable settings' live values, as w would write them.
-pub type Values = BTreeMap<&'static str, String>;
-
-/// What w would save: each saveable setting (lib/settings.sh's save flag,
-/// in its order) whose value differs from the baseline; DELAY only while
-/// the loopback carries the sound.
-pub fn changes(saveable: &[&str], baseline: &Values, now: &Values, loopback: bool) -> Vec<String> {
-    saveable
-        .iter()
-        .filter(|k| **k != "DELAY" || loopback)
-        .filter_map(|k| {
-            let v = now.get(k)?;
-            (baseline.get(k) != Some(v)).then(|| format!("{k}={v}"))
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,20 +312,6 @@ mod tests {
         assert_eq!(lines.last().unwrap(), "◂ ▸ other sources   t back   Tab/Esc close");
         assert_eq!(tips_lines("nope", None)[0], "No setup tips for 'nope'");
         assert_eq!(wrap("aa bb cc", 5), ["aa bb", "cc"]);
-    }
-
-    #[test]
-    fn w_saves_what_changed_since_the_start() {
-        let saveable = ["DELAY", "WINDOW", "SCALING", "LEVELS", "BRIGHTNESS"];
-        let base: Values = [("DELAY", "0.050"), ("WINDOW", "fullscreen"), ("LEVELS", "auto"), ("BRIGHTNESS", "0")]
-            .map(|(k, v)| (k, v.to_string()))
-            .into();
-        let mut now = base.clone();
-        assert!(changes(&saveable, &base, &now, true).is_empty());
-        now.insert("LEVELS", "full".into());
-        now.insert("DELAY", "0.060".into());
-        assert_eq!(changes(&saveable, &base, &now, true), ["DELAY=0.060", "LEVELS=full"]);
-        assert_eq!(changes(&saveable, &base, &now, false), ["LEVELS=full"], "DELAY only with the loopback");
     }
 
     #[test]

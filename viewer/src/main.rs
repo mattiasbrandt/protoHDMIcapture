@@ -17,6 +17,7 @@ mod feed;
 mod gputime;
 mod keys;
 mod level;
+mod live_changes;
 mod mjpeg;
 mod osd;
 mod overlay;
@@ -93,7 +94,7 @@ fn audio(s: &Settings, card: Option<&card::Node>) -> Option<audio::Loopback> {
     let src = s.get("SRC").to_string();
     let sink = Some(s.get("SINK").to_string()).filter(|v| !v.is_empty());
     // Validated: DELAY is 0..1 s, LAT_MS 1..1000.
-    let delay_ms = (s.get("DELAY").parse::<f64>().unwrap_or(0.05) * 1000.0).round() as u32;
+    let delay_ms = live_changes::delay_ms(s.get("DELAY")).unwrap_or(live_changes::DEFAULT_DELAY_MS);
     let buffer_ms = s.get("LAT_MS").parse().unwrap_or(10);
     let card = card.cloned();
     let start: audio::Start = Box::new(move |delay_ms| {
@@ -153,24 +154,17 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
     std::fs::write(dir.join("setup.pid"), format!("{}\n", std::process::id())).map_err(|e| format!("setup.pid: {e}"))?;
     // The feed in the wizard's window: the saved picture settings, or the
     // defaults where they are not valid; windowed, the display left alone.
-    let picture = picture::Picture::from_settings(s.get("LEVELS"), s.get("CONTRAST"), s.get("BRIGHTNESS"), s.get("GAMMA"), s.get("SATURATION"))
-        .unwrap_or_else(|e| {
-            eprintln!("warning: {e}; the wizard's feed uses the default picture");
-            picture::Picture::DEFAULT
-        });
-    let scaling = scale::Scaling::from_settings(s.get("SCALING")).unwrap_or_else(|_| {
-        fallback("SCALING", "balanced");
-        scale::Scaling::Balanced
-    });
+    let (live_changes, warnings) = live_changes::LiveChanges::read_picture_lenient(&s);
+    for w in warnings {
+        eprintln!("warning: the wizard's feed: {w}");
+    }
+    let live_changes = live_changes.with_window(app::WindowMode::Windowed { width: 1280, height: 720 }, (1280, 720));
     let opts = || app::Options {
-        window: app::WindowMode::Windowed { width: 1280, height: 720 },
+        live_changes: live_changes.clone(),
         monitor: None,
         seconds: None,
         stats: false,
-        picture,
-        scaling,
         audio: app::AudioSetup::Off("the wizard's".into()),
-        window_size: (1280, 720),
         desktop: desktop::Desktop::Generic,
         source: String::new(),
         settings: None,
@@ -363,14 +357,11 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     // wizard's feed windows (--setup, or the first run above) had their own.
     let live = Arc::new(dashboard::Live::new());
     let mut opts = app::Options {
-        window: app::WindowMode::Fullscreen,
+        live_changes: live_changes::LiveChanges::DEFAULT,
         monitor: None,
         seconds: None,
         stats: false,
-        picture: picture::Picture::DEFAULT,
-        scaling: scale::Scaling::Balanced,
         audio: app::AudioSetup::Off(String::new()),
-        window_size: (1280, 720),
         desktop: desktop::Desktop::Generic,
         source: String::new(),
         settings: None,
@@ -410,19 +401,7 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     for n in view_sh_only::check(&s)? {
         eprintln!("note: {n}");
     }
-    opts.window = app::WindowMode::from_settings(s.get("WINDOW"), s.get("WINDOW_SIZE"))?;
-    opts.window_size = app::WindowMode::from_settings("windowed", s.get("WINDOW_SIZE")).map(|m| match m {
-        app::WindowMode::Windowed { width, height } => (width, height),
-        _ => unreachable!("windowed is Windowed"),
-    })?;
-    opts.picture = picture::Picture::from_settings(
-        s.get("LEVELS"),
-        s.get("CONTRAST"),
-        s.get("BRIGHTNESS"),
-        s.get("GAMMA"),
-        s.get("SATURATION"),
-    )?;
-    opts.scaling = scale::Scaling::from_settings(s.get("SCALING"))?;
+    opts.live_changes = live_changes::LiveChanges::read(&s)?;
     let format = capture::Format::from_settings(s.get("RES"), s.get("FPS"), s.get("FMT"))?;
 
     // One video window at a time, with view.sh too (docs/run-dir.md).

@@ -38,6 +38,16 @@ pub enum Levels {
 }
 
 impl Levels {
+    /// LEVELS, as the settings spell it.
+    pub fn from_settings(v: &str) -> Result<Self, String> {
+        Ok(match v {
+            "auto" => Self::Auto,
+            "limited" => Self::Limited,
+            "full" => Self::Full,
+            other => return Err(format!("LEVELS={other} is not auto, limited or full")),
+        })
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -84,24 +94,6 @@ const COLOUR_RANGE: std::ops::RangeInclusive<i32> = -100..=100;
 impl Picture {
     /// Every setting at its default.
     pub const DEFAULT: Self = Self { levels: Levels::Auto, contrast: 0, brightness: 0, gamma: 0, saturation: 0 };
-
-    /// From the settings (already validated against lib/settings.sh).
-    pub fn from_settings(levels: &str, contrast: &str, brightness: &str, gamma: &str, saturation: &str) -> Result<Self, String> {
-        let levels = match levels {
-            "auto" => Levels::Auto,
-            "limited" => Levels::Limited,
-            "full" => Levels::Full,
-            other => return Err(format!("LEVELS={other} is not auto, limited or full")),
-        };
-        let int = |name: &str, v: &str| v.parse::<i32>().map_err(|_| format!("{name}={v} is not a whole number"));
-        Ok(Self {
-            levels,
-            contrast: int("CONTRAST", contrast)?,
-            brightness: int("BRIGHTNESS", brightness)?,
-            gamma: int("GAMMA", gamma)?,
-            saturation: int("SATURATION", saturation)?,
-        })
-    }
 
     /// mpv's 1..8 keys: `add <colour> ±1`, clamped to -100..100.
     pub fn adjust(&mut self, colour: Colour, by: i32) {
@@ -305,7 +297,7 @@ mod tests {
 
     #[test]
     fn keys_clamp_reset_and_cycle() {
-        let mut p = Picture::from_settings("full", "99", "-3", "0", "5").unwrap();
+        let mut p = Picture { levels: Levels::Full, contrast: 99, brightness: -3, gamma: 0, saturation: 5 };
         p.adjust(Colour::Contrast, 1);
         p.adjust(Colour::Contrast, 1);
         assert_eq!(p.contrast, 100);
@@ -317,7 +309,8 @@ mod tests {
         assert_eq!(p.levels, Levels::Auto);
         p.cycle_levels();
         assert_eq!(p.levels, Levels::Limited);
-        assert!(Picture::from_settings("tv", "0", "0", "0", "0").is_err());
+        assert_eq!(Levels::from_settings("full"), Ok(Levels::Full));
+        assert!(Levels::from_settings("tv").is_err());
     }
 
     #[test]
