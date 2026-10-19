@@ -418,6 +418,26 @@ pub struct AudioInputs {
     pub all: Vec<String>,
 }
 
+/// The card's own audio input, or why it is not known followed by how to
+/// name one by hand (SRC). On Linux what can be told without PipeWire (no
+/// card with `--test-pattern`, a card not on USB) is told before asking it.
+/// `card`: None with `--test-pattern`.
+pub fn audio_input(card: Option<&Node>) -> Result<AudioInput, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let usb = card_usb(card).map_err(|why| format!("{why}; {}", set_src(&[])))?;
+        let snap = crate::pw::snapshot()?;
+        snap.card_source(&usb)
+            .map(|n| AudioInput { id: n.clone(), name: n })
+            .ok_or_else(|| format!("the card has no PipeWire source; {}", set_src(&snap.audio_sources())))
+    }
+    #[cfg(windows)]
+    {
+        let inputs = audio_inputs(card)?;
+        inputs.card.map_err(|why| format!("{why}; {}", set_src(&inputs.all)))
+    }
+}
+
 /// The audio inputs, with the card's own: on Linux the PipeWire source on
 /// the card's USB device, on Windows the one input in the card's container
 /// (one physical device). `card`: None with `--test-pattern`. Err: the
@@ -426,11 +446,7 @@ pub fn audio_inputs(card: Option<&Node>) -> Result<AudioInputs, String> {
     #[cfg(target_os = "linux")]
     {
         let snap = crate::pw::snapshot()?;
-        let found = card.ok_or("no card to find the audio input of (--test-pattern)").and_then(|card| {
-            let usb = usb_dir(&card.path).ok_or("the card is not on USB, so its audio input cannot be found")?;
-            let usb = usb.to_string_lossy();
-            snap.card_source(usb.strip_prefix("/sys").unwrap_or(&usb)).ok_or("the card has no PipeWire source")
-        });
+        let found = card_usb(card).and_then(|usb| snap.card_source(&usb).ok_or("the card has no PipeWire source"));
         let card = found.map(|n| AudioInput { id: n.clone(), name: n }).map_err(str::to_string);
         Ok(AudioInputs { card, all: snap.audio_sources() })
     }
@@ -448,9 +464,19 @@ pub fn audio_inputs(card: Option<&Node>) -> Result<AudioInputs, String> {
     }
 }
 
+/// The card's USB device as PipeWire names its path (sysfs without
+/// `/sys`), or why the card's audio input cannot be found from it.
+#[cfg(target_os = "linux")]
+fn card_usb(card: Option<&Node>) -> Result<String, &'static str> {
+    let card = card.ok_or("no card to find the audio input of (--test-pattern)")?;
+    let usb = usb_dir(&card.path).ok_or("the card is not on USB, so its audio input cannot be found")?;
+    let usb = usb.to_string_lossy();
+    Ok(usb.strip_prefix("/sys").unwrap_or(&usb).to_string())
+}
+
 /// How to name the audio input by hand, after why the card's own is not
 /// known.
-pub fn set_src(all: &[String]) -> String {
+fn set_src(all: &[String]) -> String {
     if cfg!(windows) {
         format!("set SRC to one of: {}", all.join(" | "))
     } else {
@@ -507,6 +533,16 @@ mod tests {
         assert_eq!(card_input(8, &inputs), Err("no audio input belongs to the card"));
         let two = [input("a", "1", Some(7)), input("b", "2", Some(7))];
         assert_eq!(card_input(7, &two), Err("more than one audio input belongs to the card"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn no_card_or_one_off_usb_is_said_with_the_src_hint() {
+        // Told without PipeWire: the same with or without it running.
+        let hint = "set SRC=<name from pactl list short sources>";
+        assert_eq!(audio_input(None), Err(format!("no card to find the audio input of (--test-pattern); {hint}")));
+        let off_usb = node("/dev/null", "", "", "not a card");
+        assert_eq!(audio_input(Some(&off_usb)), Err(format!("the card is not on USB, so its audio input cannot be found; {hint}")));
     }
 
     #[test]

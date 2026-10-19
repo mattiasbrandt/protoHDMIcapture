@@ -106,12 +106,11 @@ fn audio(s: &Settings, card: Option<&card::Node>, live: &Arc<dashboard::Live>) -
     Some(audio::Loopback::new(start, delay_ms, live.clone(), audio::Say::desktop()))
 }
 
-/// The card's own audio input (card.rs `audio_inputs`), by its id: on
+/// The card's own audio input (card.rs `audio_input`), by its id: on
 /// Windows not by name, which said only "USB Audio Device" for the
 /// MS2130's audio function (the #18 VM run). Else SRC must name it.
 fn card_audio_input(card: Option<&card::Node>) -> Result<String, String> {
-    let inputs = card::audio_inputs(card)?;
-    let input = inputs.card.map_err(|why| format!("{why}; {}", card::set_src(&inputs.all)))?;
+    let input = card::audio_input(card)?;
     eprintln!("audio: the card's input: {}", input.name);
     Ok(input.id)
 }
