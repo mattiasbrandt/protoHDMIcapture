@@ -22,6 +22,9 @@ pub type Values = BTreeMap<&'static str, String>;
 /// back from them (None: no value to save, DELAY without the loopback).
 struct Entry {
     name: &'static str,
+    /// Part of the picture (SCALING too): what the setup wizard's feed
+    /// reads (`read_picture_lenient`).
+    picture: bool,
     read: fn(&mut LiveChanges, &str) -> Result<(), String>,
     spell: fn(&LiveChanges, Option<u32>) -> Option<String>,
 }
@@ -34,11 +37,13 @@ fn colour(name: &str, v: &str) -> Result<i32, String> {
 const ENTRIES: [Entry; 8] = [
     Entry {
         name: "DELAY",
+        picture: false,
         read: |_, v| delay_ms(v).map(drop),
         spell: |_, delay_ms| delay_ms.map(seconds),
     },
     Entry {
         name: "WINDOW",
+        picture: false,
         // WINDOW_SIZE is read first: a windowed WINDOW takes its size.
         read: |l, v| {
             l.window = WindowMode::from_settings(v, &format!("{}x{}", l.window_size.0, l.window_size.1))?;
@@ -48,6 +53,7 @@ const ENTRIES: [Entry; 8] = [
     },
     Entry {
         name: "SCALING",
+        picture: true,
         read: |l, v| {
             l.scaling = Scaling::from_settings(v)?;
             Ok(())
@@ -56,6 +62,7 @@ const ENTRIES: [Entry; 8] = [
     },
     Entry {
         name: "LEVELS",
+        picture: true,
         read: |l, v| {
             l.picture.levels = Levels::from_settings(v)?;
             Ok(())
@@ -64,6 +71,7 @@ const ENTRIES: [Entry; 8] = [
     },
     Entry {
         name: "BRIGHTNESS",
+        picture: true,
         read: |l, v| {
             l.picture.brightness = colour("BRIGHTNESS", v)?;
             Ok(())
@@ -72,6 +80,7 @@ const ENTRIES: [Entry; 8] = [
     },
     Entry {
         name: "CONTRAST",
+        picture: true,
         read: |l, v| {
             l.picture.contrast = colour("CONTRAST", v)?;
             Ok(())
@@ -80,6 +89,7 @@ const ENTRIES: [Entry; 8] = [
     },
     Entry {
         name: "SATURATION",
+        picture: true,
         read: |l, v| {
             l.picture.saturation = colour("SATURATION", v)?;
             Ok(())
@@ -88,6 +98,7 @@ const ENTRIES: [Entry; 8] = [
     },
     Entry {
         name: "GAMMA",
+        picture: true,
         read: |l, v| {
             l.picture.gamma = colour("GAMMA", v)?;
             Ok(())
@@ -95,9 +106,6 @@ const ENTRIES: [Entry; 8] = [
         spell: |l, _| Some(l.picture.gamma.to_string()),
     },
 ];
-
-/// The live settings the picture is made of: `read_picture_lenient`'s.
-const PICTURE: [&str; 6] = ["SCALING", "LEVELS", "BRIGHTNESS", "CONTRAST", "SATURATION", "GAMMA"];
 
 /// DELAY's default, for a start that cannot read it.
 pub const DEFAULT_DELAY_MS: u32 = 50;
@@ -158,7 +166,7 @@ impl LiveChanges {
     pub fn read_picture_lenient(s: &Settings) -> (Self, Vec<String>) {
         let mut l = Self::DEFAULT;
         let mut warnings = Vec::new();
-        for e in ENTRIES.iter().filter(|e| PICTURE.contains(&e.name)) {
+        for e in ENTRIES.iter().filter(|e| e.picture) {
             if let Err(why) = (e.read)(&mut l, s.get(e.name)) {
                 let default = (e.spell)(&Self::DEFAULT, Some(DEFAULT_DELAY_MS)).expect("every default spells");
                 warnings.push(format!("{why}; {}={default} instead", e.name));
@@ -293,9 +301,10 @@ mod tests {
 
     #[test]
     fn read_change_save_and_view_sh_reads_it_back() {
-        let (s, file) = settings("# mine\nLEVELS=auto\nCONTRAST=2\nWINDOW_SIZE=1600x900\n");
+        let (s, file) = settings("# mine\nLEVELS=auto\nCONTRAST=2\nBRIGHTNESS=-4\nSATURATION=7\nWINDOW_SIZE=1600x900\n");
         let mut l = LiveChanges::read(&s).unwrap();
-        assert_eq!(l.picture().contrast, 2);
+        let p = l.picture();
+        assert_eq!((p.contrast, p.brightness, p.saturation, p.gamma), (2, -4, 7, 0));
         assert_eq!(l.window_size(), (1600, 900));
         l.mark_baseline(Some(50));
         assert!(l.changes(Some(50)).is_empty());
@@ -303,12 +312,13 @@ mod tests {
         l.cycle_levels();
         l.cycle_scaling();
         assert_eq!(l.adjust_colour(Colour::Gamma, -3), -3);
+        assert_eq!(l.adjust_colour(Colour::Saturation, 1), 8);
         assert_eq!(l.cycle_window(), WindowMode::Borderless);
-        assert_eq!(l.changes(Some(50)), ["WINDOW=borderless", "SCALING=fast", "LEVELS=limited", "GAMMA=-3"], "lib/settings.sh's order");
-        assert_eq!(l.save(&s, Some(50)).unwrap().len(), 4);
+        assert_eq!(l.changes(Some(50)), ["WINDOW=borderless", "SCALING=fast", "LEVELS=limited", "SATURATION=8", "GAMMA=-3"], "lib/settings.sh's order");
+        assert_eq!(l.save(&s, Some(50)).unwrap().len(), 5);
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
-            "# mine\nLEVELS=limited\nCONTRAST=2\nWINDOW_SIZE=1600x900\nWINDOW=borderless\nSCALING=fast\nGAMMA=-3\n"
+            "# mine\nLEVELS=limited\nCONTRAST=2\nBRIGHTNESS=-4\nSATURATION=8\nWINDOW_SIZE=1600x900\nWINDOW=borderless\nSCALING=fast\nGAMMA=-3\n"
         );
         assert!(l.changes(Some(50)).is_empty(), "the save is the new baseline");
         assert_eq!(l.save(&s, Some(50)), Ok(vec![]), "nothing changed: nothing written");
@@ -332,6 +342,8 @@ mod tests {
             assert_eq!(row("LEVELS"), ["LEVELS", "limited", "saved"], "{report}");
             assert_eq!(row("SCALING"), ["SCALING", "fast", "saved"], "{report}");
             assert_eq!(row("GAMMA"), ["GAMMA", "-3", "saved"], "{report}");
+            assert_eq!(row("BRIGHTNESS"), ["BRIGHTNESS", "-4", "saved"], "{report}");
+            assert_eq!(row("SATURATION"), ["SATURATION", "8", "saved"], "{report}");
             assert!(out.status.success() && report.contains("all valid"), "{report}");
         }
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
@@ -365,11 +377,12 @@ mod tests {
     #[test]
     fn a_strict_read_refuses_and_a_lenient_one_falls_back() {
         // Unvalidated values, as the wizard can find them.
-        let (s, file) = settings("LEVELS=tv\nSCALING=sharp\nCONTRAST=5\nWINDOW=tiled\nWINDOW_SIZE=big\nDELAY=soon\n");
+        let (s, file) = settings("LEVELS=tv\nSCALING=sharp\nCONTRAST=5\nBRIGHTNESS=-9\nSATURATION=lots\nWINDOW=tiled\nWINDOW_SIZE=big\nDELAY=soon\n");
         assert_eq!(LiveChanges::read(&s), Err("WINDOW_SIZE=big is not WIDTHxHEIGHT".into()));
         let (l, warnings) = LiveChanges::read_picture_lenient(&s);
         assert_eq!(l.picture().levels, Levels::Auto);
-        assert_eq!(l.picture().contrast, 5, "what can be read is kept");
+        assert_eq!((l.picture().contrast, l.picture().brightness), (5, -9), "what can be read is kept");
+        assert_eq!(l.picture().saturation, 0);
         assert_eq!(l.scaling(), Scaling::Balanced);
         // Only the picture and SCALING: the wizard's window is its own, and
         // its sync stage says an invalid DELAY itself.
@@ -378,6 +391,7 @@ mod tests {
             [
                 "SCALING=sharp is not balanced, fast, high-quality or config; SCALING=balanced instead",
                 "LEVELS=tv is not auto, limited or full; LEVELS=auto instead",
+                "SATURATION=lots is not a whole number; SATURATION=0 instead",
             ]
         );
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
