@@ -1584,15 +1584,40 @@ mod tests {
         let (loopback, script) = fake::loopback(50);
         let keys = loopback.keys();
         keys.start();
+        let said = overlay(&keys);
         keys.level(LevelChange::Volume(-30));
         let was = Level { volume: 70, mute: false };
         assert_eq!(fake::level_settles(&keys, was), Some(Ok(was)));
+        // Its message follows the level from the controls' thread.
+        settles(&said, 1);
+        forget(&script, &said);
         fake::kill(&keys);
-        // m before the death's wake is handled: the dead one is not used.
+        // m before the death's wake is handled: the dead one is not used,
+        // and its death is said before the new start.
         keys.level(LevelChange::Mute);
         assert_eq!(*script.starts.borrow(), [50, 50], "at the delay it had");
         let want = Level { volume: 70, mute: true };
         assert_eq!(fake::level_settles(&keys, want), Some(Ok(want)), "70 % carried over, then muted");
+        let mut terminal = died_lines().to_vec();
+        terminal.push("audio: card-in -> speakers".into());
+        assert_eq!(lines(&script), terminal);
+        // The level's own message comes from the controls' thread, after
+        // the start's.
+        settles(&said, 3);
+        assert_eq!(
+            messages(&said),
+            [format!("Audio stopped ({GONE}): ctrl -/+, m, 9 or 0 start it again"), "Audio back".into(), "Audio muted".into()]
+        );
+        assert_eq!(notices(&script), [crate::desktop::Notice::NoSound(DIED.into())], "the death only: the start ran");
+        assert_eq!(script.live.audio_said(), ("running".into(), String::new(), vec![DIED.into(), "audio back, sync 50 ms".into()]));
+    }
+
+    /// Waits up to a second for `n` overlay messages.
+    fn settles(said: &Arc<Mutex<Vec<String>>>, n: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while said.lock().unwrap().len() < n && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
