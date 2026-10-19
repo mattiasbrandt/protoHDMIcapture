@@ -322,19 +322,6 @@ fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::
     Ok((card::open(&picked.node, format)?, picked.node))
 }
 
-/// The viewer's end when its capture ended on its own (#40). It is not
-/// opened again: a card reopened as it came back got stuck, and only a
-/// power-off cleared it (capture-cards/ms2130.md). Only an error its source
-/// marks "(the card is gone?)" is said as the card unplugged; any other end
-/// is said as it is.
-fn capture_ended(error: &str) -> String {
-    const STUCK: &str = "if it then shows no picture, the card is stuck: take out its USB cable and its DC5V power for 10 s.";
-    match error.strip_suffix(" (the card is gone?)") {
-        Some(error) => format!("capture: the card was unplugged ({error}). Plug it back in and start the viewer again; {STUCK}"),
-        None => format!("capture: {error}. Start the viewer again; {STUCK}"),
-    }
-}
-
 /// The settings; with `menu`, a menu launch's defaults (`--menu`, #28).
 fn settings(menu: bool) -> Settings {
     let s = Settings::resolve();
@@ -356,7 +343,6 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
 
     // The viewer's numbers, from here on: the dashboard serves these. The
     // wizard's feed windows (--setup, or the first run above) had their own.
-    let live = Arc::new(dashboard::Live::new());
     let mut opts = app::Options {
         live_changes: live_changes::LiveChanges::DEFAULT,
         monitor: None,
@@ -367,7 +353,7 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
         source: String::new(),
         settings: None,
         wizard: None,
-        live: live.clone(),
+        live: Arc::new(dashboard::Live::new()),
         dashboard: None,
         refocus: None,
     };
@@ -405,153 +391,30 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     opts.live_changes = live_changes::LiveChanges::read(&s)?;
     let format = capture::Format::from_settings(s.get("RES"), s.get("FPS"), s.get("FMT"))?;
 
-    // One video window at a time, with view.sh too (docs/run-dir.md).
-    let desktop = desktop::detect()?;
-    let session = match session::Session::start(&session::run_dir(), desktop.clone())? {
-        Ok(s) => Some(s),
-        Err(running) => {
-            let pid = running.pid.map_or("unknown".to_string(), |p| p.to_string());
-            if running.focused {
-                eprintln!("already running (pid {pid}); focused it");
-            } else {
-                eprintln!("already running (pid {pid})");
-                // Started from a launcher: say so on the desktop, as view.sh.
-                if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-                    desktop::notify("normal", "protoHDMIcapture is already running", "");
-                }
-            }
-            return Ok(());
-        }
+    // One video window at a time, with view.sh too (docs/run-dir.md): the
+    // feed's start and end, in their order (feed.rs).
+    let start = feed::Start { run_dir: session::run_dir(), settings: s, opts, format, test_pattern, desktop: desktop::detect()? };
+    let parts = feed::Parts {
+        open_card: Box::new(open_card),
+        loopback: Box::new(audio),
+        debug_log: Box::new(debuglog::DebugLog::start),
+        window: Box::new(app::run),
     };
-    // DEBUG≠off: the output into debug.log from here, with the lock held
-    // (a refused second launch must not truncate the running one's), as
-    // view.sh's debug_tee. Declared before the feed, so it outlives the
-    // feed's teardown. A log that cannot start costs only the log.
-    let mut debug_log = match (s.get("DEBUG"), &session) {
-        ("off", _) | (_, None) => None,
-        (_, Some(_)) => match debuglog::DebugLog::start(&session::run_dir().join("debug.log")) {
-            Ok(log) => {
-                log.header(&desktop);
-                log.settings(&s);
-                Some(log)
-            }
-            Err(e) => {
-                eprintln!("warning: debug.log: {e}; the feed goes on without it");
-                None
-            }
-        },
+    let running = match feed::run(start, parts, quit)? {
+        feed::Ran::Ended => return Ok(()),
+        feed::Ran::AlreadyRunning(running) => running,
     };
-    // From here on, an early return ends what the feed holds in its order.
-    let mut feed: feed::Feed = feed::Feed::new(session);
-    opts.desktop = desktop;
-
-    let (source, node): (Box<dyn capture::FrameSource>, _) = if test_pattern {
-        eprintln!("video: the test pattern at {}x{} {} fps", format.width, format.height, format.fps);
-        (Box::new(pattern::Pattern::new(format)), None)
+    let pid = running.pid.map_or("unknown".to_string(), |p| p.to_string());
+    if running.focused {
+        eprintln!("already running (pid {pid}); focused it");
     } else {
-        let opened = open_card(&s, format);
-        if let (Err(e), Some(log)) = (&opened, &debug_log) {
-            log.ended(&Err(e.to_string()));
-        }
-        let (source, node) = opened?;
-        (source, Some(node))
-    };
-    if let Some(log) = debug_log.as_mut() {
-        log.format(format, test_pattern);
-        match debuglog::perf_every(env::var("DEBUG_PERF_INTERVAL").ok().as_deref()) {
-            Ok(every) => log.perf(live.clone(), every),
-            Err(e) => {
-                eprintln!("warning: {e}");
-                log.perf(live.clone(), debuglog::perf_every(None).expect("the default is valid"));
-            }
+        eprintln!("already running (pid {pid})");
+        // Started from a launcher: say so on the desktop, as view.sh.
+        if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            desktop::notify("normal", "protoHDMIcapture is already running", "");
         }
     }
-    match audio(&s, node.as_ref(), &live) {
-        Some(loopback) => {
-            let keys = feed.set_audio(loopback).keys();
-            keys.start();
-            opts.audio = app::AudioSetup::Loopback(keys);
-        }
-        None => {
-            opts.audio = app::AudioSetup::Off("none".into());
-            live.set_audio(dashboard::AudioLive::Off("AUDIO=none".into()));
-        }
-    }
-    opts.source = s.get("SOURCE").to_string();
-    if !opts.source.is_empty() && sources::get(&opts.source).is_none() {
-        eprintln!(
-            "warning: SOURCE={} has no profile in sources/; the overlay shows the tips for any HDMI source",
-            opts.source
-        );
-        opts.source.clear();
-    }
-    // Monitors are known on Hyprland only; decided not on Windows (#38).
-    #[cfg(windows)]
-    if opts.monitor.take().is_some() {
-        eprintln!("note: --monitor is not on Windows; the window opens where Windows puts it");
-    }
-    if let Some(name) = &opts.monitor {
-        opts.refocus = opts.desktop.focused_monitor().filter(|m| m != name);
-        opts.desktop.focus_monitor(name);
-    }
-    // As view.sh: after the audio, before the window.
-    #[cfg(target_os = "linux")]
-    if s.get("REFRESH") == "match"
-        && let Some(session) = feed.session()
-    {
-        session.match_refresh(format.fps, opts.monitor.as_deref());
-    }
-    // Decided not on Windows (#38): the display's own rate stays.
-    #[cfg(windows)]
-    if s.get("REFRESH") == "match" {
-        eprintln!("note: REFRESH=match is not on Windows; the display's refresh rate is left as it is");
-    }
-    // DEBUG=window opens the dashboard with the feed, as in view.sh.
-    let debug_window = s.get("DEBUG") == "window";
-    opts.settings = Some(s);
-    let stats = opts.stats;
-    if quit.requested() {
-        return Ok(());
-    }
-    // As view.sh writes it once its player is started.
-    if let Some(session) = feed.session() {
-        session.announce()?;
-    }
-    // The dashboard's socket, with the video lock held; a failure costs
-    // only the dashboard.
-    // Its Display section reads the monitors and REFRESH=match's record.
-    let display = dashboard::Display::new(opts.desktop.clone(), session::run_dir().join("refresh.restore"));
-    match dashboard::Server::start(&dashboard::socket_path(&session::run_dir()), live, Some(display), dashboard::TICK) {
-        Ok(server) => {
-            feed.set_dashboard(server);
-            if debug_window {
-                let before = opts.desktop.dashboards().map_err(|e| eprintln!("warning: dashboard: cannot list the windows ({e}); it opens where the desktop puts it"));
-                match dashboard::open(None) {
-                    // Moved off the window's monitor once the window places.
-                    Ok(()) => opts.dashboard = before.ok(),
-                    Err(e) => eprintln!("warning: DEBUG=window: {e}"),
-                }
-            }
-        }
-        Err(e) => eprintln!("warning: no dashboard: {e}"),
-    }
-    let outcome = app::run(source, opts, quit);
-    if let (true, Some(a)) = (stats, feed.audio()) {
-        for line in a.summary() {
-            eprintln!("summary: audio {line}");
-        }
-    }
-    feed.finish();
-    // Every way the viewer's window ends is the end of the viewer.
-    let result = match outcome {
-        run::Outcome::Closed | run::Outcome::Signal | run::Outcome::TimeUp => Ok(()),
-        run::Outcome::CaptureEnded(e) => Err(capture_ended(&e)),
-        run::Outcome::Failed(e) => Err(e),
-    };
-    if let Some(log) = &debug_log {
-        log.ended(&result);
-    }
-    result.map_err(Fatal::from)
+    Ok(())
 }
 
 /// Whether a fatal error waits for Enter before the viewer ends (#38): a
@@ -794,22 +657,6 @@ mod tests {
         // No serial: the port is the pin, and its own source is said.
         assert_eq!(super::pin_source(&resolve(&[("CARD_SERIAL", ""), ("CARD_PORT", "pci-c")])), "from the environment");
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn a_card_pulled_out_ends_the_viewer_with_how_to_start_it_again() {
-        // The laptop's card pulled out (#40): Media Foundation's error.
-        assert_eq!(
-            super::capture_ended(r"\\?\usb#vid_1e4e&pid_7016: The video recording device is no longer present. (0xC00D3EA2) (the card is gone?)"),
-            r"capture: the card was unplugged (\\?\usb#vid_1e4e&pid_7016: The video recording device is no longer present. (0xC00D3EA2)). Plug it back in and start the viewer again; if it then shows no picture, the card is stuck: take out its USB cable and its DC5V power for 10 s."
-        );
-        // Any other end is said as it is, not as an unplug: a source that
-        // ended without an error (run.rs), or a stream that ended.
-        assert_eq!(
-            super::capture_ended("the capture stopped"),
-            "capture: the capture stopped. Start the viewer again; if it then shows no picture, the card is stuck: take out its USB cable and its DC5V power for 10 s."
-        );
-        assert!(super::capture_ended(r"\\?\usb#vid_1e4e&pid_7016: the card's stream ended").starts_with(r"capture: \\?\usb#vid_1e4e&pid_7016: the card's stream ended. Start"));
     }
 
     #[test]

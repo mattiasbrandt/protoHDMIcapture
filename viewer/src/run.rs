@@ -261,7 +261,7 @@ impl Quit {
     }
 
     /// No handler: requested only by `request` (tests).
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self { flag: Arc::default(), listener: Arc::default() }
     }
 

@@ -64,6 +64,22 @@ pub struct DebugLog {
     perf: Option<(Sender<()>, JoinHandle<()>)>,
 }
 
+/// The pipe `DebugLog::on_stand_in` tees: its write end closed when it
+/// goes, after the log.
+#[cfg(all(test, unix))]
+pub struct StandIn {
+    _read: File,
+    write: sys::Stream,
+}
+
+#[cfg(all(test, unix))]
+impl Drop for StandIn {
+    fn drop(&mut self) {
+        // Safety: the write end is ours, closed once.
+        unsafe { libc::close(self.write) };
+    }
+}
+
 /// `DEBUG_PERF_INTERVAL` in seconds, else the default; a bad value is said
 /// and the default used.
 pub fn perf_every(value: Option<&str>) -> Result<Duration, String> {
@@ -105,6 +121,19 @@ impl DebugLog {
             log.copies.push((thread, done_rx));
         }
         Ok(log)
+    }
+
+    /// `start` over a pipe standing in for stderr, for other modules'
+    /// tests: the process's own output is left alone. The pipe's read end
+    /// goes with it; dropped, the log is put back and the pipe closed.
+    #[cfg(all(test, unix))]
+    pub fn on_stand_in(path: &Path) -> io::Result<(Self, StandIn)> {
+        use std::os::fd::FromRawFd;
+        let mut p = [0; 2];
+        // Safety: a new pipe, its fds ours alone from here.
+        sys::cvt(unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_CLOEXEC) })?;
+        let stand_in = StandIn { _read: unsafe { File::from_raw_fd(p[0]) }, write: p[1] };
+        Ok((Self::start_on(path, &[stand_in.write])?, stand_in))
     }
 
     /// A `[dbg]` line, as lib/debug.sh's `dbg`: on stderr, so into the log.
@@ -173,8 +202,12 @@ impl DebugLog {
         self.perf = Some((stop, thread));
     }
 
-    /// How the run ended, in the file only: main says it on stderr.
-    pub fn ended(&self, result: &Result<(), String>) {
+    /// How the run ended, in the file only (main says it on stderr), and
+    /// the log's end. The output is put back first and its copies drained,
+    /// so this is the log's last line: a run that ends right after it
+    /// starts (a busy card) had its header still in the pipe.
+    pub fn ended(mut self, result: &Result<(), String>) {
+        self.end();
         match result {
             Ok(()) => self.to_file_only(&format!("{} [dbg] ended", sys::clock())),
             Err(e) => self.to_file_only(&format!("{} [dbg] ended: {e}", sys::clock())),
@@ -194,6 +227,14 @@ impl DebugLog {
 
 impl Drop for DebugLog {
     fn drop(&mut self) {
+        self.end();
+    }
+}
+
+impl DebugLog {
+    /// The perf line stopped, the output put back and its copies drained;
+    /// a second call finds nothing to do.
+    fn end(&mut self) {
         if let Some((stop, thread)) = self.perf.take() {
             drop(stop);
             // A panic has printed itself; the teardown goes on.
@@ -707,7 +748,6 @@ mod tests {
         let (done, ended) = mpsc::channel();
         thread::spawn(move || {
             log.ended(&Ok(()));
-            drop(log);
             done.send(()).unwrap();
         });
         ended.recv_timeout(Duration::from_secs(5)).expect("the log's end hung on the copy");
