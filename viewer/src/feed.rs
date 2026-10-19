@@ -595,5 +595,46 @@ mod tests {
             drop(seen);
             std::fs::remove_dir_all(&dir).unwrap();
         }
+
+        #[test]
+        fn a_card_that_opens_opens_before_its_loopback_is_built() {
+            let dir = run_dir("opens");
+            let seen = Seen::default();
+            let card = || {
+                let node = crate::card::Node { path: "/dev/videoN".into(), serial: String::new(), port: String::new(), card_type: "a card".into() };
+                Ok((Box::new(crate::pattern::Pattern::new(FORMAT)) as Box<dyn crate::capture::FrameSource>, node))
+            };
+            let p = parts(&seen, card, |_| Outcome::Closed);
+            let ran = feed::run(start(&dir, "DEBUG=log\n", false), p, &Quit::new());
+            assert!(matches!(ran, Ok(Ran::Ended)), "{ran:?}");
+            assert_eq!(*seen.steps.borrow(), ["log", "card", "loopback"]);
+            assert!(lock_is_free(&dir));
+            drop(seen);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        #[test]
+        fn audio_none_starts_no_loopback_and_says_so() {
+            let dir = run_dir("noaudio");
+            let seen = Seen::default();
+            let window = |opts: &app::Options| {
+                assert!(matches!(&opts.audio, AudioSetup::Off(v) if v == "none"), "the panel's AUDIO");
+                assert_eq!(opts.live.audio_said(), ("off".into(), "AUDIO=none".into(), vec![]), "the dashboard's");
+                Outcome::Closed
+            };
+            let mut p = parts(&seen, || panic!("the test pattern opens no card"), window);
+            let steps = seen.steps.clone();
+            p.loopback = Box::new(move |_, _, _| {
+                steps.borrow_mut().push("loopback");
+                None
+            });
+            let ran = feed::run(start(&dir, "DEBUG=off\nAUDIO=none\n", true), p, &Quit::new());
+            assert!(matches!(ran, Ok(Ran::Ended)), "{ran:?}");
+            assert_eq!(*seen.steps.borrow(), ["loopback"], "asked, none built");
+            assert!(seen.keys.borrow().is_none(), "no keys reached the window");
+            assert!(lock_is_free(&dir));
+            drop(seen);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 }
