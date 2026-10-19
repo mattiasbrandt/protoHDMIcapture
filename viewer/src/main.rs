@@ -147,7 +147,9 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
     let sys = wizard::Machine {
         sink: s.get("SINK").to_string(),
         buffer_ms,
-        refresh: matches!(desktop, desktop::Desktop::Hyprland(_)),
+        // Linux only, as the Windows adapter had it: DESKTOP=hyprland is
+        // read on Windows too.
+        refresh: cfg!(target_os = "linux") && matches!(desktop, desktop::Desktop::Hyprland(_)),
     };
     let wiz = Rc::new(RefCell::new(Wizard::new(Box::new(sys), s.config_file.clone(), first_run, &|k| env::var_os(k).is_some())?));
     // After every early return above, so none leaves it behind.
