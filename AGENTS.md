@@ -1,10 +1,12 @@
 # protoHDMIcapture
 
 A low-latency viewer for an HDMI source through a cheap USB capture card:
-the picture and the sound, nothing recorded or streamed. The product is the
-Rust viewer in `viewer/` (Linux and Windows), which the releases ship.
-`view.sh` + mpv (`view.sh`, `launch.sh`, `lib/`, `desktop/`) is the legacy
-alternative, Linux only, until it retires (#10).
+the picture and the sound, nothing recorded or streamed. The product is
+protoHDMIcapture, the Rust program in `viewer/` (Linux and Windows), which the
+releases ship. protoHDMIcapture legacy, `view.sh` + mpv (`view.sh`,
+`launch.sh`, `lib/`, `desktop/`), is kept best effort, Linux only, and is not
+retired ([ADR 0002](docs/adr/0002-legacy-kept-best-effort.md)): nothing in
+protoHDMIcapture may depend on it.
 
 - **State:** epic #10 and its sub-issues hold what is done, open and
   decided; read its status comment before planning.

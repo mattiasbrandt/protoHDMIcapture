@@ -1,10 +1,11 @@
 # The script viewer: view.sh + mpv
 
-`view.sh` is the original viewer: bash around mpv for the picture and
-`pw-loopback` for the sound, Linux only, run from a checkout. The Rust
-viewer (`protohdmicapture`, the [README](../README.md)) replaces it and is
-what the releases ship; view.sh stays as an alternative until it retires
-(#10). Both read the same settings file and the same `capture-cards/` and
+protoHDMIcapture legacy, `view.sh`, is the original edition: bash around
+mpv for the picture and `pw-loopback` for the sound, Linux only, run from a
+checkout. protoHDMIcapture itself (`protohdmicapture`, the
+[README](../README.md)) is what the releases ship; legacy is kept as an
+alternative, best effort: it may lag behind or break
+([ADR 0002](adr/0002-legacy-kept-best-effort.md)). Both read the same settings file and the same `capture-cards/` and
 `sources/`, so either can play a setup the other saved.
 
 ## Running it

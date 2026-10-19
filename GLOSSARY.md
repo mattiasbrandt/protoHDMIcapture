@@ -6,6 +6,14 @@ or stream.
 
 ## Language
 
+**protoHDMIcapture legacy**:
+The original Linux-only edition, view.sh around mpv, in `legacy/`; "legacy"
+for short where the context is clear. Kept as an alternative on a
+best-effort basis: it reads the same saved settings, but nothing in
+protoHDMIcapture depends on it, and it may lag behind or break.
+_Avoid_: viewer, script viewer, old viewer, mpv viewer, the Rust viewer (for
+protoHDMIcapture itself)
+
 **Capture card**:
 The USB device that turns the source's HDMI signal into video and audio the
 PC can read. "Card" alone is fine in code; prose says capture card.
@@ -81,7 +89,7 @@ _Avoid_: latency, offset, A/V delay
 **Setting**:
 A named value that shapes a run, such as the levels, the audio sync or the
 capture card pin; taken from the environment, else the saved settings, else
-its default (started from the menu, the Rust viewer's menu default sits
+its default (started from the menu, protoHDMIcapture's menu default sits
 before the default: `REFRESH=match`).
 _Avoid_: knob, key, option
 
