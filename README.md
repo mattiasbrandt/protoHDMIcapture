@@ -84,7 +84,7 @@ Packages are on the [GitHub releases](https://github.com/mattiasbrandt/protoHDMI
 
 | Platform | How |
 |---|---|
-| Linux (glibc 2.35+: Ubuntu 22.04, Debian 12, Fedora, Arch and newer) | the release archive: `tar xf protohdmicapture-<version>-x86_64-linux.tar.gz`, then `./install.sh` in it |
+| Linux (glibc 2.36+: Debian 12, Ubuntu 24.04, Fedora, Arch and newer) | the release archive: `tar xf protohdmicapture-<version>-x86_64-linux.tar.gz`, then `./install.sh` in it |
 | Windows 10/11 | the release's `.msi`: per user, no administrator prompt |
 
 Linux needs a Wayland desktop with a Vulkan driver and PipeWire. Refresh

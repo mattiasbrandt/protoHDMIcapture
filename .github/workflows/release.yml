@@ -4,8 +4,9 @@
 #                 a draft, or finds the draft on a re-run; a published
 #                 release is refused;
 #   archive       builds the Linux archive (packaging/release-archive.sh) on
-#                 Ubuntu 22.04, so the binary needs glibc 2.35 at most, and
-#                 fails if it needs more;
+#                 Debian 12, so the binary needs glibc 2.36 at most, and
+#                 fails if it needs more (Ubuntu 22.04's PipeWire 0.3.48 is
+#                 older than the pipewire crate's headers need: 0.3.65);
 #   archive-test  installs and runs the archive on each distro below;
 #   msi           builds the Windows installer (packaging/windows/
 #                 build-msi.ps1: WiX 7, ICE validation) and smoke-tests it
@@ -71,11 +72,11 @@ jobs:
     # Run by hand, draft is skipped and this runs all the same.
     if: ${{ !cancelled() && (needs.draft.result == 'success' || needs.draft.result == 'skipped') }}
     runs-on: ubuntu-24.04
-    container: ubuntu:22.04
+    container: debian:12
     timeout-minutes: 30
     env:
-      # The oldest glibc the archive supports: Ubuntu 22.04's.
-      GLIBC_MAX: '2.35'
+      # The oldest glibc the archive supports: Debian 12's.
+      GLIBC_MAX: '2.36'
     steps:
       - name: Packages
         env:
@@ -126,7 +127,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: ['ubuntu:22.04', 'ubuntu:24.04', 'debian:12', 'fedora:latest', 'archlinux:latest']
+        image: ['debian:12', 'ubuntu:24.04', 'fedora:latest', 'archlinux:latest']
     steps:
       - name: Run-time libraries
         env:

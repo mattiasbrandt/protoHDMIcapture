@@ -12,8 +12,8 @@ desktops get the feed without them. Windows: see [Windows](#windows).
 
 ## Linux: the release archive
 
-One archive for every distro with glibc 2.35 or later: Ubuntu 22.04,
-Debian 12, Fedora, Arch and newer. Each release is installed and run on
+One archive for every distro with glibc 2.36 and PipeWire 0.3.65 or
+later: Debian 12, Ubuntu 24.04, Fedora, Arch and newer. Each release is installed and run on
 those in CI before it is published.
 
 ```bash
@@ -23,7 +23,7 @@ cd protohdmicapture-<version>-x86_64-linux
 ./install.sh --uninstall      # the same prefix removes it again
 ```
 
-Run-time libraries: glibc 2.35 or later, libgcc, PipeWire's libpipewire,
+Run-time libraries: glibc 2.36 or later, libgcc, PipeWire's libpipewire,
 ALSA's libasound, libdbus, Wayland's libwayland-client, libxkbcommon, the
 Vulkan loader (libvulkan) and a Vulkan driver. A desktop with PipeWire has
 them all; by package:
