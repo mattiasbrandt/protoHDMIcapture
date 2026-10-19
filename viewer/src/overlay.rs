@@ -153,7 +153,8 @@ pub fn key_bar(loopback: bool) -> String {
 pub enum Audio {
     /// AUDIO is not loopback: its value.
     Other(String),
-    /// The loopback did not start.
+    /// The loopback is not running: why (it did not start, or it stopped
+    /// mid-feed).
     Failed(String),
     /// Running: the level (None until first read, or why it could not be
     /// read) and the sync.
