@@ -71,7 +71,7 @@ impl V4l2 {
 
     /// The modes the device at `node` lists, in its own order: the formats
     /// this viewer captures, each discrete size and interval (as
-    /// lib/setup.sh reads v4l2-ctl's list), the rate in frames per second.
+    /// legacy/lib/setup.sh reads v4l2-ctl's list), the rate in frames per second.
     pub fn modes(node: &Path) -> Result<Vec<(Pixels, u32, u32, f64)>, String> {
         use linuxvideo::BufType;
         use linuxvideo::format::{FrameIntervals, FrameSizes};

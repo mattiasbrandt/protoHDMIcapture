@@ -4,8 +4,17 @@
 #        tools/capture-cards-table --check  exit 1 if it is out of date
 set -uo pipefail
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
-# shellcheck source=lib/capture-cards.sh
-. lib/capture-cards.sh
+
+# A profile's `Key: value` field, and its Status lines as id|level|date|note
+# (as protoHDMIcapture legacy's lib/capture-cards.sh reads them).
+cc_field() { sed -n "s/^$2: //p" "$1" | head -1 | tr -d '\r'; }
+cc_statuses() {
+    awk '/^Status: / {
+        id = $2; level = $3; date = $4
+        note = $0; sub(/^Status: +[^ ]+ +[^ ]+ +[^ ]+ */, "", note)
+        print id "|" level "|" date "|" note
+    }' "$1"
+}
 
 OUT=docs/capture-cards.md
 
@@ -45,9 +54,9 @@ EOF
 
 ## Adding a card
 
-1. Run `./view.sh --setup` with the card plugged into the port you will use.
-   It prints the USB id, the link speed and the modes, and writes a
-   Markdown report to `~/.local/state/protohdmicapture/`.
+1. Run `protohdmicapture --setup` with the card plugged into the port you
+   will use. Its card page shows the USB id and the link speed, and its
+   format page the modes.
 2. If the id is in a profile, add a `Status:` line for it there; otherwise
    add the id to the chip's profile, or start a new one by copying an
    existing file.

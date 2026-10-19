@@ -1,4 +1,4 @@
-//! The setup wizard inside the viewer window (#13): lib/setup.sh's stages
+//! The setup wizard inside the viewer window (#13): legacy/lib/setup.sh's stages
 //! and wording, drawn as an overlay page (osd.rs, egui) over the window,
 //! with no terminal. A state machine over what it is told about the
 //! machine (`System`), so the stages run in tests on made-up cards.
@@ -9,10 +9,10 @@
 //! the audio sync tunes while it plays, and the review saves. main.rs opens
 //! the window each phase needs.
 //!
-//! Like lib/setup.sh it decides only the settings flagged `wizard`; every
+//! Like legacy/lib/setup.sh it decides only the settings flagged `wizard`; every
 //! other line of the file is carried over. Each stage starts on the current
 //! value, so Enter keeps it, and nothing is written until the review. Not
-//! carried over from lib/setup.sh: the Markdown diagnostics report (it is
+//! carried over from legacy/lib/setup.sh: the Markdown diagnostics report (it is
 //! made of shell tools: lsusb, v4l2-ctl, journalctl), the preflight check
 //! (mpv, pw-loopback and ffmpeg are view.sh's, not this viewer's), the
 //! "focused monitor now" line, and the test feed (the feed starts from the
@@ -36,7 +36,7 @@ use crate::sources;
 
 /// The signal check: frames counted for this many seconds' worth.
 const MEASURE_SECONDS: u32 = 2;
-/// No frames at all this long into the signal check: "no signal" (lib/setup.sh
+/// No frames at all this long into the signal check: "no signal" (legacy/lib/setup.sh
 /// bounds its capture with `timeout 6`).
 pub const SIGNAL_TIMEOUT: Duration = Duration::from_secs(6);
 /// Frames the picture check looks at (ffmpeg's `-frames:v 5`).
@@ -120,7 +120,7 @@ impl Mode {
         format!("{}x{}", self.width, self.height)
     }
 
-    /// "fmt WxH fps": the choice's key, as lib/setup.sh keys it.
+    /// "fmt WxH fps": the choice's key, as legacy/lib/setup.sh keys it.
     fn key(&self) -> String {
         format!("{} {} {}", self.fmt, self.size(), self.fps)
     }
@@ -366,10 +366,10 @@ pub fn ignore_without(pattern: &str, name: &str) -> String {
     kept.join("|")
 }
 
-/// lib/setup.sh's `list_modes`: best first (highest fps, then the largest
+/// legacy/lib/setup.sh's `list_modes`: best first (highest fps, then the largest
 /// picture, then uncompressed over compressed), one per fps, size and
 /// compression, at most 12; only the formats the Rust viewer captures
-/// (`Pixels`). lib/setup.sh also offers nv12, which mpv plays; offered
+/// (`Pixels`). legacy/lib/setup.sh also offers nv12, which mpv plays; offered
 /// here it would fail at the feed, and as uncompressed it could hide the
 /// card's yuyv422 at the same fps and size.
 pub fn best_modes(modes: &[Mode]) -> Vec<Mode> {
@@ -1063,7 +1063,7 @@ impl Wizard {
 
     /// A drawn frame's bytes, for the picture check: flat (luma spread
     /// within 8 levels) and dark (mean at most 40 of 255) across the frames
-    /// looked at is "black", as lib/setup.sh reads ffmpeg's signalstats.
+    /// looked at is "black", as legacy/lib/setup.sh reads ffmpeg's signalstats.
     /// MJPEG frames (#17) arrive here decoded to YUYV, so both are read;
     /// a full-range black (luma 0) passes the same test as limited (16).
     pub fn picture(&mut self, data: &[u8], format: Format) {
@@ -1109,7 +1109,7 @@ impl Wizard {
     }
 
     /// The frames the signal check waits for: `MEASURE_SECONDS` at FPS
-    /// (validated by the format stage), as lib/setup.sh's stream count.
+    /// (validated by the format stage), as legacy/lib/setup.sh's stream count.
     fn frames_wanted(&self) -> u32 {
         (self.cur("FPS").parse::<f64>().unwrap_or(60.0).round() as u32 * MEASURE_SECONDS).max(1)
     }
@@ -1142,7 +1142,7 @@ impl Wizard {
         let measured = if m.frames == 0 || secs <= 0.0 { 0.0 } else { f64::from(m.frames) / secs };
         let fps: f64 = self.cur("FPS").parse().unwrap_or(0.0);
         let got = format!("{measured:.1}");
-        // The timeout with frames short: lib/setup.sh's `timeout 6` fails
+        // The timeout with frames short: legacy/lib/setup.sh's `timeout 6` fails
         // the check then too, with Try again; only a full count is measured.
         let want = self.frames_wanted();
         if m.frames < want {
@@ -1433,7 +1433,7 @@ impl Wizard {
         self.show(Step::ReviewAsk, body, ask);
     }
 
-    /// lib/setup.sh's `apply_to`: config_write of the settings with a
+    /// legacy/lib/setup.sh's `apply_to`: config_write of the settings with a
     /// value, then config_unset of those without.
     fn apply(&self) -> Result<(), String> {
         let set: Vec<(&str, &str)> =
@@ -2199,7 +2199,7 @@ mod tests {
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 
-    /// The file as legacy's lib/setup.sh apply_to left it from the same
+    /// The file as legacy's legacy/lib/setup.sh apply_to left it from the same
     /// start and answers on 2026-10-19 (#47): byte for byte, FULLSCREEN's
     /// removal included.
     #[test]
@@ -2350,7 +2350,7 @@ mod tests {
 
     #[test]
     fn too_few_frames_by_the_timeout_fail_the_signal_check() {
-        // 15 fps for 60 requested: lib/setup.sh's `timeout 6` fails, so here.
+        // 15 fps for 60 requested: legacy/lib/setup.sh's `timeout 6` fails, so here.
         let file = scratch("slow", Some("SOURCE=ps5\n"));
         let mut w = wizard(fake(), &file, false);
         press(&mut w, &["Enter", "Enter", "y", "Enter", "Enter", "Enter", "Enter", "Enter"]);
@@ -2479,7 +2479,7 @@ mod tests {
         assert_eq!(closest_mode(1920, 1080, 60, &[]), None);
     }
 
-    /// The ignored-device patterns as legacy's lib/setup.sh wrote them on
+    /// The ignored-device patterns as legacy's legacy/lib/setup.sh wrote them on
     /// 2026-10-19 (#47): `_regex_literal` and `_ignore_without`.
     #[test]
     fn ignore_patterns_as_lib_setup_sh_wrote_them() {

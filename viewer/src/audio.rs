@@ -722,7 +722,7 @@ impl Controls {
         let level = LevelSlot::default();
         let (l, n) = (level.clone(), notify.clone());
         // PipeWire round trips off the window's thread, one change at a
-        // time (lib/audio.sh serialises them with a lock); the thread ends
+        // time (legacy/lib/audio.sh serialises them with a lock); the thread ends
         // with the last sender.
         thread::spawn(move || {
             for change in rx {
@@ -1348,7 +1348,7 @@ mod tests {
         let muted = output_level(Some(LevelChange::Mute)).unwrap();
         assert_eq!(muted, Level { volume: 95, mute: true });
         assert_eq!(output_level(None).unwrap(), muted, "read back as set");
-        // Past 0 and 100: clamped, as lib/audio.sh does.
+        // Past 0 and 100: clamped, as legacy/lib/audio.sh does.
         assert_eq!(output_level(Some(LevelChange::Volume(-200))).unwrap().volume, 0);
         let back = output_level(Some(LevelChange::Set(Level { volume: 100, mute: false }))).unwrap();
         assert_eq!(back, Level { volume: 100, mute: false });
@@ -1356,7 +1356,7 @@ mod tests {
     }
 
     /// m, 9 and 0 against PipeWire itself, read back through pactl as
-    /// lib/audio.sh reads them: `cargo test -- --ignored level_on_pipewire`.
+    /// legacy/lib/audio.sh reads them: `cargo test -- --ignored level_on_pipewire`.
     /// Plays silence on the default output for a moment.
     #[test]
     #[cfg(target_os = "linux")]

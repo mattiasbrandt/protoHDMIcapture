@@ -117,7 +117,7 @@ fn card_audio_input(card: Option<&card::Node>) -> Result<String, String> {
 }
 
 /// The setup wizard (#13), in the viewer window: `--setup`, or a first run.
-/// Holds setup.lock as lib/setup.sh does (one wizard at a time) and leaves
+/// Holds setup.lock as legacy/lib/setup.sh does (one wizard at a time) and leaves
 /// setup.done. True when the feed should start: saved and asked for, or
 /// the first run skipped.
 fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
@@ -128,7 +128,7 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
     let dir = session::run_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let lock = std::fs::File::create(dir.join("setup.lock")).map_err(|e| format!("setup.lock: {e}"))?;
-    // flock(LOCK_EX | LOCK_NB) on Linux, lib/setup.sh's lock; LockFileEx on Windows.
+    // flock(LOCK_EX | LOCK_NB) on Linux, legacy/lib/setup.sh's lock; LockFileEx on Windows.
     match lock.try_lock() {
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => return Err("another setup wizard is already running".into()),

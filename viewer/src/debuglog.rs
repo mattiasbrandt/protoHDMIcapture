@@ -1,6 +1,6 @@
 //! The debug log (#27): with DEBUG≠off, the viewer's output also goes to
 //! `debug.log` in the run dir (docs/run-dir.md), as view.sh's `debug_tee`
-//! (lib/debug.sh) does, so a run started from a menu leaves something to
+//! (legacy/lib/debug.sh) does, so a run started from a menu leaves something to
 //! attach to a bug report. On top of the output:
 //!
 //! - a `[dbg]` header: the version, the desktop and the log's path
@@ -136,7 +136,7 @@ impl DebugLog {
         Ok((Self::start_on(path, &[stand_in.write])?, stand_in))
     }
 
-    /// A `[dbg]` line, as lib/debug.sh's `dbg`: on stderr, so into the log.
+    /// A `[dbg]` line, as legacy/lib/debug.sh's `dbg`: on stderr, so into the log.
     pub fn dbg(&self, msg: &str) {
         let line = format!("\x1b[2m{} [dbg] {msg}\x1b[0m\n", sys::clock());
         // Nowhere else to say it: the log's own output is what failed.
@@ -156,7 +156,7 @@ impl DebugLog {
         self.dbg("video lock: held");
     }
 
-    /// lib/debug.sh's `debug_settings`: every setting with its value and
+    /// legacy/lib/debug.sh's `debug_settings`: every setting with its value and
     /// where it came from.
     pub fn settings(&self, s: &Settings) {
         self.dbg(&format!("settings:{}", settings_line(s)));

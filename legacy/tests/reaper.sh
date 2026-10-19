@@ -4,7 +4,7 @@
 # exits on its own leaves no timer behind; a loopback that stops mid-feed is
 # reported and the wait goes on (6fcbcec).
 set -uo pipefail
-# shellcheck source=tools/harness/lib.sh
+# shellcheck source=legacy/tests/lib.sh
 . "$(dirname "$0")/lib.sh"
 # shellcheck disable=SC1090
 . <(fn_from view.sh arm_reaper wait_player)

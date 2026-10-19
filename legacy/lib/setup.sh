@@ -20,17 +20,17 @@
 set -uo pipefail
 
 HERE=$(dirname "$(dirname "$(readlink -f "$0")")")
-# shellcheck source=lib/card.sh
+# shellcheck source=legacy/lib/card.sh
 . "$HERE/lib/card.sh"
-# shellcheck source=lib/desktop.sh
+# shellcheck source=legacy/lib/desktop.sh
 . "$HERE/lib/desktop.sh"
-# shellcheck source=lib/ui.sh
+# shellcheck source=legacy/lib/ui.sh
 . "$HERE/lib/ui.sh"
-# shellcheck source=lib/capture-cards.sh
+# shellcheck source=legacy/lib/capture-cards.sh
 . "$HERE/lib/capture-cards.sh"
-# shellcheck source=lib/sources.sh
+# shellcheck source=legacy/lib/sources.sh
 . "$HERE/lib/sources.sh"
-# shellcheck source=lib/preflight.sh
+# shellcheck source=legacy/lib/preflight.sh
 . "$HERE/lib/preflight.sh"
 
 FROM_LAUNCHER=""; THEN_PLAY=""
@@ -211,7 +211,7 @@ card_details() {
     note "$CC_HINT"
     if [ "${#CC_QUIRKS[@]}" -gt 0 ]; then
         center ""
-        say "Known about this card (${CC_FILE#"$HERE/"}):"
+        say "Known about this card (${CC_FILE#"${HERE%/*}/"}):"
         ui_list "${CC_QUIRKS[@]//\`/}"   # Markdown code ticks read as noise here
     fi
     center ""

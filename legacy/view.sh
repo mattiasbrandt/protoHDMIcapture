@@ -23,15 +23,15 @@
 set -uo pipefail
 
 HERE=$(dirname "$(readlink -f "$0")")
-# shellcheck source=lib/card.sh
+# shellcheck source=legacy/lib/card.sh
 . "$HERE/lib/card.sh"
-# shellcheck source=lib/desktop.sh
+# shellcheck source=legacy/lib/desktop.sh
 . "$HERE/lib/desktop.sh"
-# shellcheck source=lib/debug.sh
+# shellcheck source=legacy/lib/debug.sh
 . "$HERE/lib/debug.sh"
-# shellcheck source=lib/audio.sh
+# shellcheck source=legacy/lib/audio.sh
 . "$HERE/lib/audio.sh"
-# shellcheck source=lib/preflight.sh
+# shellcheck source=legacy/lib/preflight.sh
 . "$HERE/lib/preflight.sh"
 
 # --- mode --------------------------------------------------------------------
@@ -616,7 +616,7 @@ mpv)
     [ -n "$FMT" ] && LAVF_O="${LAVF_O},input_format=${FMT}"
     [ "$AUDIO" = "mpv" ] && LAVF_O="timestamps=abs,${LAVF_O}"
 
-    if [ -n "$SOURCE" ] && [ ! -r "$HERE/sources/$SOURCE.md" ]; then
+    if [ -n "$SOURCE" ] && [ ! -r "$HERE/../sources/$SOURCE.md" ]; then
         warn "SOURCE=$SOURCE has no profile in sources/; the overlay shows the tips for any HDMI source"
         SOURCE=""
     fi
@@ -669,7 +669,7 @@ mpv)
         --input-terminal=no
         # f cycles the display mode, d opens the debug dashboard
         --script="$HERE/lib/mpv/protohdmicapture.lua"
-        --script-opts="protohdmicapture-helper=$HERE/view.sh,protohdmicapture-mode=$WINDOW,protohdmicapture-quitfile=$RUN_DIR/player.quit,protohdmicapture-scaling=$SCALING,protohdmicapture-levels=$LEVELS,protohdmicapture-sources=$HERE/sources,protohdmicapture-source=$SOURCE,protohdmicapture-audio=$AUDIO,protohdmicapture-owner=$$,protohdmicapture-rundir=$RUN_DIR,protohdmicapture-delay=$DELAY,protohdmicapture-open=$OPEN_OVERLAY,$(_settings_opts)"
+        --script-opts="protohdmicapture-helper=$HERE/view.sh,protohdmicapture-mode=$WINDOW,protohdmicapture-quitfile=$RUN_DIR/player.quit,protohdmicapture-scaling=$SCALING,protohdmicapture-levels=$LEVELS,protohdmicapture-sources=$HERE/../sources,protohdmicapture-source=$SOURCE,protohdmicapture-audio=$AUDIO,protohdmicapture-owner=$$,protohdmicapture-rundir=$RUN_DIR,protohdmicapture-delay=$DELAY,protohdmicapture-open=$OPEN_OVERLAY,$(_settings_opts)"
         # a live feed generates no input events, so idle-blanking would otherwise
         # kick in mid-game
         --stop-screensaver=always

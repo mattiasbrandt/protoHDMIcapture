@@ -10,11 +10,11 @@
 set -uo pipefail
 
 HERE=$(dirname "$(dirname "$(readlink -f "$0")")")
-# shellcheck source=lib/desktop.sh
+# shellcheck source=legacy/lib/desktop.sh
 . "$HERE/lib/desktop.sh"
-# shellcheck source=lib/debug.sh
+# shellcheck source=legacy/lib/debug.sh
 . "$HERE/lib/debug.sh"
-# shellcheck source=lib/ui.sh
+# shellcheck source=legacy/lib/ui.sh
 . "$HERE/lib/ui.sh"
 
 RUN_DIR="${XDG_RUNTIME_DIR:-/tmp}/protohdmicapture"

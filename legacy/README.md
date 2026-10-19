@@ -1,22 +1,24 @@
-# The script viewer: view.sh + mpv
+# protoHDMIcapture legacy: view.sh + mpv
 
 protoHDMIcapture legacy, `view.sh`, is the original edition: bash around
 mpv for the picture and `pw-loopback` for the sound, Linux only, run from a
 checkout. protoHDMIcapture itself (`protohdmicapture`, the
 [README](../README.md)) is what the releases ship; legacy is kept as an
-alternative, best effort: it may lag behind or break
-([ADR 0002](adr/0002-legacy-kept-best-effort.md)). Both read the same settings file and the same `capture-cards/` and
+alternative, best effort: nothing checks it beyond lint, and it may lag
+behind or break ([ADR 0002](../docs/adr/0002-legacy-kept-best-effort.md)).
+Both read the same settings file (its rows are the repo's
+[`settings.rows`](../settings.rows)) and the same `capture-cards/` and
 `sources/`, so either can play a setup the other saved.
 
 ## Running it
 
 ```bash
-./view.sh                     # play; the first run offers the setup wizard
-./view.sh --setup             # (re)run the wizard in the terminal
-./view.sh --tune              # the feed with the overlay open, to tune the audio sync
-./view.sh --debug             # play with verbose logging and the dashboard
-./view.sh --settings          # every setting, its value and where it came from
-./view.sh --help              # every flag
+legacy/view.sh                # play; the first run offers the setup wizard
+legacy/view.sh --setup        # (re)run the wizard in the terminal
+legacy/view.sh --tune         # the feed with the overlay open, to tune the audio sync
+legacy/view.sh --debug        # play with verbose logging and the dashboard
+legacy/view.sh --settings     # every setting, its value and where it came from
+legacy/view.sh --help         # every flag
 ```
 
 It needs `v4l2-ctl` (v4l-utils), `flock`, `mpv`, and for the sound `pactl`,
@@ -24,12 +26,12 @@ It needs `v4l2-ctl` (v4l-utils), `flock`, `mpv`, and for the sound `pactl`,
 the dashboard `socat`. `lib/preflight.sh` checks them before a run and
 names the package for each one missing.
 
-The keys are the Rust viewer's (the README), plus mpv's own **i** / **I**
+The keys are protoHDMIcapture's (the README), plus mpv's own **i** / **I**
 for its frame-timing stats. The overlay is a Lua script in the mpv window
 (`lib/mpv/protohdmicapture.lua`), bound for that window only, so your
 `input.conf` is untouched.
 
-### What differs from the Rust viewer
+### What differs from protoHDMIcapture
 
 - **The wizard** runs in the terminal, and its audio sync stage is a
   terminal tuner. Each run writes a Markdown report (verdicts, the config
@@ -38,30 +40,31 @@ for its frame-timing stats. The overlay is a Lua script in the mpv window
   newest 10 are kept.
 - **An audio sync change restarts the loopback**, a moment of silence:
   the mpv script asks view.sh, which owns the loopback (`audio.request` and
-  a USR1, see [run-dir.md](run-dir.md)). The Rust viewer moves the delay
-  live.
+  a USR1, see [run-dir.md](../docs/run-dir.md)). protoHDMIcapture moves the
+  delay live.
 - **Three players** (below), and `AUDIO=mpv`.
-- **`FMT=nv12` and `rawvideo`** are captured; the Rust viewer refuses them.
+- **`FMT=nv12` and `rawvideo`** are captured; protoHDMIcapture refuses them.
 
 ## The menu entry
 
-`desktop/protohdmicapture.desktop` runs `launch.sh`, which adds what a menu
-launch needs: with no settings file it opens a terminal with the wizard
-(`xdg-terminal-exec`, else `$TERMINAL`, else `x-terminal-emulator`) and
-plays only if it saved; it sets `REFRESH=match` unless the settings say
+`desktop/protohdmicapture.desktop` runs `launch.sh` (both in `legacy/`),
+which adds what a menu launch needs: with no settings file it opens a
+terminal with the wizard (`xdg-terminal-exec`, else `$TERMINAL`, else
+`x-terminal-emulator`) and plays only if it saved; it sets `REFRESH=match` unless the settings say
 otherwise; it keeps the run log at `$XDG_RUNTIME_DIR/protohdmicapture.log`;
 and it notifies on a failure view.sh could not report itself. `NO_SETUP=1`
-skips the wizard. Install it from the checkout:
+skips the wizard. Install it from the checkout's root:
 
 ```bash
-sed "s|@CHECKOUT@|$PWD|" desktop/protohdmicapture.desktop \
+sed "s|@CHECKOUT@|$PWD|" legacy/desktop/protohdmicapture.desktop \
     > ~/.local/share/applications/protohdmicapture.desktop
 mkdir -p ~/.local/share/icons/hicolor
 cp -r packaging/linux/icons/hicolor/. ~/.local/share/icons/hicolor/
 ```
 
-The packaged Rust viewer installs an entry under the same name, so keep one
-or the other.
+The packaged protoHDMIcapture installs an entry under the same name, so
+keep one or the other. An entry installed before legacy moved to `legacy/`
+(#47) runs `<checkout>/launch.sh`, which is gone: run the `sed` line again.
 
 view.sh itself keeps the rules that hold however it is started: one video
 window and one audio loopback at a time (a lock, not a window lookup; a
@@ -198,3 +201,10 @@ done
 **`ioctl(VIDIOC_QBUF): Inappropriate ioctl for device` on exit** is
 libavdevice's untidy V4L2 teardown, not a device fault; view.sh drops that
 one line from mpv's output.
+
+## Its tests
+
+`legacy/tests/` holds hardware-free harnesses for the functions behind past
+defects (each names the commits it guards). No check runs them; run one by
+hand from the checkout, e.g. `legacy/tests/card-resolve.sh`, and it exits
+non-zero and says what failed.

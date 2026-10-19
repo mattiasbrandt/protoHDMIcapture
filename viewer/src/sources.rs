@@ -1,4 +1,4 @@
-//! Source profiles (sources/<id>.md, the shape in lib/sources.sh): what the
+//! Source profiles (sources/<id>.md, the shape in legacy/lib/sources.sh): what the
 //! overlay shows as setup tips, and the wake hint of the no-signal banner.
 //! Read as the mpv script's `read_source` reads them.
 

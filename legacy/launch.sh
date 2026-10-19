@@ -23,9 +23,9 @@ set -uo pipefail
 
 HERE=$(dirname "$(readlink -f "$0")")
 LOG="${XDG_RUNTIME_DIR:-/tmp}/protohdmicapture.log"
-# shellcheck source=lib/desktop.sh
+# shellcheck source=legacy/lib/desktop.sh
 . "$HERE/lib/desktop.sh"
-# shellcheck source=lib/card.sh
+# shellcheck source=legacy/lib/card.sh
 . "$HERE/lib/card.sh"
 RUN_DIR="${XDG_RUNTIME_DIR:-/tmp}/protohdmicapture"
 mkdir -p "$RUN_DIR"

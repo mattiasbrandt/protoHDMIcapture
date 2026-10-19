@@ -19,7 +19,7 @@
 
 CONFIG_FILE="${CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/protohdmicapture/config}"
 
-# shellcheck source=lib/settings.sh
+# shellcheck source=legacy/lib/settings.sh
 . "$(dirname "${BASH_SOURCE[0]}")/settings.sh"
 
 # Keys the config file may set: the settings (lib/settings.sh). Anything else

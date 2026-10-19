@@ -3,8 +3,8 @@
 //!
 //! The rows are `settings.rows` at the repo root, compiled in, the one
 //! table (#47): protoHDMIcapture legacy reads the same file at run time.
-//! Reading mirrors legacy's `lib/settings.sh` (`settings_resolve`,
-//! `settings_validate`) and `lib/card.sh` (`_config_line`, `CONFIG_FILE`):
+//! Reading mirrors legacy's `legacy/lib/settings.sh` (`settings_resolve`,
+//! `settings_validate`) and `legacy/lib/card.sh` (`_config_line`, `CONFIG_FILE`):
 //! environment, else the saved settings, else the default; the pins are one
 //! setting; a deprecated name translates to its replacement. `tools/check`
 //! runs every settings fixture through `--settings`.
@@ -90,7 +90,7 @@ pub struct Settings {
 }
 
 /// `CONFIG_FILE`, else `$XDG_CONFIG_HOME/protohdmicapture/config`, else
-/// `~/.config/protohdmicapture/config` (lib/card.sh); on Windows,
+/// `~/.config/protohdmicapture/config` (legacy/lib/card.sh); on Windows,
 /// `%APPDATA%\protohdmicapture\config` (#18).
 pub fn config_file(env: &dyn Fn(&str) -> Option<String>) -> PathBuf {
     if let Some(f) = env("CONFIG_FILE").filter(|f| !f.is_empty()) {
@@ -573,7 +573,7 @@ mod tests {
     /// What `write` makes of `start` (None: no file), and whether it wrote.
     #[test]
     fn writes_byte_for_byte_as_legacys_config_write() {
-        // The bytes protoHDMIcapture legacy's `config_write` (lib/card.sh)
+        // The bytes protoHDMIcapture legacy's `config_write` (legacy/lib/card.sh)
         // wrote for each case on 2026-10-19 (#47): legacy reads this file.
         let start = "# my settings\n  DELAY=0.05\nNOPE=1\n\nLEVELS=auto\nLEVELS=full\nWINDOW=fullscreen\r\nSOURCE='ps5'";
         let header = "# protoHDMIcapture settings, written by the setup wizard.\n# One KEY=value per line; see config.example in the repo.\n";
@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn unsets_byte_for_byte_as_legacys_config_unset() {
-        // The bytes legacy's `config_unset` (lib/card.sh) left on
+        // The bytes legacy's `config_unset` (legacy/lib/card.sh) left on
         // 2026-10-19 (#47).
         let start = "# my settings\n  DELAY=0.05\nNOPE=1\n\nFULLSCREEN=yes\nLEVELS=full\nFULLSCREEN=no\r\nSOURCE='ps5'";
         let header = "# protoHDMIcapture settings, written by the setup wizard.\n# One KEY=value per line; see config.example in the repo.\n";

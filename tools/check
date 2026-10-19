@@ -17,7 +17,7 @@ rows_with() {
 step() { printf '\033[36m:: %s\033[0m\n' "$1"; }
 bad()  { printf '\033[31m!! %s\033[0m\n' "$1"; fail=1; }
 
-mapfile -t SH < <(git ls-files '*.sh' view.sh launch.sh tools/check tools/capture-cards-table tools/epic-worktree tools/process-globals .githooks/pre-commit | sort -u)
+mapfile -t SH < <(git ls-files '*.sh' tools/check tools/capture-cards-table tools/epic-worktree tools/process-globals .githooks/pre-commit | sort -u)
 mapfile -t LUA < <(git ls-files '*.lua')
 mapfile -t PY < <(git ls-files '*.py')
 

@@ -18,7 +18,7 @@
 #   source_status ID         "level date"
 #   source_tips ID           its tips, one per line
 
-SOURCES_DIR="${SOURCES_DIR:-$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")/sources}"
+SOURCES_DIR="${SOURCES_DIR:-$(dirname "$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")")/sources}"
 
 _source_file() { printf '%s/%s.md' "$SOURCES_DIR" "${1:-generic}"; }
 

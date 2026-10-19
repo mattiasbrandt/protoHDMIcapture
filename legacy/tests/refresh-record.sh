@@ -3,7 +3,7 @@
 # recovery restores only a monitor still at the rate set, and removes the
 # record only once settled; a failed restore keeps it for the next run.
 set -uo pipefail
-# shellcheck source=tools/harness/lib.sh
+# shellcheck source=legacy/tests/lib.sh
 . "$(dirname "$0")/lib.sh"
 
 mkdir -p "$HARNESS_TMP/bin"

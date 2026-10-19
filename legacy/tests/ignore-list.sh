@@ -5,9 +5,9 @@
 # not asked about, and a chosen card the list matched is taken off it. The
 # literal survives the config writer, quote included.
 set -uo pipefail
-# shellcheck source=tools/harness/lib.sh
+# shellcheck source=legacy/tests/lib.sh
 . "$(dirname "$0")/lib.sh"
-# shellcheck source=lib/card.sh
+# shellcheck source=legacy/lib/card.sh
 . lib/card.sh
 # shellcheck disable=SC1090
 . <(fn_from lib/setup.sh _regex_literal _ignore_without ignore_others)

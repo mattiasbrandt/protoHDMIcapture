@@ -947,7 +947,7 @@ fn render(s: &Value, p: &Paint) -> String {
         out.push(String::new());
         out.push(format!("  {}", p.head("Display")));
         match d["monitors"].as_array() {
-            // lib/desktop.sh desktop_outputs: "name WxH@HzHz [focused]".
+            // legacy/lib/desktop.sh desktop_outputs: "name WxH@HzHz [focused]".
             Some(ms) => {
                 for m in ms {
                     let rate = num(&m["refresh_hz"]).map_or("?".to_string(), |r| fmt_g((r * 100.0).round() / 100.0));
@@ -1103,7 +1103,7 @@ impl<R: Read> Lines<R> {
     }
 }
 
-/// A terminal to run `args` in, as lib/desktop.sh's desktop_open_terminal
+/// A terminal to run `args` in, as legacy/lib/desktop.sh's desktop_open_terminal
 /// picks one: xdg-terminal-exec, then $TERMINAL, then x-terminal-emulator.
 #[cfg(unix)]
 fn terminal_command(args: &[String], terminal: Option<&str>, have: impl Fn(&str) -> bool) -> Option<std::process::Command> {

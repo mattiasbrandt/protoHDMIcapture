@@ -320,7 +320,7 @@ pub fn level(change: Option<LevelChange>) -> Result<Level, String> {
     let pod = Pod::from_bytes(&bytes).ok_or("volume parameter: not a pod")?;
     node.set_param(ParamType::Props, 0, pod);
     sync(&core, &mainloop)?;
-    // What the stream took, not what was asked (as lib/audio.sh reports
+    // What the stream took, not what was asked (as legacy/lib/audio.sh reports
     // pactl's reading back).
     read_level()
 }

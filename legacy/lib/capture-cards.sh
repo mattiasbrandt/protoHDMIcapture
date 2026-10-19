@@ -14,7 +14,7 @@
 # the id, empty when the id is profiled but has no Status line) and
 # CC_QUIRKS (the chip's quirks plus those tagged with this id, tags removed).
 
-CC_DIR="${CC_DIR:-$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")/capture-cards}"
+CC_DIR="${CC_DIR:-$(dirname "$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")")/capture-cards}"
 
 # tr: a profile saved with CRLF line ends must still match its last id.
 cc_field() { sed -n "s/^$2: //p" "$1" | head -1 | tr -d '\r'; }

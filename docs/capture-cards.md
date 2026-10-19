@@ -23,9 +23,9 @@ under and what is known about them. The setup wizard reads the same files.
 
 ## Adding a card
 
-1. Run `./view.sh --setup` with the card plugged into the port you will use.
-   It prints the USB id, the link speed and the modes, and writes a
-   Markdown report to `~/.local/state/protohdmicapture/`.
+1. Run `protohdmicapture --setup` with the card plugged into the port you
+   will use. Its card page shows the USB id and the link speed, and its
+   format page the modes.
 2. If the id is in a profile, add a `Status:` line for it there; otherwise
    add the id to the chip's profile, or start a new one by copying an
    existing file.

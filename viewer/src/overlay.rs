@@ -1,5 +1,5 @@
 //! The overlay's content and state, as the mpv script has them
-//! (lib/mpv/protohdmicapture.lua): the control panel and the setup tips
+//! (legacy/lib/mpv/protohdmicapture.lua): the control panel and the setup tips
 //! (Tab), the key bar for the first seconds, short messages (mpv's OSD
 //! messages), the no-signal banner, and what w would save. Text only: osd.rs
 //! draws it.

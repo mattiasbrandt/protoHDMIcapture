@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034  # SETTING_FROM, SETTINGS_ERRORS, SETTINGS_NOTES are read by the caller
 # Settings module: one row per setting, and everything that follows from the
-# rows. Sourced by lib/card.sh (so by view.sh and lib/setup.sh).
+# rows. Sourced by lib/card.sh (so by view.sh and lib/setup.sh), in
+# protoHDMIcapture legacy (legacy/).
 #
 #   settings_resolve          fill every setting from the environment, else the
 #                             saved settings (CONFIG_FILE), else its default;
@@ -20,7 +21,7 @@
 #
 # The rows are settings.rows at the repo root, read here at run time (the
 # format is described there).
-_SETTINGS_ROWS_FILE="$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")/settings.rows"
+_SETTINGS_ROWS_FILE="$(dirname "$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")")/settings.rows"
 
 SETTINGS=()
 declare -A _S_DEFAULT=() _S_VALUES=() _S_PLAYERS=() _S_FLAGS=()

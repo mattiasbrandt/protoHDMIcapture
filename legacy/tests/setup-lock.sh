@@ -3,7 +3,7 @@
 # outlives the wizard (a dashboard terminal) would keep launch.sh waiting
 # for "the wizard ended" for good.
 set -uo pipefail
-# shellcheck source=tools/harness/lib.sh
+# shellcheck source=legacy/tests/lib.sh
 . "$(dirname "$0")/lib.sh"
 # shellcheck disable=SC1090
 . <(fn_from lib/setup.sh run_child)

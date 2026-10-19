@@ -1,9 +1,7 @@
 # tools/check on every push and pull request to main (#25), on Arch, which
 # the project targets. The packages are exactly what tools/check calls:
 #   git                      tools/check's file lists (git ls-files)
-#   diffutils, jq            tools/capture-cards-table --check (diff), and
-#                            lib/desktop.sh's refresh record (refresh-record
-#                            harness, preflight.sh)
+#   diffutils                tools/capture-cards-table --check (diff)
 #   shellcheck, lua, python  the shell, Lua and Python checks
 #   rustup, gcc, clang, pkgconf
 #                            the viewer: cargo and clippy; cc for libspa-sys's
@@ -11,9 +9,10 @@
 #                            to find the libraries below
 #   libpipewire, alsa-lib, dbus, wayland
 #                            the libraries the viewer links (packaging/INSTALL.md)
-#   v4l-utils, mpv, libpulse, pipewire, pipewire-audio, util-linux
-#                            tools/harness/preflight.sh puts v4l2-ctl, mpv,
-#                            pactl, pw-link, pw-loopback and flock on a PATH
+#   util-linux               flock, which session.rs's tests take the lock
+#                            with
+# protoHDMIcapture legacy (legacy/) gets the shell, Lua and Python checks
+# only; its harnesses run by hand (ADR 0002).
 # The Windows clippy step runs too: the x86_64-pc-windows-msvc target is
 # added, and clippy links nothing, so no Windows SDK is needed (#18).
 # Actions are pinned to commit SHAs; Dependabot moves them
@@ -45,10 +44,10 @@ jobs:
       - name: Packages
         run: |
           pacman -Syu --noconfirm --needed \
-            git diffutils jq shellcheck lua python \
+            git diffutils shellcheck lua python \
             rustup gcc clang pkgconf \
             libpipewire alsa-lib dbus wayland \
-            v4l-utils mpv libpulse pipewire pipewire-audio util-linux
+            util-linux
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

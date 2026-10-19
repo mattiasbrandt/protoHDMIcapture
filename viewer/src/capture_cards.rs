@@ -1,6 +1,6 @@
 //! Capture card profiles (capture-cards/<chip>.md, the shape in
 //! docs/capture-cards.md): which chip a USB id means, the link it needs and
-//! what is known about it. Read as lib/capture-cards.sh reads them, for the
+//! what is known about it. Read as legacy/lib/capture-cards.sh reads them, for the
 //! setup wizard's card and USB stages.
 
 mod embedded {
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn lookups_as_legacys_capture_card_lookup() {
         // The return code, profile, chip, hint and link legacy's
-        // `capture_card_lookup` (lib/capture-cards.sh) gave on 2026-10-19
+        // `capture_card_lookup` (legacy/lib/capture-cards.sh) gave on 2026-10-19
         // (#47); the status and quirks are the profiles' own text.
         let head = |id: &str| rust(id).lines().take(5).collect::<Vec<_>>().join("\n");
         let cases = [

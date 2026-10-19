@@ -2,7 +2,7 @@
 # lib/preflight.sh (a4fd771, fbc9776): a missing required tool is named,
 # with its Arch package only where pacman is; an extra is only reported.
 set -uo pipefail
-# shellcheck source=tools/harness/lib.sh
+# shellcheck source=legacy/tests/lib.sh
 . "$(dirname "$0")/lib.sh"
 
 # A PATH holding just the named tools (plus what the check itself runs).

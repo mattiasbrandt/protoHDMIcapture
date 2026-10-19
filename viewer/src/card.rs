@@ -1,5 +1,5 @@
 //! Which capture card to open: the same rules as view.sh's `resolve_card`
-//! (lib/card.sh). The first video capture node that is not an ignored
+//! (legacy/lib/card.sh). The first video capture node that is not an ignored
 //! device, narrowed by the pins (`CARD_SERIAL`, else `CARD_PORT`); a `DEV`
 //! that is gone, not a capture node, or ignored is set aside for the pins.
 //!
@@ -269,7 +269,7 @@ pub fn describe_dev(dev: &str) -> Option<Option<(String, bool)>> {
     (!dev.is_empty()).then(|| if Path::new(dev).exists() { probe(Path::new(dev)) } else { None })
 }
 
-/// An error from opening the card, with the hint lib/setup.sh gives when
+/// An error from opening the card, with the hint legacy/lib/setup.sh gives when
 /// the card is busy: who holds it, where that can be read (`holders`).
 fn open_error(e: String, holders: &[String]) -> String {
     if !e.contains("busy") {
@@ -394,7 +394,7 @@ pub fn modes(node: &Node) -> Vec<Mode> {
     }
 }
 
-/// A rate as FPS spells it: rounded as lib/setup.sh rounds v4l2-ctl's
+/// A rate as FPS spells it: rounded as legacy/lib/setup.sh rounds v4l2-ctl's
 /// "(%.3f fps)".
 fn rounded_fps(fps: f64) -> u32 {
     (fps + 0.5).floor() as u32

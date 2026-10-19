@@ -4,9 +4,9 @@
 # aside for the pin, and with no pin the run stops; an ignored device is
 # never opened, not even at the pin.
 set -uo pipefail
-# shellcheck source=tools/harness/lib.sh
+# shellcheck source=legacy/tests/lib.sh
 . "$(dirname "$0")/lib.sh"
-# shellcheck source=lib/card.sh
+# shellcheck source=legacy/lib/card.sh
 . lib/card.sh
 
 # node|serial|port|type|capture? (the card, a webcam and its metadata node)

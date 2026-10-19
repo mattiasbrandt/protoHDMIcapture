@@ -1,12 +1,12 @@
 //! The desktop adapters (decided in #10): what depends on the compositor,
-//! as lib/desktop.sh has it. Hyprland now, through `hyprctl` and its Lua
+//! as legacy/lib/desktop.sh has it. Hyprland now, through `hyprctl` and its Lua
 //! dispatchers (Omarchy configures Hyprland in Lua, which rejects
 //! `hyprctl keyword` and the bare dispatch forms); any other desktop gets
 //! the generic adapter, which leaves the window to the toolkit and the
 //! display alone. On Windows the generic adapter still focuses the running
 //! viewer for a second launch (#37).
 //!
-//! Refresh matching keeps lib/desktop.sh's record (`refresh.restore`,
+//! Refresh matching keeps legacy/lib/desktop.sh's record (`refresh.restore`,
 //! `monitor|rate set|original rate|restore command`, docs/run-dir.md), so
 //! view.sh and this viewer each recover a switch the other was killed in.
 
@@ -147,7 +147,7 @@ impl Desktop {
         }
     }
 
-    /// The monitors (lib/desktop.sh `desktop_outputs`), each marked when
+    /// The monitors (legacy/lib/desktop.sh `desktop_outputs`), each marked when
     /// the window of `pid` is on it; Err where this desktop cannot say.
     pub fn monitors(&self, pid: u32) -> Result<Vec<Monitor>, String> {
         match self {
@@ -307,7 +307,7 @@ impl Hyprland {
             ),
             other => return Err(format!("window: no mode {other}")),
         };
-        // As lib/desktop.sh: dispatch results are not checked (hyprctl
+        // As legacy/lib/desktop.sh: dispatch results are not checked (hyprctl
         // reports a refused dispatch as success).
         for s in &steps {
             self.dispatch(s);
@@ -436,7 +436,7 @@ fn settled(said: String, record: &Path) -> Report {
 }
 
 /// `notify-send`, where there is one: a launcher has no terminal to show
-/// a message in (lib/desktop.sh desktop_notify). No notify-send is no
+/// a message in (legacy/lib/desktop.sh desktop_notify). No notify-send is no
 /// notification, as there; any other failure is said on stderr.
 pub fn notify(urgency: &str, summary: &str, body: &str) {
     if let Err(e) = send("notify-send", urgency, summary, body) {
@@ -504,7 +504,7 @@ impl Plan {
     }
 }
 
-/// lib/pick-refresh-mode.py: on the focused monitor (or the one named `on`,
+/// legacy/lib/pick-refresh-mode.py: on the focused monitor (or the one named `on`,
 /// a measurement run's --monitor), among its modes at the same resolution
 /// (never a resolution change: it would rearrange the layout), the rate
 /// nearest `fps`; position, scale and transform kept.
@@ -735,7 +735,7 @@ mod tests {
         assert_eq!(other_workspace(&one, Some(0)), None);
     }
 
-    /// The same answer, byte for byte, as legacy's lib/pick-refresh-mode.py
+    /// The same answer, byte for byte, as legacy's legacy/lib/pick-refresh-mode.py
     /// gave on 2026-10-19 (#47): the refresh record both read.
     #[test]
     fn the_plan_is_pick_refresh_mode_pys() {
