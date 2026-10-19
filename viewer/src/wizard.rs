@@ -29,6 +29,7 @@ use crate::capture::{Format, FrameSource, Pixels, Raw, Reason, Signal, Stream};
 use crate::capture_cards::{self, Known};
 use crate::card::{AudioInput, Node};
 pub use crate::card::{Mode, Usb};
+use crate::live_changes;
 use crate::overlay::wrap;
 use crate::settings;
 use crate::sources;
@@ -1326,10 +1327,12 @@ impl Wizard {
         };
         // A DELAY lib/settings.sh refuses starts the tuner from the default.
         let delay = self.cur("DELAY");
-        self.sync_note = settings::check_value("DELAY", &delay).err().map(|e| format!("{e}: starting from 0.050"));
+        let default = live_changes::DEFAULT_DELAY_MS;
+        self.sync_note =
+            settings::check_value("DELAY", &delay).err().map(|e| format!("{e}: starting from {}", live_changes::seconds(default)));
         let delay_ms = match self.sync_note {
-            None => (delay.parse::<f64>().unwrap_or(0.05) * 1000.0).round() as u32,
-            Some(_) => 50,
+            None => live_changes::delay_ms(&delay).unwrap_or(default),
+            Some(_) => default,
         };
         // Audio::start: its PipeWire round trips give up after 2 s each.
         let started = match source {
@@ -1361,7 +1364,7 @@ impl Wizard {
             "    Enter                     keep this DELAY".into(),
             "    Esc                       leave DELAY as it was".into(),
             String::new(),
-            format!("DELAY = {:.3}", f64::from(ms) / 1000.0),
+            format!("DELAY = {}", live_changes::seconds(ms)),
         ]
         .into_iter()
         .chain(self.sync_note.clone())
@@ -1369,7 +1372,7 @@ impl Wizard {
     }
 
     fn sync_end(&mut self, keep: bool) {
-        let kept = self.tuner.take().map(|t| format!("{:.3}", f64::from(t.delay_ms()) / 1000.0));
+        let kept = self.tuner.take().map(|t| live_changes::seconds(t.delay_ms()));
         let body = match kept.filter(|_| keep) {
             Some(v) => {
                 self.set("DELAY", &v);

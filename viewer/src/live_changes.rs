@@ -113,7 +113,7 @@ pub fn delay_ms(seconds: &str) -> Result<u32, String> {
 
 /// A delay in ms as the settings spell DELAY: seconds, as the mpv script
 /// writes it.
-fn seconds(ms: u32) -> String {
+pub fn seconds(ms: u32) -> String {
     format!("{:.3}", f64::from(ms) / 1000.0)
 }
 
