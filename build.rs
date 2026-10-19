@@ -1,5 +1,5 @@
-//! Embeds the source profiles (`../sources/*.md`) and the capture card
-//! profiles (`../capture-cards/*.md`), as `settings.rs` embeds
+//! Embeds the source profiles (`sources/*.md`) and the capture card
+//! profiles (`capture-cards/*.md`), as `settings.rs` embeds
 //! settings.rows: the overlay's setup tips and the wizard's card facts
 //! travel with the binary.
 
@@ -40,7 +40,7 @@ fn embed(dir: &str, out: &str) {
 /// the build.
 fn windows_icon() {
     // Not canonicalize: on Windows that gives a \\?\ path, which rc may not take.
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("viewer/ is in the repo");
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     let ico = repo.join("packaging/windows/protohdmicapture.ico");
     println!("cargo:rerun-if-changed={}", ico.display());
     fs::metadata(&ico).unwrap_or_else(|e| panic!("{}: {e}", ico.display()));
@@ -54,8 +54,8 @@ fn windows_icon() {
 }
 
 fn main() {
-    embed("../sources", "sources.rs");
-    embed("../capture-cards", "capture_cards.rs");
+    embed("sources", "sources.rs");
+    embed("capture-cards", "capture_cards.rs");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         windows_icon();
     }

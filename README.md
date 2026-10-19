@@ -91,9 +91,9 @@ Linux needs a Wayland desktop with a Vulkan driver and PipeWire. Refresh
 matching and window placement need Hyprland; other desktops get the feed
 without them. Windows needs a DirectX 12 driver.
 
-From a checkout: `cargo build --release` in `viewer/` (Rust stable, clang,
+From a checkout: `cargo build --release` (Rust stable, clang,
 and the development files of PipeWire, ALSA, D-Bus, Wayland and
-libxkbcommon); the binary is `viewer/target/release/protohdmicapture`.
+libxkbcommon); the binary is `target/release/protohdmicapture`.
 
 ## Quick start
 
@@ -330,7 +330,7 @@ players, its menu entry and its own troubleshooting:
 
 | Path | What it is |
 |---|---|
-| `viewer/` | protoHDMIcapture, the Rust program |
+| `Cargo.toml`, `build.rs`, `src/`, `tests/`, `vendor/` | protoHDMIcapture, the Rust program |
 | `settings.rows` | the settings table: names, defaults, ranges, flags |
 | `capture-cards/`, `sources/` | capture card profiles and source profiles, read by protoHDMIcapture and legacy |
 | `legacy/` | protoHDMIcapture legacy: `view.sh`, `launch.sh`, `lib/`, `desktop/`, its harnesses |

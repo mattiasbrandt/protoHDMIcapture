@@ -16,7 +16,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-const SETTINGS_ROWS: &str = include_str!("../../settings.rows");
+const SETTINGS_ROWS: &str = include_str!("../settings.rows");
 
 /// One row: name | default | values | players | flags.
 #[derive(Debug, Clone)]

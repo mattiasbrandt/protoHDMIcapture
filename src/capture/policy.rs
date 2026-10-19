@@ -1203,7 +1203,7 @@ mod tests {
     /// are 0.05-0.09 apart; a line of the cadence's own slope says 1342.
     #[test]
     fn the_real_trace_counts_its_cadences_losses() {
-        const TRACE: &str = include_str!("../../../tools/fixtures/ms2130-windows/sample-times-600s.csv");
+        const TRACE: &str = include_str!("../../tools/fixtures/ms2130-windows/sample-times-600s.csv");
         let mut t = 0i64;
         let mut times = vec![0i64];
         for line in TRACE.lines().filter(|l| l.starts_with(|c: char| c.is_ascii_digit())) {

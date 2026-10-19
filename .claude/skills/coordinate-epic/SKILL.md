@@ -22,7 +22,7 @@ hobby viewer, plain commits on `main`, push only when told.
 ## Slicing
 
 - **File-disjoint wherever possible.** Each worker owns a set of files. Shared
-  files (`viewer/src/app.rs`, `viewer/src/main.rs`, `viewer/Cargo.toml` are the
+  files (`src/app.rs`, `src/main.rs`, `Cargo.toml` are the
   usual ones) are listed in every brief with the *shape* of the allowed edit:
   "one `mod` line, one CLI arm, one key binding; no restructuring".
 - **Excluded from dispatch:** anything that needs the card, a monitor, the
@@ -36,7 +36,7 @@ hobby viewer, plain commits on `main`, push only when told.
 
 1. **One worktree per ticket, with the tool:** `tools/epic-worktree <issue> <slug>`.
    It branches off `main`, checks out under `.claude/worktrees/`, copies
-   `viewer/target` by reflink (a plain copy where there is none), and prints
+   `target` by reflink (a plain copy where there is none), and prints
    the path. The branch stays local:
    `gh issue develop` would create it on GitHub, which is a push.
 2. **Render each brief from [worker-brief.md](worker-brief.md)**, filling its

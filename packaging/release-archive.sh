@@ -2,22 +2,22 @@
 # The Linux release archive (#14): protoHDMIcapture's binary with its desktop
 # entry, icon, licenses and the data files, for a distro without a package.
 # The profiles in capture-cards/ and sources/ are built into the binary
-# (viewer/build.rs); the archive carries them as documentation.
+# (build.rs); the archive carries them as documentation.
 #
 # Usage: packaging/release-archive.sh [OUT_DIR]   (default: dist/)
-# Builds viewer/ in release mode with the locked dependencies, then writes
+# Builds protoHDMIcapture in release mode with the locked dependencies, then writes
 # OUT_DIR/protohdmicapture-<version>-<arch>-linux.tar.gz and prints its path.
 set -euo pipefail
 root=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 out=${1:-$root/dist}
 
-version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/viewer/Cargo.toml" | head -1)
-[ -n "$version" ] || { echo "release-archive: no version in viewer/Cargo.toml" >&2; exit 1; }
+version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml" | head -1)
+[ -n "$version" ] || { echo "release-archive: no version in Cargo.toml" >&2; exit 1; }
 arch=$(uname -m)
 name="protohdmicapture-$version-$arch-linux"
 
-cargo build --manifest-path "$root/viewer/Cargo.toml" --release --locked
-target=$(cargo metadata --manifest-path "$root/viewer/Cargo.toml" --format-version 1 --no-deps |
+cargo build --manifest-path "$root/Cargo.toml" --release --locked
+target=$(cargo metadata --manifest-path "$root/Cargo.toml" --format-version 1 --no-deps |
     python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
 
 stage=$(mktemp -d)

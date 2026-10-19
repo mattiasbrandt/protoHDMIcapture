@@ -1,5 +1,5 @@
-# The Windows installer (#14): builds the viewer in release mode with the
-# locked dependencies (the C runtime linked in: viewer/.cargo/config.toml,
+# The Windows installer (#14): builds protoHDMIcapture in release mode with
+# the locked dependencies (the C runtime linked in: .cargo/config.toml,
 # checked with dumpbin),
 # then packaging/windows/protohdmicapture.wxs with WiX 7 into
 # OUT_DIR\protohdmicapture-<version>-x86_64-windows.msi, validates it (the
@@ -26,12 +26,12 @@ function Invoke-Native([string]$what, [scriptblock]$command) {
 }
 
 $root = (Resolve-Path "$PSScriptRoot\..\..").Path
-$version = (Select-String -Path "$root\viewer\Cargo.toml" -Pattern '^version = "(.*)"$' | Select-Object -First 1).Matches[0].Groups[1].Value
-if (-not $version) { throw "build-msi: no version in viewer\Cargo.toml" }
+$version = (Select-String -Path "$root\Cargo.toml" -Pattern '^version = "(.*)"$' | Select-Object -First 1).Matches[0].Groups[1].Value
+if (-not $version) { throw "build-msi: no version in Cargo.toml" }
 
-# In viewer\: Cargo reads viewer\.cargo\config.toml (the C runtime linked
-# in) from the working directory up, not from --manifest-path's.
-Push-Location "$root\viewer"
+# At the root: Cargo reads .cargo\config.toml (the C runtime linked in)
+# from the working directory up, not from --manifest-path's.
+Push-Location $root
 try {
     Invoke-Native 'cargo build' { cargo build --release --locked }
     $target = (Invoke-Native 'cargo metadata' { cargo metadata --format-version 1 --no-deps } | ConvertFrom-Json).target_directory
@@ -48,7 +48,7 @@ if (-not $dumpbin) { throw "build-msi: no dumpbin.exe in Visual Studio (vswhere)
 $crt = Invoke-Native 'dumpbin' { & $dumpbin /nologo /dependents $exe } |
     Where-Object { $_ -match '(?i)^\s*(vcruntime\S*\.dll|api-ms-win-crt-\S+|ucrtbase\.dll)\s*$' }
 if ($crt) {
-    throw "build-msi: $exe imports the C runtime ($(($crt | ForEach-Object Trim) -join ', ')): viewer\.cargo\config.toml's +crt-static did not apply"
+    throw "build-msi: $exe imports the C runtime ($(($crt | ForEach-Object Trim) -join ', ')): .cargo\config.toml's +crt-static did not apply"
 }
 
 $wixVersion = (Invoke-Native 'wix --version' { wix --version }) -replace '\+.*$', ''

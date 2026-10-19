@@ -74,7 +74,7 @@ mod tests {
 
     #[test]
     fn every_profile_is_embedded_generic_last() {
-        let on_disk = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../sources"))
+        let on_disk = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/sources"))
             .unwrap()
             .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "md"))
             .count();

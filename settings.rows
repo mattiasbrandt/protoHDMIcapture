@@ -1,5 +1,5 @@
 # protoHDMIcapture's settings: one row per setting, in this order. The one
-# table: protoHDMIcapture compiles it in (viewer/src/settings.rs), and
+# table: protoHDMIcapture compiles it in (src/settings.rs), and
 # protoHDMIcapture legacy reads it at run time (legacy/lib/settings.sh). The
 # README's settings table and config.example are checked against it
 # (tools/check). Lines starting with # and blank lines are skipped.

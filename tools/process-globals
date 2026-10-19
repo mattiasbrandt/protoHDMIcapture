@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Process-global state in the Rust viewer (#25): a static item, a
+# Process-global state in protoHDMIcapture (#25): a static item, a
 # thread_local!, or a LazyLock, OnceLock, OnceCell or lazy_static! is
 # shared by every window run in the process, as the dashboard's numbers
 # once were (#21). Each one carries `// process-global: <reason>` on its
 # line or the line above; a marked thread_local! covers the statics inside
 # it. Prints each unmarked one and exits 1.
-# Usage: tools/process-globals [DIR]     (default: viewer/src)
+# Usage: tools/process-globals [DIR]     (default: src)
 set -uo pipefail
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
 
-dir=${1:-viewer/src}
+dir=${1:-src}
 [ -d "$dir" ] || { echo "process-globals: no directory $dir" >&2; exit 2; }
 mapfile -t RS < <(find "$dir" -name '*.rs' -type f | sort)
 [ "${#RS[@]}" -gt 0 ] || exit 0

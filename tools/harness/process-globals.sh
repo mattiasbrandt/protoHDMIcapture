@@ -41,6 +41,6 @@ expect 1 $'// process-global: one event loop\nthread_local! {\n    static L: u8 
 # Not state.
 expect 0 $'const N: u32 = 1;\nfn name() -> &\'static str { "x" }\nuse std::sync::OnceLock;\n// a LazyLock was here (#21)\n/// static X is gone'
 
-# The viewer's own tree passes (each of its statics is marked).
-tools/process-globals >/dev/null 2>&1 || no "viewer/src has unmarked process-global state: run tools/process-globals"
+# protoHDMIcapture's own tree passes (each of its statics is marked).
+tools/process-globals >/dev/null 2>&1 || no "src has unmarked process-global state: run tools/process-globals"
 finish

@@ -1,6 +1,6 @@
 # Installing protoHDMIcapture
 
-protoHDMIcapture (`protohdmicapture`, in `viewer/`) is what the releases
+protoHDMIcapture (`protohdmicapture`, the crate at the repo root) is what the releases
 ship. protoHDMIcapture legacy, `view.sh` + mpv run from a checkout, is a
 best-effort alternative ([legacy/README.md](../legacy/README.md)). Both read
 the same settings file, `~/.config/protohdmicapture/config`.
@@ -73,8 +73,8 @@ with `SHA256SUMS`.
 ## From source
 
 ```bash
-cargo build --manifest-path viewer/Cargo.toml --release
-viewer/target/release/protohdmicapture
+cargo build --release
+target/release/protohdmicapture
 ```
 
 `d` opens the dashboard with `xdg-terminal-exec`, else `$TERMINAL`, else

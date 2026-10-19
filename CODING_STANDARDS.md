@@ -12,7 +12,7 @@ Rules for reviewing a change to this repo. Mechanical ones are enforced by
    the shared run directory may belong to another session. See
    [`docs/run-dir.md`](docs/run-dir.md). One exception: an orphan a killed
    session left running (legacy's `view.sh` `kill_orphan`, and
-   protoHDMIcapture's in `viewer/src/session.rs`), signalled only while
+   protoHDMIcapture's in `src/session.rs`), signalled only while
    holding the lock its session held, and only if it is the user's own and
    its command line is ours.
 3. **A setting whose empty value means something carries the `empty` flag**

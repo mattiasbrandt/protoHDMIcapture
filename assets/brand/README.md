@@ -11,7 +11,7 @@ with an AI tool.
 | `logo-lockup-for-light-bg.svg` | The same for a light background | the README header |
 | `social-preview.png` | 1280×640, what GitHub shows when the repo's link is shared | the repo's Settings → Social preview (uploaded by hand) |
 | `../../packaging/linux/icons/hicolor/` | The app icon, 16–512 px and a scalable SVG, in the freedesktop layout | `packaging/` (installed to `share/icons/hicolor/`); `Icon=protohdmicapture` in the `.desktop` files |
-| `../../packaging/windows/protohdmicapture.ico` | The app icon, 16–256 px | the Windows exe's icon resource (`viewer/build.rs`) |
+| `../../packaging/windows/protohdmicapture.ico` | The app icon, 16–256 px | the Windows exe's icon resource (`build.rs`) |
 
 The Linux and Windows icons are the same tile.
 

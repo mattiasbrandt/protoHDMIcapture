@@ -1,5 +1,5 @@
 # The release packages (#14). A v* tag:
-#   draft         checks the tag is v<viewer/Cargo.toml's version> (the
+#   draft         checks the tag is v<Cargo.toml's version> (the
 #                 assets are named by it), then creates the GitHub release as
 #                 a draft, or finds the draft on a re-run; a published
 #                 release is refused;
@@ -53,9 +53,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' viewer/Cargo.toml | head -1)
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           if [ "v$version" != "$TAG" ]; then
-            echo "::error::the tag $TAG is not v$version, viewer/Cargo.toml's version (the assets are named by it)"
+            echo "::error::the tag $TAG is not v$version, Cargo.toml's version (the assets are named by it)"
             exit 1
           fi
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then

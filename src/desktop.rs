@@ -882,7 +882,7 @@ mod tests {
     }
 
     /// A recorded `hyprctl monitors -j` (three monitors, serials left out).
-    const MONITORS: &str = include_str!("../../tools/fixtures/hyprctl/monitors.json");
+    const MONITORS: &str = include_str!("../tools/fixtures/hyprctl/monitors.json");
 
     #[test]
     fn the_monitors_as_hyprctl_reports_them() {
@@ -908,7 +908,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let script = format!(
             "#!/bin/sh\ncase \"$1\" in\nmonitors) cat '{m}' ;;\nclients) echo '[{{\"pid\": {pid}, \"monitor\": 1}}]' ;;\n*) exit 1 ;;\nesac\n",
-            m = concat!(env!("CARGO_MANIFEST_DIR"), "/../tools/fixtures/hyprctl/monitors.json"),
+            m = concat!(env!("CARGO_MANIFEST_DIR"), "/tools/fixtures/hyprctl/monitors.json"),
             pid = std::process::id()
         );
         fs::write(dir.join("hyprctl"), script).unwrap();

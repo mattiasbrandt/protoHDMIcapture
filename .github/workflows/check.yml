@@ -67,7 +67,7 @@ jobs:
       # target it then rebuilds and never saves; saved after a red run too.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: viewer -> target
+          workspaces: . -> target
           cache-on-failure: true
 
       - name: tools/check
@@ -77,4 +77,4 @@ jobs:
       # nobody can rerun them, so a red run shows them in full.
       - name: Failing tests, in full
         if: failure()
-        run: cargo test --manifest-path viewer/Cargo.toml --no-fail-fast
+        run: cargo test --no-fail-fast

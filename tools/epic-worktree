@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A worker's worktree for one ticket of an epic (.claude/skills/coordinate-epic):
 # a local branch off main, checked out under .claude/worktrees/, with the
-# viewer's cargo target copied in by reflink so the worker's first build reuses
+# crate's cargo target copied in by reflink so the worker's first build reuses
 # the dependencies instead of compiling them again.
 # Usage: tools/epic-worktree <issue> <slug>     e.g. tools/epic-worktree 21 telemetry
 # Prints the worktree's path. Nothing is pushed: the branch stays local, and
@@ -25,9 +25,13 @@ git show-ref --verify --quiet "refs/heads/$name" && die "branch $name exists alr
 git worktree add -q "$path" -b "$name" main || die "git worktree add failed"
 
 # A plain copy where the filesystem has no reflinks: slower, same result.
-if [ -d viewer/target ]; then
-    if ! cp -a --reflink=auto viewer/target "$path/viewer/target"; then
-        printf 'epic-worktree: warning: viewer/target not copied; the first build compiles every dependency\n' >&2
+# viewer/target: a checkout's build from before the crate moved to the root
+# (#48), still worth reusing.
+src=target
+[ -d "$src" ] || src=viewer/target
+if [ -d "$src" ]; then
+    if ! cp -a --reflink=auto "$src" "$path/target"; then
+        printf 'epic-worktree: warning: %s not copied; the first build compiles every dependency\n' "$src" >&2
     fi
 fi
 

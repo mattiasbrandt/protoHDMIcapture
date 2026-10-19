@@ -161,6 +161,6 @@ and `hyprctl monitors -j` shows the original refresh rate.
 - **A tool that misbehaves:** a directory first on `PATH` with a script of
   the same name, e.g. a `pw-loopback` that exits at once or never links, or
   a `hyprctl` whose `eval` fails (`legacy/tests/refresh-record.sh`;
-  `viewer/src/desktop.rs`'s tests do the same for protoHDMIcapture).
+  `src/desktop.rs`'s tests do the same for protoHDMIcapture).
 - **Who holds a lock:** `fuser -v $XDG_RUNTIME_DIR/protohdmicapture/*.lock`.
   A scan of `/proc/*/fd` takes over a minute.
