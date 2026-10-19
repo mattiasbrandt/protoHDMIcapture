@@ -36,9 +36,9 @@ pub enum Pixels {
 /// The FMT values settings.rows accepts that the Rust viewer does not
 /// capture, each with the reason. view.sh plays them.
 pub const NOT_CAPTURED: [(&str, &str); 3] = [
-    ("nv12", "not captured by the Rust viewer yet"),
-    ("rawvideo", "lets the player pick the uncompressed format, and the Rust viewer has to know which"),
-    ("", "leaves the card on the format it was last set to, and the Rust viewer has to know which"),
+    ("nv12", "not captured by protoHDMIcapture yet"),
+    ("rawvideo", "lets the player pick the uncompressed format, and protoHDMIcapture has to know which"),
+    ("", "leaves the card on the format it was last set to, and protoHDMIcapture has to know which"),
 ];
 
 impl Pixels {
@@ -60,7 +60,7 @@ impl Pixels {
             return Ok(p);
         }
         let why = NOT_CAPTURED.iter().find(|(v, _)| *v == fmt).map_or("not an FMT value", |(_, why)| why);
-        Err(format!("FMT={fmt}: {why}; use {}, or view.sh", Self::settings().join(" or ")))
+        Err(format!("FMT={fmt}: {why}; use {}, or legacy/view.sh", Self::settings().join(" or ")))
     }
 
     /// Every captured format's FMT spelling, uncompressed first.
@@ -212,7 +212,7 @@ mod tests {
     fn a_format_not_captured_is_refused_with_the_reason() {
         assert_eq!(
             Format::from_settings("1920x1080", "60", "nv12").unwrap_err(),
-            "FMT=nv12: not captured by the Rust viewer yet; use yuyv422 or mjpeg, or view.sh"
+            "FMT=nv12: not captured by protoHDMIcapture yet; use yuyv422 or mjpeg, or legacy/view.sh"
         );
         assert!(Format::from_settings("1920x1080", "60", "").unwrap_err().starts_with("FMT=: leaves the card on the format"));
         assert!(Format::from_settings("1920x1080", "60", "rawvideo").unwrap_err().starts_with("FMT=rawvideo: lets the player pick"));

@@ -256,7 +256,7 @@ fn missing(nodes: &[Node], pins: &Pins, ignore: &Option<Regex>) -> Missing {
     // view.sh's own wizard beside it where view.sh runs (wizard.rs
     // `has_view_sh`: Linux).
     let setup = if cfg!(target_os = "linux") {
-        "to choose a card again: protohdmicapture --setup (or ./view.sh --setup)"
+        "to choose a card again: protohdmicapture --setup (or legacy/view.sh --setup)"
     } else {
         "to choose a card again: protohdmicapture --setup"
     };
@@ -640,7 +640,7 @@ mod tests {
     /// The setup line as this platform writes it.
     fn setup_line() -> &'static str {
         if cfg!(target_os = "linux") {
-            "to choose a card again: protohdmicapture --setup (or ./view.sh --setup)"
+            "to choose a card again: protohdmicapture --setup (or legacy/view.sh --setup)"
         } else {
             "to choose a card again: protohdmicapture --setup"
         }

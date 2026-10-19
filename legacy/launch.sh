@@ -52,7 +52,7 @@ run_setup_in_terminal() {
 if [ ! -e "$CONFIG_FILE" ] && [ -z "${NO_SETUP:-}" ]; then
     if ! run_setup_in_terminal; then
         desktop_notify normal "protoHDMIcapture: no settings yet" \
-            "Could not open a terminal for setup; playing with defaults. Run ./view.sh --setup to choose settings."
+            "Could not open a terminal for setup; playing with defaults. Run legacy/view.sh --setup to choose settings."
     elif [ "$(cat "$RUN_DIR/setup.done" 2>/dev/null)" != saved ]; then
         exit 0   # setup was cancelled or closed: do not surprise anyone with a feed
     fi

@@ -236,9 +236,9 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
         }
     })();
     let saved = wiz.borrow().saved();
-    // launch.sh reads a missing setup.done as "not saved".
+    // legacy/launch.sh reads a missing setup.done as "not saved".
     if let Err(e) = std::fs::write(dir.join("setup.done"), if saved { "saved\n" } else { "cancelled\n" }) {
-        eprintln!("warning: setup.done: {e}; launch.sh will read the wizard as cancelled");
+        eprintln!("warning: setup.done: {e}; legacy/launch.sh will read the wizard as cancelled");
     }
     let _ = std::fs::remove_file(dir.join("setup.pid"));
     result?;

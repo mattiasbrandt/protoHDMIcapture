@@ -197,7 +197,7 @@ resolve_card() {
             # With no pin, a scan would open the first capture node left:
             # a webcam not on the ignore list, and its mic on the speakers.
             if [ -z "${CARD_SERIAL:-}" ] && [ -z "${CARD_PORT:-}" ]; then
-                CARD_ERROR="${CARD_WARNING%; looking*}; the card has no other pin, so it cannot be found again safely: plug it back in, or re-run ./view.sh --setup"
+                CARD_ERROR="${CARD_WARNING%; looking*}; the card has no other pin, so it cannot be found again safely: plug it back in, or re-run legacy/view.sh --setup"
                 CARD_WARNING=""
                 return 1
             fi
@@ -229,9 +229,9 @@ resolve_card() {
         elif [ -n "${CARD_SERIAL:-}" ]; then
             CARD_ERROR="no capture card with serial $CARD_SERIAL found; is it plugged in? (CARD_SERIAL in $CONFIG_FILE)"
         elif [ -n "${CARD_PORT:-}" ]; then
-            CARD_ERROR="no capture card on USB port $CARD_PORT; is it plugged in, and into the same port? Re-run ./view.sh --setup if it moved"
+            CARD_ERROR="no capture card on USB port $CARD_PORT; is it plugged in, and into the same port? Re-run legacy/view.sh --setup if it moved"
         else
-            CARD_ERROR="no capture device found; set DEV=/dev/videoN (or run ./view.sh --setup)"
+            CARD_ERROR="no capture device found; set DEV=/dev/videoN (or run legacy/view.sh --setup)"
         fi
         return 1
     fi

@@ -838,7 +838,7 @@ fn render(s: &Value, p: &Paint) -> String {
     out.push(format!(
         "  {}   {}",
         p.bold("protoHDMIcapture · live"),
-        p.dim(&format!("Rust viewer · pid {} · up {:.0} s", int(&s["pid"]), num(&s["up_s"]).unwrap_or(0.0)))
+        p.dim(&format!("running · pid {} · up {:.0} s", int(&s["pid"]), num(&s["up_s"]).unwrap_or(0.0)))
     ));
 
     out.push(String::new());
@@ -1011,7 +1011,7 @@ pub fn client(run_dir: &Path) -> Result<(), String> {
             Ok(s) => break s,
             Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
             Err(e) => {
-                println!("No Rust viewer is running ({}: {e}).", path.display());
+                println!("protoHDMIcapture is not running ({}: {e}).", path.display());
                 if tty {
                     thread::sleep(Duration::from_secs(3));
                 }
@@ -1459,7 +1459,7 @@ mod tests {
     fn the_dashboards_text() {
         let text = render(&sample(), &Paint { on: false });
         let want = [
-            "  protoHDMIcapture · live   Rust viewer · pid 4242 · up 12 s",
+            "  protoHDMIcapture · live   running · pid 4242 · up 12 s",
             "  fps               60.0 captured · 59.9 presented · display 59.95 Hz",
             "  capture gaps      0 · 0 frames lost · 744 frames captured",
             "  signal            ok",

@@ -133,7 +133,7 @@ stage_welcome() {
     _clear
     center ""
     center "${BOLD}${BLUE}📺  protoHDMIcapture setup${RESET}"
-    center "${DIM}low-latency HDMI capture viewer · re-run any time with ./view.sh --setup${RESET}"
+    center "${DIM}low-latency HDMI capture viewer · re-run any time with legacy/view.sh --setup${RESET}"
     center ""
     say "Picks your capture card and its best mode, checks the signal and the"
     say "audio, and sets how the picture is shown. Nothing is written until the"
@@ -159,7 +159,7 @@ stage_welcome() {
         ui_bad "Missing, needed before setup can go on:"
         ui_list "${PREFLIGHT_MISSING[@]}"
         center ""
-        say "Install them, then run ./view.sh --setup again."
+        say "Install them, then run legacy/view.sh --setup again."
         center ""
         # From the menu this terminal closes when the wizard exits.
         pause
@@ -787,7 +787,7 @@ stage_sync() {
 stage_debug() {
     stage "🐞 Troubleshooting"
     say "Normally off. Turn it on while chasing stutter, drops or audio drift;"
-    say "./view.sh --debug does the same for a single run."
+    say "legacy/view.sh --debug does the same for a single run."
     center ""
     local pick
     choose pick "Debug output" "$(cur DEBUG)" \
@@ -968,11 +968,11 @@ if [ -n "$REPORT" ]; then
     command -v wl-copy >/dev/null 2>&1 && note "Copy it for an AI agent or a forum post:  wl-copy < $REPORT"
     center ""
 fi
-note "Change any of this: ./view.sh --setup"
+note "Change any of this: legacy/view.sh --setup"
 center ""
 if [ -n "$FROM_LAUNCHER" ]; then
     if [ -n "$SAVED" ]; then pause "⏎  Press Enter to start the feed"; else pause "⏎  Press Enter to close"; fi
 elif [ -z "$THEN_PLAY" ]; then
-    note "Play: ./view.sh, or protoHDMIcapture in your app launcher."
+    note "Play: legacy/view.sh, or protoHDMIcapture in your app launcher."
     center ""
 fi

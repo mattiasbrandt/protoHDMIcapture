@@ -89,7 +89,7 @@ for _arg in "$@"; do
         --debug) DEBUG_FLAG=1 ;;
         --settings) MODE=settings ;;
         -h|--help)
-            echo "usage: ./view.sh [--setup | --tune | --debug | --settings | --dashboard]   (settings: env vars or the config file)"
+            echo "usage: legacy/view.sh [--setup | --tune | --debug | --settings | --dashboard]   (settings: env vars or the config file)"
             exit 0 ;;
         *) echo "view.sh: unknown option $_arg (try --help)" >&2; exit 2 ;;
     esac
@@ -105,7 +105,7 @@ if [ "$MODE" = play ] && [ ! -e "$CONFIG_FILE" ] && [ -z "${PROTOHDMI_SETUP_CHIL
     read -r _reply || _reply=n
     if [[ "$_reply" =~ ^[Nn] ]]; then
         if config_write; then
-            printf '# Setup was skipped; run ./view.sh --setup to choose settings.\n' >>"$CONFIG_FILE"
+            printf '# Setup was skipped; run legacy/view.sh --setup to choose settings.\n' >>"$CONFIG_FILE"
         fi
     else
         "$HERE/lib/setup.sh" --then-play

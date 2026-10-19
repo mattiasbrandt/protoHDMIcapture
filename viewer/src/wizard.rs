@@ -1126,7 +1126,7 @@ impl Wizard {
                 ),
                 Some(Reason::Unusable(why)) => (
                     format!("frames arrive but the viewer cannot use them ({why})."),
-                    if self.sys.has_view_sh() { "Go back and pick another mode, or use view.sh." } else { "Go back and pick another mode." },
+                    if self.sys.has_view_sh() { "Go back and pick another mode, or use legacy/view.sh." } else { "Go back and pick another mode." },
                 ),
                 Some(Reason::Nothing) | None => (
                     "no frames in 6 seconds: no signal, or HDCP is on at the source.".into(),
@@ -1290,7 +1290,7 @@ impl Wizard {
         ];
         let text = if self.sys.has_view_sh() {
             items.push(item("config", "Your mpv.conf · whatever it sets (may be expensive)"));
-            "How the picture is scaled to the window. view.sh's mpv reads it, and this viewer too (where \
+            "How the picture is scaled to the window. legacy/view.sh's mpv reads it, and protoHDMIcapture too (where \
              \"Your mpv.conf\" reads as balanced). The feed behind this page keeps the saved scaling; \
              the choice shows from the next start."
         } else {
@@ -1386,7 +1386,7 @@ impl Wizard {
 
     fn debug_stage(&mut self) {
         let text = if self.sys.has_view_sh() {
-            "Normally off. Turn it on while chasing stutter, drops or audio drift; ./view.sh --debug does the same \
+            "Normally off. Turn it on while chasing stutter, drops or audio drift; legacy/view.sh --debug does the same \
              for a single run."
         } else {
             "Normally off. Turn it on while chasing stutter, drops or audio drift."
@@ -1474,7 +1474,7 @@ impl Wizard {
             body.push(String::new());
         }
         body.push(if self.sys.has_view_sh() {
-            "Change any of this: protohdmicapture --setup (or ./view.sh --setup)".into()
+            "Change any of this: protohdmicapture --setup (or legacy/view.sh --setup)".into()
         } else {
             "Change any of this: protohdmicapture --setup".into()
         });
@@ -1649,7 +1649,7 @@ impl Wizard {
             std::fs::OpenOptions::new()
                 .append(true)
                 .open(&self.config_file)
-                .and_then(|mut f| f.write_all(b"# Setup was skipped; run ./view.sh --setup (or protohdmicapture --setup) to choose settings.\n"))
+                .and_then(|mut f| f.write_all(b"# Setup was skipped; run protohdmicapture --setup (or legacy/view.sh --setup) to choose settings.\n"))
                 .map_err(|e| format!("cannot write {}: {e}", self.config_file.display()))
         });
         match written {
@@ -2426,7 +2426,7 @@ mod tests {
         press(&mut w, &["Down", "Enter"]);
         assert_eq!(w.outcome(), Some(Outcome::Play));
         let text = std::fs::read_to_string(&file).unwrap();
-        assert!(text.ends_with("# Setup was skipped; run ./view.sh --setup (or protohdmicapture --setup) to choose settings.\n"), "{text}");
+        assert!(text.ends_with("# Setup was skipped; run protohdmicapture --setup (or legacy/view.sh --setup) to choose settings.\n"), "{text}");
         // q in the tuner: the loopback stops, the wizard ends unsaved.
         let mut w = wizard(fake(), &file, false);
         press(&mut w, &["Enter", "Enter", "y", "Enter", "Enter", "Enter", "Enter", "Enter"]);
@@ -2471,7 +2471,7 @@ mod tests {
         assert_eq!(
             keys,
             ["yuyv422 1280x720 60", "mjpeg 1280x720 60", "mjpeg 1920x1080 30", "yuyv422 1280x720 10", "yuyv422 1920x1080 5"],
-            "fps, size, uncompressed first; nv12 is not offered: the Rust viewer cannot capture it"
+            "fps, size, uncompressed first; nv12 is not offered: protoHDMIcapture cannot capture it"
         );
         assert!(is_fmt("yuyv422") && is_fmt("mjpeg") && !is_fmt("nv12"));
         assert_eq!(closest_mode(1920, 1080, 60, &best).unwrap().key(), "yuyv422 1280x720 60", "frame rate first");
