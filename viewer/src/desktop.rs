@@ -735,29 +735,24 @@ mod tests {
         assert_eq!(other_workspace(&one, Some(0)), None);
     }
 
-    /// The same answer as lib/pick-refresh-mode.py, byte for byte.
+    /// The same answer, byte for byte, as legacy's lib/pick-refresh-mode.py
+    /// gave on 2026-10-19 (#47): the refresh record both read.
     #[test]
-    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
-    fn the_plan_matches_pick_refresh_mode_py() {
-        let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../lib/pick-refresh-mode.py");
-        let mut cases = vec![(monitors(), 60.0), (monitors(), 50.0), (monitors(), 59.94)];
+    fn the_plan_is_pick_refresh_mode_pys() {
+        let at = |mode: &str, rest: &str| format!(r#"hl.monitor({{ output = "DP-2", mode = "1920x1200@{mode}", position = "3440x120", {rest} }})"#);
+        let turned = "scale = 1.25, transform = 1";
+        let line = |set: &str, rest: &str, fps: &str| format!("DP-2|{}|{}|59.95|{fps}", at(set, rest), at("59.95", rest));
         let mut plain = monitors();
         plain[1]["scale"] = serde_json::json!(1);
         plain[1]["transform"] = serde_json::json!(0);
-        cases.push((plain, 60.0));
-        for (m, fps) in cases {
-            let mut child = Command::new("python3")
-                .args(["-I", script, &fps.to_string()])
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .unwrap();
-            use std::io::Write as _;
-            child.stdin.take().unwrap().write_all(m.to_string().as_bytes()).unwrap();
-            let out = child.wait_with_output().unwrap();
-            assert!(out.status.success());
-            let py = String::from_utf8(out.stdout).unwrap();
-            assert_eq!(plan(&m, fps, None).unwrap().line(), py.trim_end(), "fps {fps}");
+        let cases = [
+            (monitors(), 60.0, line("60", turned, "60")),
+            (monitors(), 50.0, line("50", turned, "50")),
+            (monitors(), 59.94, line("59.95", turned, "59.95")),
+            (plain, 60.0, line("60", "scale = 1", "60")),
+        ];
+        for (m, fps, want) in cases {
+            assert_eq!(plan(&m, fps, None).unwrap().line(), want, "fps {fps}");
         }
         let mut none = monitors();
         none[1]["focused"] = serde_json::json!(false);

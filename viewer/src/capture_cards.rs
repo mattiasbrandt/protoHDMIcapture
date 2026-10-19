@@ -141,25 +141,6 @@ pub fn lookup(id: &str) -> (Known, Lookup) {
 mod tests {
     use super::*;
 
-    /// lib/capture-cards.sh's answer for `id`: the return code, then each
-    /// CC_* on its own line, the quirks joined by "|".
-    fn bash(id: &str) -> String {
-        let out = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(
-                r#". "$1/lib/capture-cards.sh"; capture_card_lookup "$2"; rc=$?
-                   f=""; [ -n "$CC_FILE" ] && f=$(basename "$CC_FILE" .md)
-                   q=$(IFS='|'; echo "${CC_QUIRKS[*]}")
-                   printf '%s\n' "$rc" "$f" "$CC_CHIP" "$CC_HINT" "$CC_LINK" "$CC_STATUS" "$q""#,
-            )
-            .arg("bash")
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/.."))
-            .arg(id)
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&out.stdout).to_string()
-    }
-
     fn rust(id: &str) -> String {
         let (known, l) = lookup(id);
         let rc = match known {
@@ -171,11 +152,24 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
-    fn lookups_as_lib_capture_cards_sh() {
-        for id in ["1e4e:7016", "345f:2130", "534d:2109", "534d:9999", "dead:beef", ""] {
-            assert_eq!(rust(id), bash(id), "{id}");
+    fn lookups_as_legacys_capture_card_lookup() {
+        // The return code, profile, chip, hint and link legacy's
+        // `capture_card_lookup` (lib/capture-cards.sh) gave on 2026-10-19
+        // (#47); the status and quirks are the profiles' own text.
+        let head = |id: &str| rust(id).lines().take(5).collect::<Vec<_>>().join("\n");
+        let cases = [
+            ("1e4e:7016", "0\nms2130\nMacroSilicon MS2130\nuncompressed YUYV at 1080p60 needs the 5000 Mbit/s link\n5000"),
+            ("345f:2130", "0\nms2130\nMacroSilicon MS2130\nuncompressed YUYV at 1080p60 needs the 5000 Mbit/s link\n5000"),
+            ("534d:2109", "0\nms2109\nMacroSilicon MS2109\nMJPEG is effectively required: YUYV manages 5 to 10 fps\n480"),
+            ("534d:9999", "1\n\nMacroSilicon family, exact chip unknown\ngo by the format list\n"),
+            ("dead:beef", "2\n\nunknown chip\ngo by the format list\n"),
+            ("", "2\n\nunknown chip\ngo by the format list\n"),
+        ];
+        for (id, want) in cases {
+            assert_eq!(head(id), want, "{id}");
         }
+        assert!(rust("1e4e:7016").lines().nth(5).unwrap().starts_with("tested "), "a tested id says so");
+        assert!(rust("345f:2130").lines().nth(5).unwrap().starts_with("reported"));
         assert_eq!(lookup("534d:9999").1.chip, "MacroSilicon family, exact chip unknown");
     }
 

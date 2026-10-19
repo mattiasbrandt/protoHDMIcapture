@@ -2196,31 +2196,14 @@ mod tests {
              SOURCE=ps5\nCARD_SERIAL=20000130041415\nIGNORE_CARDS_RE='OBSBOT Meet 2'\nRES=1920x1080\nFPS=60\n\
              FMT=yuyv422\nDELAY=0.110\nBACKEND=mpv\nWINDOW=fullscreen\nSCALING=balanced\nREFRESH=match\n"
         );
-        // view.sh reads the wizard's file as saved and valid (Linux: view.sh is bash).
-        #[cfg(target_os = "linux")]
-        {
-            let out = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../view.sh"))
-                .arg("--settings")
-                .env("CONFIG_FILE", &file)
-                .output()
-                .unwrap();
-            let report = String::from_utf8_lossy(&out.stdout);
-            let row = |k: &str| {
-                report.lines().find(|l| l.split_whitespace().next() == Some(k)).unwrap_or("").split_whitespace().last().unwrap_or("").to_string()
-            };
-            for k in ["SOURCE", "CARD_SERIAL", "IGNORE_CARDS_RE", "RES", "FPS", "FMT", "DELAY", "WINDOW", "SCALING", "REFRESH"] {
-                assert_eq!(row(k), "saved", "{k}: {report}");
-            }
-            assert!(out.status.success() && report.contains("all valid"), "{report}");
-        }
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 
-    /// The same answers through lib/setup.sh's apply_to on a copy of the
-    /// same start: byte for byte, FULLSCREEN's removal included.
+    /// The file as legacy's lib/setup.sh apply_to left it from the same
+    /// start and answers on 2026-10-19 (#47): byte for byte, FULLSCREEN's
+    /// removal included.
     #[test]
-    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
-    fn rerunning_edits_the_file_as_apply_to_does() {
+    fn rerunning_edits_the_file_as_apply_to_did() {
         let start = "# mine\nFULLSCREEN=no\nDEV=/dev/video9\nLEVELS=full\nBACKEND=gst\nDEBUG=log\n";
         let file = scratch("rerun", Some(start));
         let mut w = wizard(fake(), &file, false);
@@ -2249,33 +2232,11 @@ mod tests {
         press(&mut w, &["Enter", "Enter"]);
         assert!(w.saved());
         let rust = std::fs::read_to_string(&file).unwrap();
-
-        // bash: apply_to with the same NEW.
-        let copy = file.with_file_name("bash-config");
-        std::fs::write(&copy, start).unwrap();
-        let mut set = Vec::new();
-        let mut unset = Vec::new();
-        for k in &w.managed {
-            if w.new[k].is_empty() {
-                unset.push(k.clone());
-            } else {
-                set.push(format!("{k}={}", w.new[k]));
-            }
-        }
-        let ok = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(r#". "$1/lib/card.sh"; shift; n=$1; shift; config_write "${@:1:$n}" && shift "$n" && config_unset "$@""#)
-            .arg("bash")
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/.."))
-            .arg(set.len().to_string())
-            .args(&set)
-            .args(&unset)
-            .env("CONFIG_FILE", &copy)
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok);
-        assert_eq!(rust, std::fs::read_to_string(&copy).unwrap());
+        assert_eq!(
+            rust,
+            "# mine\nLEVELS=full\nBACKEND=gst\nCARD_SERIAL=20000130041415\nIGNORE_CARDS_RE='OBSBOT Meet 2'\nSRC=alsa_input.mic\n\
+             RES=1920x1080\nFPS=60\nFMT=yuyv422\nWINDOW=windowed\nWINDOW_SIZE=1024x768\nREFRESH=keep\n"
+        );
         assert!(rust.contains("WINDOW=windowed\n") && !rust.contains("FULLSCREEN") && !rust.contains("DEV="), "{rust}");
         assert!(rust.contains("SRC=alsa_input.mic\n") && rust.contains("BACKEND=gst\n") && rust.contains("LEVELS=full\n"), "{rust}");
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
@@ -2466,18 +2427,6 @@ mod tests {
         assert_eq!(w.outcome(), Some(Outcome::Play));
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.ends_with("# Setup was skipped; run ./view.sh --setup (or protohdmicapture --setup) to choose settings.\n"), "{text}");
-        // view.sh then plays without asking: the file exists, and is valid
-        // (Linux: view.sh is bash).
-        #[cfg(target_os = "linux")]
-        {
-            let out = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../view.sh"))
-                .arg("--settings")
-                .env("CONFIG_FILE", &file)
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
-        }
-
         // q in the tuner: the loopback stops, the wizard ends unsaved.
         let mut w = wizard(fake(), &file, false);
         press(&mut w, &["Enter", "Enter", "y", "Enter", "Enter", "Enter", "Enter", "Enter"]);
@@ -2530,41 +2479,27 @@ mod tests {
         assert_eq!(closest_mode(1920, 1080, 60, &[]), None);
     }
 
-    /// The lib/setup.sh function `name`, as source text.
-    fn bash_fn(name: &str) -> String {
-        let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../lib/setup.sh")).unwrap();
-        let start = text.find(&format!("\n{name}() {{")).unwrap() + 1;
-        let rest = &text[start..];
-        // One line (`f() { ...; }`), or up to the closing brace's line.
-        let end = if rest.lines().next().unwrap().trim_end().ends_with('}') { rest.find('\n').unwrap() } else { rest.find("\n}\n").unwrap() + 2 };
-        rest[..end].to_string()
-    }
-
-    fn bash(script: &str, args: &[&str]) -> String {
-        let out = std::process::Command::new("bash").arg("-c").arg(script).arg("bash").args(args).output().unwrap();
-        assert!(out.status.success(), "{script}: {}", String::from_utf8_lossy(&out.stderr));
-        String::from_utf8_lossy(&out.stdout).to_string()
-    }
-
+    /// The ignored-device patterns as legacy's lib/setup.sh wrote them on
+    /// 2026-10-19 (#47): `_regex_literal` and `_ignore_without`.
     #[test]
-    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
-    fn ignore_patterns_as_lib_setup_sh_writes_them() {
-        let lit = bash_fn("_regex_literal");
-        for name in ["UVC Camera (1e4e:7016)", "Cam [x] 2.0*", "it's a $cam^ {1}|b", "a\\b+?"] {
-            let b = bash(&format!("{lit}\n_regex_literal \"$1\""), &[name]);
-            assert_eq!(regex_literal(name), b, "{name}");
+    fn ignore_patterns_as_lib_setup_sh_wrote_them() {
+        for (name, lit) in [
+            ("UVC Camera (1e4e:7016)", r"UVC Camera \(1e4e:7016\)"),
+            ("Cam [x] 2.0*", r"Cam \[x\] 2\.0\*"),
+            ("it's a $cam^ {1}|b", r"it.s a \$cam\^ \{1\}\|b"),
+            ("a\\b+?", r"a\\b\+\?"),
+        ] {
+            assert_eq!(regex_literal(name), lit, "{name}");
             // The literal matches the name in Rust's regex, as in grep -E.
             assert!(matches(&regex_literal(name), name), "{name}");
         }
-        let without = bash_fn("_ignore_without");
-        for (pattern, name) in [
-            ("OBSBOT|UVC Camera \\(1e4e:7016\\)|Meet", "UVC Camera (1e4e:7016)"),
-            ("a\\|b|c", "a|b"),
-            ("Meet|", "x"),
-            ("Cam|Cam 2", "Cam 2"),
+        for (pattern, name, without) in [
+            (r"OBSBOT|UVC Camera \(1e4e:7016\)|Meet", "UVC Camera (1e4e:7016)", "OBSBOT|Meet"),
+            (r"a\|b|c", "a|b", "c"),
+            ("Meet|", "x", "Meet"),
+            ("Cam|Cam 2", "Cam 2", ""),
         ] {
-            let b = bash(&format!("{without}\n_ignore_without \"$1\" \"$2\""), &[pattern, name]);
-            assert_eq!(ignore_without(pattern, name), b, "{pattern} without {name}");
+            assert_eq!(ignore_without(pattern, name), without, "{pattern} without {name}");
         }
     }
 

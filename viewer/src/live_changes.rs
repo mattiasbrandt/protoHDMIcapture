@@ -254,7 +254,7 @@ impl LiveChanges {
         self.baseline = self.values(delay_ms);
     }
 
-    /// w: the changes written to the settings file, as `view.sh --save`
+    /// w: the changes written to the settings file, as legacy's `--save`
     /// writes them, and the new baseline. Ok with what was saved, empty
     /// when nothing changed (nothing is written then).
     pub fn save(&mut self, s: &Settings, delay_ms: Option<u32>) -> Result<Vec<String>, String> {
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn read_change_save_and_view_sh_reads_it_back() {
+    fn read_change_save_and_read_it_back() {
         let (s, file) = settings("# mine\nLEVELS=auto\nCONTRAST=2\nBRIGHTNESS=-4\nSATURATION=7\nWINDOW_SIZE=1600x900\n");
         let mut l = LiveChanges::read(&s).unwrap();
         let p = l.picture();
@@ -328,24 +328,13 @@ mod tests {
         // A fresh read of what w wrote gives the same values.
         let again = LiveChanges::read(&settings(&std::fs::read_to_string(&file).unwrap()).0).unwrap();
         assert_eq!((again.picture(), again.scaling()), (l.picture(), l.scaling()));
-        // view.sh reads what w wrote as saved and valid (Linux: view.sh is bash).
-        #[cfg(target_os = "linux")]
-        {
-            let out = std::process::Command::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../view.sh"))
-                .arg("--settings")
-                .env("CONFIG_FILE", &file)
-                .output()
-                .unwrap();
-            let report = String::from_utf8_lossy(&out.stdout);
-            let row =
-                |k: &str| report.lines().find(|l| l.split_whitespace().next() == Some(k)).unwrap_or("").split_whitespace().collect::<Vec<_>>();
-            assert_eq!(row("LEVELS"), ["LEVELS", "limited", "saved"], "{report}");
-            assert_eq!(row("SCALING"), ["SCALING", "fast", "saved"], "{report}");
-            assert_eq!(row("GAMMA"), ["GAMMA", "-3", "saved"], "{report}");
-            assert_eq!(row("BRIGHTNESS"), ["BRIGHTNESS", "-4", "saved"], "{report}");
-            assert_eq!(row("SATURATION"), ["SATURATION", "8", "saved"], "{report}");
-            assert!(out.status.success() && report.contains("all valid"), "{report}");
+        // The file w wrote reads as saved and valid, as `--settings` says it.
+        let (back, copy) = settings(&std::fs::read_to_string(&file).unwrap());
+        assert!(back.errors().is_empty(), "{:?}", back.errors());
+        for (k, v) in [("LEVELS", "limited"), ("SCALING", "fast"), ("GAMMA", "-3"), ("BRIGHTNESS", "-4"), ("SATURATION", "8")] {
+            assert_eq!((back.get(k), back.from(k)), (v, crate::settings::From::Saved), "{k}");
         }
+        std::fs::remove_dir_all(copy.parent().unwrap()).unwrap();
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 

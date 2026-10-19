@@ -555,30 +555,6 @@ mod tests {
         assert_eq!((s.get("REFRESH"), s.from("REFRESH")), ("keep", From::Default));
     }
 
-    /// `config_write` from lib/card.sh on a copy of `start` (None: no file).
-    fn bash_write(start: Option<&str>, args: &[&str]) -> (Option<String>, bool) {
-        let dir = std::env::temp_dir().join(format!("phc-bash-{}-{}", std::process::id(), args.join("_").len()));
-        fs::create_dir_all(&dir).unwrap();
-        let f = dir.join("config");
-        let _ = fs::remove_file(&f);
-        if let Some(t) = start {
-            fs::write(&f, t).unwrap();
-        }
-        let ok = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(r#". "$1/lib/card.sh"; shift; config_write "$@""#)
-            .arg("bash")
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/.."))
-            .args(args)
-            .env("CONFIG_FILE", &f)
-            .status()
-            .unwrap()
-            .success();
-        let out = fs::read_to_string(&f).ok();
-        fs::remove_dir_all(&dir).unwrap();
-        (out, ok)
-    }
-
     fn rust_write(start: Option<&str>, args: &[&str]) -> (Option<String>, bool) {
         let dir = std::env::temp_dir().join(format!("phc-rust-{}-{}", std::process::id(), args.join("_").len()));
         fs::create_dir_all(&dir).unwrap();
@@ -594,87 +570,67 @@ mod tests {
         (out, ok)
     }
 
+    /// What `write` makes of `start` (None: no file), and whether it wrote.
     #[test]
-    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
-    fn writes_byte_for_byte_like_config_write() {
+    fn writes_byte_for_byte_as_legacys_config_write() {
+        // The bytes protoHDMIcapture legacy's `config_write` (lib/card.sh)
+        // wrote for each case on 2026-10-19 (#47): legacy reads this file.
         let start = "# my settings\n  DELAY=0.05\nNOPE=1\n\nLEVELS=auto\nLEVELS=full\nWINDOW=fullscreen\r\nSOURCE='ps5'";
-        let cases: &[(Option<&str>, &[&str])] = &[
-            (None, &["DELAY=0.08"]),
-            (Some(start), &["LEVELS=limited", "DELAY=0.07", "BRIGHTNESS=-5", "SINK=a b"]),
-            (Some(start), &["WINDOW=windowed", "SOURCE=ps5"]),
-            (Some(""), &["GAMMA=3", "GAMMA=4"]),
-            (Some(start), &["SOURCE=it's"]),
+        let header = "# protoHDMIcapture settings, written by the setup wizard.\n# One KEY=value per line; see config.example in the repo.\n";
+        let cases: &[(Option<&str>, &[&str], String, bool)] = &[
+            (None, &["DELAY=0.08"], format!("{header}DELAY=0.08\n"), true),
+            (
+                Some(start),
+                &["LEVELS=limited", "DELAY=0.07", "BRIGHTNESS=-5", "SINK=a b"],
+                "# my settings\nDELAY=0.07\nNOPE=1\n\nLEVELS=limited\nWINDOW=fullscreen\r\nSOURCE='ps5'\nBRIGHTNESS=-5\nSINK='a b'\n".into(),
+                true,
+            ),
+            (
+                Some(start),
+                &["WINDOW=windowed", "SOURCE=ps5"],
+                "# my settings\n  DELAY=0.05\nNOPE=1\n\nLEVELS=auto\nLEVELS=full\nWINDOW=windowed\nSOURCE=ps5\n".into(),
+                true,
+            ),
+            (Some(""), &["GAMMA=3", "GAMMA=4"], "GAMMA=4\n".into(), true),
+            // A value the file cannot quote: refused, the file untouched.
+            (Some(start), &["SOURCE=it's"], start.into(), false),
         ];
-        for (start, args) in cases {
-            let b = bash_write(*start, args);
-            let r = rust_write(*start, args);
-            assert_eq!(r, b, "start {start:?}, args {args:?}");
+        for (start, args, want, ok) in cases {
+            assert_eq!(rust_write(*start, args), (Some(want.clone()), *ok), "start {start:?}, args {args:?}");
         }
     }
 
-    /// A config file after `script` ran on it in bash with lib/card.sh
-    /// sourced (bash) or after `rust` ran (Rust), from the same start.
-    fn both(start: Option<&str>, script: &str, rust: &dyn Fn(&Path) -> Result<(), String>) -> (Option<String>, Option<String>) {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        // process-global: unique temp names in tests
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!("phc-both-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
-        let run = |which: &str| {
-            let d = dir.join(which);
-            fs::create_dir_all(&d).unwrap();
-            let f = d.join("config");
+    #[test]
+    fn unsets_byte_for_byte_as_legacys_config_unset() {
+        // The bytes legacy's `config_unset` (lib/card.sh) left on
+        // 2026-10-19 (#47).
+        let start = "# my settings\n  DELAY=0.05\nNOPE=1\n\nFULLSCREEN=yes\nLEVELS=full\nFULLSCREEN=no\r\nSOURCE='ps5'";
+        let header = "# protoHDMIcapture settings, written by the setup wizard.\n# One KEY=value per line; see config.example in the repo.\n";
+        let cases: &[(Option<&str>, &[&str], &str)] = &[
+            (None, &["DEV"], header),
+            (Some(start), &["FULLSCREEN", "SOURCE"], "# my settings\n  DELAY=0.05\nNOPE=1\n\nLEVELS=full\n"),
+            (Some(start), &[], "# my settings\n  DELAY=0.05\nNOPE=1\n\nFULLSCREEN=yes\nLEVELS=full\nFULLSCREEN=no\r\nSOURCE='ps5'\n"),
+            (Some(""), &["GAMMA"], ""),
+        ];
+        for (start, keys, want) in cases {
+            let dir = std::env::temp_dir().join(format!("phc-unset-{}-{}", std::process::id(), keys.join("_").len() + want.len()));
+            fs::create_dir_all(&dir).unwrap();
+            let f = dir.join("config");
             if let Some(t) = start {
                 fs::write(&f, t).unwrap();
             }
-            if which == "bash" {
-                let ok = std::process::Command::new("bash")
-                    .arg("-c")
-                    .arg(format!(r#". "$1/lib/card.sh"; {script}"#))
-                    .arg("bash")
-                    .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/.."))
-                    .env("CONFIG_FILE", &f)
-                    .status()
-                    .unwrap()
-                    .success();
-                assert!(ok, "bash: {script}");
-            } else {
-                rust(&f).unwrap();
-            }
-            fs::read_to_string(&f).ok()
-        };
-        let out = (run("bash"), run("rust"));
-        fs::remove_dir_all(&dir).unwrap();
-        out
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
-    fn unsets_byte_for_byte_like_config_unset() {
-        let start = "# my settings\n  DELAY=0.05\nNOPE=1\n\nFULLSCREEN=yes\nLEVELS=full\nFULLSCREEN=no\r\nSOURCE='ps5'";
-        let cases: &[(Option<&str>, &[&str])] = &[
-            (None, &["DEV"]),
-            (Some(start), &["FULLSCREEN", "SOURCE"]),
-            (Some(start), &[]),
-            (Some(""), &["GAMMA"]),
-        ];
-        for (start, keys) in cases {
-            let (b, r) = both(*start, &format!("config_unset {}", keys.join(" ")), &|f| unset(f, keys));
-            assert_eq!(r, b, "start {start:?}, keys {keys:?}");
+            unset(&f, keys).unwrap();
+            assert_eq!(fs::read_to_string(&f).ok().as_deref(), Some(*want), "start {start:?}, keys {keys:?}");
+            fs::remove_dir_all(&dir).unwrap();
         }
     }
 
     #[test]
-    #[cfg(target_os = "linux")] // runs bash, python or hyprctl
-    fn read_file_and_with_flag_as_lib_settings_sh() {
-        let out = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(r#". "$1/lib/settings.sh"; settings_with wizard"#)
-            .arg("bash")
-            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/.."))
-            .output()
-            .unwrap();
-        let bash: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(str::to_string).collect();
-        assert_eq!(with_flag("wizard"), bash);
+    fn read_file_and_with_flag() {
+        // As legacy's `settings_with wizard` listed them on 2026-10-19.
+        let wizard = "SOURCE CARD_SERIAL CARD_PORT DEV IGNORE_CARDS_RE SRC RES FPS FMT DELAY BACKEND AUDIO WINDOW WINDOW_SIZE SCALING \
+                      REFRESH DEBUG FULLSCREEN";
+        assert_eq!(with_flag("wizard").join(" "), wizard);
         let dir = std::env::temp_dir().join(format!("phc-read-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let f = dir.join("config");
