@@ -934,6 +934,10 @@ impl Loopback {
 
 impl Drop for Loopback {
     fn drop(&mut self) {
+        // A death no wake reached (after the window ended, or on an early
+        // end before it ran) is said now, once; the drop itself is no death
+        // (`closing`).
+        self.keys().wake();
         self.0.stopped.set(true);
         drop(self.0.controls.borrow_mut().take());
         drop(self.0.running.borrow_mut().take());
@@ -1496,6 +1500,52 @@ mod tests {
         keys.wake();
         assert!(lines(&script).is_empty() && messages(&said).is_empty() && notices(&script).is_empty());
         assert_eq!(loopback.summary(), ["granted: none", "status: none"], "--stats still has the dead one's numbers");
+    }
+
+    /// The two lines a death says in the terminal.
+    fn died_lines() -> [String; 2] {
+        [
+            format!("warning: the audio loopback stopped mid-feed: {GONE}"),
+            "warning: the feed plays on without sound; ctrl -/+, m, 9 or 0 start the loopback again".into(),
+        ]
+    }
+
+    #[test]
+    fn a_death_before_the_window_runs_is_said_once_when_it_does() {
+        let (loopback, script) = fake::loopback(50);
+        let keys = loopback.keys();
+        keys.start();
+        lines(&script);
+        // No window yet: nobody to wake.
+        fake::kill(&keys);
+        assert!(lines(&script).is_empty());
+        let said = overlay(&keys);
+        assert_eq!(lines(&script), died_lines());
+        assert_eq!(messages(&said), [format!("Audio stopped ({GONE}): ctrl -/+, m, 9 or 0 start it again")]);
+        assert_eq!(notices(&script), [crate::desktop::Notice::NoSound(DIED.into())]);
+        assert_eq!(script.live.audio_said(), ("failed".into(), DIED.into(), vec![DIED.into()]));
+        drop(loopback);
+        assert!(lines(&script).is_empty() && notices(&script).is_empty(), "said once, not again at the end");
+    }
+
+    #[test]
+    fn a_death_no_wake_reached_is_said_once_as_the_feed_ends() {
+        // After the window ended, or an early end before it ran.
+        let (loopback, script) = fake::loopback(50);
+        let keys = loopback.keys();
+        keys.start();
+        lines(&script);
+        fake::kill(&keys);
+        drop(loopback);
+        assert_eq!(lines(&script), died_lines());
+        assert_eq!(notices(&script), [crate::desktop::Notice::NoSound(DIED.into())]);
+        assert_eq!(script.live.audio_said(), ("failed".into(), DIED.into(), vec![DIED.into()]));
+        // A loopback that ends running says nothing.
+        let (loopback, script) = fake::loopback(50);
+        loopback.keys().start();
+        lines(&script);
+        drop(loopback);
+        assert!(lines(&script).is_empty() && notices(&script).is_empty());
     }
 
     #[test]
