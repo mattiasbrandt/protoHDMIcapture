@@ -12,8 +12,9 @@
 //! the fill is from the target and at most `CATCH_UP`, until it gets there.
 //!
 //! A loopback whose stream goes away mid-feed (the card's audio unplugged,
-//! the node removed) is dead: said once, and the next sync or volume key
-//! starts a new one (`Loopback`, #29), as view.sh's sync keys do.
+//! the node removed) is dead: said once, on the window's thread, and the
+//! next sync or volume key starts a new one (`Loopback`, #29, #42), as
+//! view.sh's sync keys do.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -26,6 +27,8 @@ use std::time::Duration;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, ErrorKind, HostId, StreamConfig};
 
+use crate::dashboard::{AudioLive, Live};
+use crate::desktop::Notice;
 use crate::overlay::Notify;
 use crate::level::{Level, LevelChange};
 
@@ -169,21 +172,20 @@ fn worded(e: &str) -> String {
     }
 }
 
-/// The loopback stopped mid-feed (#29): said once (the other stream goes
-/// too), in the terminal and in the window, as view.sh's `audio_failed`.
+/// The loopback stopped mid-feed (#29): marked once (the other stream goes
+/// too), and the window woken; the window's thread says it
+/// (`LoopbackKeys::wake`, #42), as view.sh's `audio_failed`.
 fn died(counters: &Counters, notify: &NotifySlot, why: String) {
     {
         let mut dead = counters.dead.lock().expect("the death's lock is never poisoned");
         if dead.is_some() {
             return;
         }
-        *dead = Some(why.clone());
+        *dead = Some(why);
         counters.stopped.store(true, Ordering::Relaxed);
     }
-    eprintln!("warning: the audio loopback stopped mid-feed: {why}");
-    eprintln!("warning: the feed plays on without sound; ctrl -/+, m, 9 or 0 start the loopback again");
     if let Some(notify) = notify.lock().expect("the notify lock is never poisoned").as_ref() {
-        notify(Some((format!("Audio stopped ({why}): ctrl -/+, m, 9 or 0 start it again"), Duration::from_secs(5))));
+        notify(None);
     }
 }
 
@@ -837,24 +839,61 @@ impl Running for Audio {
 /// own source, SINK, LAT_MS): what a restart repeats.
 pub type Start = Box<dyn Fn(u32) -> Result<Box<dyn Running>, String>>;
 
+/// Where the loopback is said outside the window: the terminal's lines and
+/// the desktop notification. `Say::desktop` in the viewer, a recorder in
+/// tests (a test run would reach the desktop).
+pub struct Say {
+    pub line: Box<dyn Fn(&str)>,
+    pub notice: Box<dyn Fn(Notice)>,
+}
+
+impl Say {
+    /// stderr, and a notification where there is no terminal to read it in.
+    pub fn desktop() -> Self {
+        Self { line: Box::new(|l| eprintln!("{l}")), notice: Box::new(|n| n.send()) }
+    }
+}
+
+/// The loopback as the panel shows it: running, or stopped and why (it
+/// did not start, or it died mid-feed).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Status {
+    /// The sync, and the level (None until first read, or why it could not
+    /// be read).
+    Running { delay_ms: u32, level: Option<Result<Level, String>> },
+    Stopped(String),
+}
+
 struct Shared {
     start: Start,
     running: RefCell<Option<Box<dyn Running>>>,
+    /// The running loopback's controls.
+    controls: RefCell<Option<Controls>>,
+    /// Why none runs: it did not start, or nothing started it yet.
+    why: RefCell<String>,
+    /// The running loopback's death is reported (once).
+    reported: Cell<bool>,
     /// The delay last asked for: the next start's, while none runs.
     delay_ms: Cell<u32>,
-    /// The running loopback's level, as its controls last read or set it.
-    level: RefCell<Option<LevelSlot>>,
     /// The last level known, given to the next loopback (view.sh's
     /// `audio.state`).
     last_level: Cell<Option<Level>>,
     /// The feed ended it: no more starts.
     stopped: Cell<bool>,
+    /// Where the loopback is reported: the dashboard, the desktop, and the
+    /// window's overlay once it runs.
+    live: Arc<Live>,
+    say: Say,
+    notify: RefCell<Option<Notify>>,
 }
 
-/// The session's audio loopback, AUDIO=loopback (#29): the one running, if
-/// any, and how to start another. The feed owner holds it and stops it in
-/// its order (feed.rs) by dropping it; the window holds a `LoopbackKeys`,
-/// whose keys start a new one when it is not running.
+/// The session's audio loopback, AUDIO=loopback (#29, #42): the one
+/// running, if any, how to start another, and every report of it (the
+/// terminal, the overlay, the dashboard, the desktop notification), all on
+/// the window's thread; the audio's threads only mark a death and wake the
+/// window (`died`). The feed owner holds it and stops it in its order
+/// (feed.rs) by dropping it; the window holds a `LoopbackKeys`, whose keys
+/// start a new one when it is not running.
 pub struct Loopback(Rc<Shared>);
 
 /// The window's handle on the session's loopback.
@@ -863,14 +902,19 @@ pub struct LoopbackKeys(Rc<Shared>);
 
 impl Loopback {
     /// Nothing runs yet: `LoopbackKeys::start` starts it.
-    pub fn new(start: Start, delay_ms: u32) -> Self {
+    pub fn new(start: Start, delay_ms: u32, live: Arc<Live>, say: Say) -> Self {
         Self(Rc::new(Shared {
             start,
             running: RefCell::default(),
+            controls: RefCell::default(),
+            why: RefCell::new("not started".into()),
+            reported: Cell::new(false),
             delay_ms: Cell::new(delay_ms),
-            level: RefCell::default(),
             last_level: Cell::default(),
             stopped: Cell::new(false),
+            live,
+            say,
+            notify: RefCell::default(),
         }))
     }
 
@@ -891,36 +935,30 @@ impl Loopback {
 impl Drop for Loopback {
     fn drop(&mut self) {
         self.0.stopped.set(true);
+        drop(self.0.controls.borrow_mut().take());
         drop(self.0.running.borrow_mut().take());
     }
 }
 
 impl LoopbackKeys {
-    /// Starts the loopback at `delay_ms`, the running one stopped first
-    /// (dead or not: one loopback at a time). The new one gets the last
-    /// level known, before any key's change. Err: why it did not start;
-    /// none runs then.
-    pub fn start(&self, delay_ms: u32) -> Result<Controls, String> {
-        let s = &self.0;
-        if s.stopped.get() {
-            return Err("the feed is ending".into());
+    /// The first start, at the delay asked for: said in the terminal and
+    /// the dashboard, a failure also as a notification.
+    pub fn start(&self) -> Status {
+        let started = self.start_at(self.0.delay_ms.get());
+        self.said_start(&started);
+        self.status()
+    }
+
+    /// Running, or stopped and why: a dead loopback reads stopped from the
+    /// moment its stream says so, before its wake is handled.
+    pub fn status(&self) -> Status {
+        match self.0.controls.borrow().as_ref() {
+            Some(c) => match c.dead() {
+                Some(why) => Status::Stopped(why),
+                None => Status::Running { delay_ms: c.delay_ms(), level: c.current_level() },
+            },
+            None => Status::Stopped(self.0.why.borrow().clone()),
         }
-        let delay_ms = check_delay(delay_ms)?;
-        if let Some(slot) = s.level.borrow_mut().take()
-            && let Some(Ok(level)) = slot.lock().expect("the level's lock is never poisoned").clone()
-        {
-            s.last_level.set(Some(level));
-        }
-        drop(s.running.borrow_mut().take());
-        s.delay_ms.set(delay_ms);
-        let running = (s.start)(delay_ms)?;
-        let controls = running.controls();
-        if let Some(level) = s.last_level.get() {
-            controls.change_level(LevelChange::Set(level));
-        }
-        *s.level.borrow_mut() = Some(controls.level.clone());
-        *s.running.borrow_mut() = Some(running);
-        Ok(controls)
     }
 
     /// The delay: the running loopback's, else the one last asked for.
@@ -931,17 +969,146 @@ impl LoopbackKeys {
         }
     }
 
-    /// The running loopback's source, sink, buffer in ms and numbers, for
-    /// the dashboard.
-    pub fn link(&self) -> Option<(String, String, u32, Arc<Counters>)> {
-        let running = self.0.running.borrow();
-        let r = running.as_ref()?;
-        let (source, sink, buffer_ms) = r.link();
-        Some((source.into(), sink.into(), buffer_ms, r.counters().clone()))
+    /// The window runs: its overlay gets the messages from here on, and a
+    /// death from before it is reported now.
+    pub fn set_notify(&self, notify: Notify) {
+        if let Some(c) = self.0.controls.borrow().as_ref() {
+            c.set_notify(notify.clone());
+        }
+        *self.0.notify.borrow_mut() = Some(notify);
+        self.wake();
     }
 
-    pub fn describe(&self) -> Option<String> {
-        self.0.running.borrow().as_ref().map(|r| r.describe())
+    /// The window's wake from the audio's threads: a death not yet
+    /// reported is, once.
+    pub fn wake(&self) {
+        let s = &self.0;
+        let Some(why) = s.controls.borrow().as_ref().and_then(Controls::dead) else { return };
+        if s.reported.replace(true) {
+            return;
+        }
+        (s.say.line)(&format!("warning: the audio loopback stopped mid-feed: {why}"));
+        (s.say.line)("warning: the feed plays on without sound; ctrl -/+, m, 9 or 0 start the loopback again");
+        self.overlay(format!("Audio stopped ({why}): ctrl -/+, m, 9 or 0 start it again"), Duration::from_secs(5));
+        let said = format!("the audio loopback stopped mid-feed ({why})");
+        (s.say.notice)(Notice::NoSound(said.clone()));
+        s.live.event(said.clone());
+        s.live.set_audio(AudioLive::Failed(said));
+    }
+
+    /// The sync keys: the running loopback's delay moved by `by_ms`; with
+    /// none running, a new one at the moved delay (#29).
+    pub fn sync(&self, by_ms: i32) {
+        let running = self.0.controls.borrow().as_ref().filter(|c| c.dead().is_none()).map(|c| c.nudge_delay(by_ms));
+        let ms = match running {
+            Some(ms) => ms,
+            None => {
+                let ms = nudged(self.delay_ms(), by_ms);
+                if !self.restart(ms) {
+                    return;
+                }
+                ms
+            }
+        };
+        self.overlay(format!("Audio sync {ms} ms"), Duration::from_millis(1500));
+    }
+
+    /// m, 9 and 0: the running loopback's level changed; with none running,
+    /// a new one at the delay it had, then the change. Its message comes
+    /// from the controls' thread.
+    pub fn level(&self, change: LevelChange) {
+        let running = self.0.controls.borrow().as_ref().is_some_and(|c| c.dead().is_none());
+        if !running && !self.restart(self.delay_ms()) {
+            return;
+        }
+        if let Some(c) = self.0.controls.borrow().as_ref() {
+            c.change_level(change);
+        }
+    }
+
+    /// A new loopback at `delay_ms`, in place of one that is not running
+    /// (#29), said as view.sh's overlay says it; whether it started.
+    fn restart(&self, delay_ms: u32) -> bool {
+        // A death the window has not woken to yet is said before the new
+        // start, so the log has it.
+        self.wake();
+        let started = self.start_at(delay_ms);
+        self.said_start(&started);
+        match &started {
+            Ok(()) => {
+                self.0.live.event(format!("audio back, sync {delay_ms} ms"));
+                self.overlay("Audio back".into(), Duration::from_millis(1500));
+            }
+            Err(e) => {
+                self.0.live.event(format!("audio did not start again: {e}"));
+                self.overlay(format!("Audio: {e}"), Duration::from_secs(3));
+            }
+        }
+        started.is_ok()
+    }
+
+    /// Starts the loopback at `delay_ms`, the running one stopped first
+    /// (dead or not: one loopback at a time). The new one gets the last
+    /// level known, before any key's change. Err: why it did not start;
+    /// none runs then.
+    fn start_at(&self, delay_ms: u32) -> Result<(), String> {
+        let s = &self.0;
+        let started = (|| {
+            if s.stopped.get() {
+                return Err("the feed is ending".to_string());
+            }
+            let delay_ms = check_delay(delay_ms)?;
+            if let Some(c) = s.controls.borrow_mut().take()
+                && let Some(Ok(level)) = c.current_level()
+            {
+                s.last_level.set(Some(level));
+            }
+            drop(s.running.borrow_mut().take());
+            s.delay_ms.set(delay_ms);
+            let running = (s.start)(delay_ms)?;
+            let controls = running.controls();
+            if let Some(notify) = s.notify.borrow().as_ref() {
+                controls.set_notify(notify.clone());
+            }
+            if let Some(level) = s.last_level.get() {
+                controls.change_level(LevelChange::Set(level));
+            }
+            s.reported.set(false);
+            *s.controls.borrow_mut() = Some(controls);
+            *s.running.borrow_mut() = Some(running);
+            Ok(())
+        })();
+        if let Err(e) = &started {
+            *s.why.borrow_mut() = e.clone();
+        }
+        started
+    }
+
+    /// A start's outcome, said where view.sh says it: the terminal, the
+    /// dashboard and, for a failure, a desktop notification.
+    fn said_start(&self, started: &Result<(), String>) {
+        let s = &self.0;
+        match started {
+            Ok(()) => {
+                let running = s.running.borrow();
+                let r = running.as_ref().expect("a loopback that started runs");
+                (s.say.line)(&r.describe());
+                let (source, sink, buffer_ms) = r.link();
+                s.live.set_audio(AudioLive::Running { source: source.into(), sink: sink.into(), buffer_ms, counters: r.counters().clone() });
+            }
+            Err(why) => {
+                (s.say.line)(&format!("warning: no audio: {why}"));
+                (s.say.notice)(Notice::NoSound(why.clone()));
+                s.live.set_audio(AudioLive::Failed(why.clone()));
+            }
+        }
+    }
+
+    /// A message for the window's overlay, once it runs.
+    fn overlay(&self, text: String, for_: Duration) {
+        if let Some(notify) = self.0.notify.borrow().as_ref() {
+            notify(Some((text, for_)));
+        }
     }
 }
 
@@ -998,15 +1165,25 @@ pub mod fake {
     }
 
     /// The delays each start was asked for; set `fail` for the next starts
-    /// to fail with it.
-    #[derive(Clone, Default)]
+    /// to fail with it. What the loopback said: in `live` (the dashboard),
+    /// `lines` (the terminal) and `notices` (the desktop).
+    #[derive(Clone)]
     pub struct Script {
         pub starts: Rc<RefCell<Vec<u32>>>,
         pub fail: Rc<RefCell<Option<String>>>,
+        pub live: Arc<Live>,
+        pub lines: Rc<RefCell<Vec<String>>>,
+        pub notices: Rc<RefCell<Vec<Notice>>>,
     }
 
     pub fn loopback(delay_ms: u32) -> (Loopback, Script) {
-        let script = Script::default();
+        let script = Script {
+            starts: Rc::default(),
+            fail: Rc::default(),
+            live: Arc::new(Live::new()),
+            lines: Rc::default(),
+            notices: Rc::default(),
+        };
         let s = script.clone();
         let start: Start = Box::new(move |delay_ms| {
             s.starts.borrow_mut().push(delay_ms);
@@ -1016,21 +1193,28 @@ pub mod fake {
             let counters = Arc::new(Counters { target_ms: AtomicU32::new(delay_ms), ..Default::default() });
             Ok(Box::new(Fake { counters, notify: NotifySlot::default(), level: Arc::new(Mutex::new(Level { volume: 100, mute: false })) }))
         });
-        (Loopback::new(start, delay_ms), script)
+        let (lines, notices) = (script.lines.clone(), script.notices.clone());
+        let say = Say { line: Box::new(move |l| lines.borrow_mut().push(l.into())), notice: Box::new(move |n| notices.borrow_mut().push(n)) };
+        (Loopback::new(start, delay_ms, script.live.clone(), say), script)
     }
 
-    /// The running loopback's stream goes away, as cpal reports it.
+    /// The running loopback's stream goes away, as cpal reports it: on the
+    /// audio's thread, which wakes the window.
     pub fn kill(keys: &LoopbackKeys) {
-        let (_, _, _, counters) = keys.link().expect("a loopback runs");
-        died(&counters, &NotifySlot::default(), "output: Device disconnected".into());
+        let controls = keys.0.controls.borrow();
+        let c = controls.as_ref().expect("a loopback runs");
+        died(&c.counters, &c.notify, "output: Device disconnected".into());
     }
 
-    /// The level once the controls' thread has done what was asked: `want`
-    /// within a second, or what it is then.
-    pub fn level_settles(c: &Controls, want: Level) -> Option<Result<Level, String>> {
+    /// The running loopback's level once the controls' thread has done
+    /// what was asked: `want` within a second, or what it is then.
+    pub fn level_settles(keys: &LoopbackKeys, want: Level) -> Option<Result<Level, String>> {
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         loop {
-            let now = c.current_level();
+            let now = match keys.status() {
+                Status::Running { level, .. } => level,
+                Status::Stopped(_) => None,
+            };
             if now == Some(Ok(want)) || std::time::Instant::now() >= deadline {
                 return now;
             }
@@ -1084,7 +1268,7 @@ mod tests {
         let (loopback, _) = fake::loopback(50);
         assert_eq!(loopback.summary(), ["not running"]);
         let keys = loopback.keys();
-        assert!(keys.start(50).is_ok());
+        assert!(matches!(keys.start(), Status::Running { .. }));
         assert_eq!(loopback.summary(), ["granted: none", "status: none"]);
     }
 
@@ -1211,10 +1395,11 @@ mod tests {
     #[test]
     fn a_stream_gone_is_a_dead_loopback_said_once() {
         let counters = Arc::new(Counters::default());
-        let said: Arc<Mutex<Vec<String>>> = Arc::default();
+        // The window's thread says it (#42): the stream's thread only wakes it.
+        let wakes: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
         let notify = NotifySlot::default();
-        let s = said.clone();
-        *notify.lock().unwrap() = Some(Arc::new(move |m: Option<(String, Duration)>| s.lock().unwrap().extend(m.map(|m| m.0))));
+        let w = wakes.clone();
+        *notify.lock().unwrap() = Some(Arc::new(move |m: Option<(String, Duration)>| w.lock().unwrap().push(m.map(|m| m.0))));
         let mut output = on_error(&counters, &notify, "output");
         let mut input = on_error(&counters, &notify, "input");
         output(cpal::ErrorKind::Xrun.into());
@@ -1222,7 +1407,7 @@ mod tests {
         output(cpal::Error::with_message(ErrorKind::DeviceNotAvailable, "Device disconnected"));
         input(cpal::Error::with_message(ErrorKind::StreamInvalidated, "error"));
         assert_eq!(counters.dead().as_deref(), Some("output: Device disconnected"), "the first one says why");
-        assert_eq!(*said.lock().unwrap(), ["Audio stopped (output: Device disconnected): ctrl -/+, m, 9 or 0 start it again"]);
+        assert_eq!(*wakes.lock().unwrap(), [None], "one wake, with nothing to say");
         // Torn down on purpose: PipeWire reports that as a disconnect too.
         let closing = Arc::new(Counters::default());
         closing.closing.store(true, Ordering::Relaxed);
@@ -1230,40 +1415,177 @@ mod tests {
         assert_eq!(closing.dead(), None);
     }
 
+    /// The overlay's messages, once the window runs.
+    fn overlay(keys: &LoopbackKeys) -> Arc<Mutex<Vec<String>>> {
+        let said: Arc<Mutex<Vec<String>>> = Arc::default();
+        let s = said.clone();
+        keys.set_notify(Arc::new(move |m: Option<(String, Duration)>| s.lock().unwrap().extend(m.map(|m| m.0))));
+        said
+    }
+
+    fn lines(script: &fake::Script) -> Vec<String> {
+        std::mem::take(&mut *script.lines.borrow_mut())
+    }
+
+    fn notices(script: &fake::Script) -> Vec<crate::desktop::Notice> {
+        std::mem::take(&mut *script.notices.borrow_mut())
+    }
+
+    fn messages(said: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+        std::mem::take(&mut *said.lock().unwrap())
+    }
+
+    /// What was said so far, set aside.
+    fn forget(script: &fake::Script, said: &Arc<Mutex<Vec<String>>>) {
+        lines(script);
+        messages(said);
+        notices(script);
+    }
+
+    const GONE: &str = "output: Device disconnected";
+    const DIED: &str = "the audio loopback stopped mid-feed (output: Device disconnected)";
+    const NO_SRC: &str = "no PipeWire source card-in (SRC)";
+
     #[test]
-    fn a_new_loopback_gets_the_last_ones_level_and_the_delay_asked_for() {
+    fn a_start_is_said_in_the_terminal_and_the_dashboard() {
         let (loopback, script) = fake::loopback(50);
         let keys = loopback.keys();
-        let first = keys.start(keys.delay_ms()).unwrap();
-        first.change_level(LevelChange::Volume(-30));
-        first.change_level(LevelChange::Mute);
-        let was = Level { volume: 70, mute: true };
-        assert_eq!(fake::level_settles(&first, was), Some(Ok(was)));
-        fake::kill(&keys);
-        assert!(first.dead().is_some());
-
-        let second = keys.start(60).unwrap();
-        assert_eq!(*script.starts.borrow(), [50, 60]);
-        assert_eq!(keys.delay_ms(), 60);
-        assert_eq!(second.dead(), None, "a new stream, not the dead one");
-        // The new stream starts at 100 %, unmuted, and gets the last level.
-        assert_eq!(fake::level_settles(&second, was), Some(Ok(was)));
+        assert_eq!(keys.status(), Status::Stopped("not started".into()));
+        assert!(matches!(keys.start(), Status::Running { delay_ms: 50, .. }));
+        assert_eq!(lines(&script), ["audio: card-in -> speakers"]);
+        assert!(notices(&script).is_empty());
+        assert_eq!(script.live.audio_said(), ("running".into(), String::new(), vec![]));
     }
 
     #[test]
-    fn a_start_that_fails_runs_nothing_and_keeps_the_delay() {
+    fn a_start_that_fails_is_said_everywhere_and_runs_nothing() {
         let (loopback, script) = fake::loopback(50);
         let keys = loopback.keys();
-        *script.fail.borrow_mut() = Some("no PipeWire source card-in (SRC)".into());
-        assert_eq!(keys.start(80).err().as_deref(), Some("no PipeWire source card-in (SRC)"));
-        assert!(keys.link().is_none());
-        assert_eq!(keys.delay_ms(), 80, "the next start's");
-        assert!(keys.start(MAX_DELAY_MS + 1).is_err(), "over DELAY's range");
+        *script.fail.borrow_mut() = Some(NO_SRC.into());
+        assert_eq!(keys.start(), Status::Stopped(NO_SRC.into()));
+        assert_eq!(lines(&script), [format!("warning: no audio: {NO_SRC}")]);
+        assert_eq!(notices(&script), [crate::desktop::Notice::NoSound(NO_SRC.into())]);
+        assert_eq!(script.live.audio_said(), ("failed".into(), NO_SRC.into(), vec![]));
+        assert_eq!(loopback.summary(), ["not running"], "said once (#38)");
+        assert_eq!(keys.delay_ms(), 50, "the next start's");
+    }
+
+    #[test]
+    fn a_death_is_stopped_at_once_and_said_once_on_the_wake() {
+        let (loopback, script) = fake::loopback(50);
+        let keys = loopback.keys();
+        keys.start();
+        let said = overlay(&keys);
+        lines(&script);
+        fake::kill(&keys);
+        // Stopped from the moment the stream says so, before its wake.
+        assert_eq!(keys.status(), Status::Stopped(GONE.into()));
+        assert!(lines(&script).is_empty() && messages(&said).is_empty(), "the stream's thread says nothing");
+        keys.wake();
+        assert_eq!(
+            lines(&script),
+            [
+                format!("warning: the audio loopback stopped mid-feed: {GONE}"),
+                "warning: the feed plays on without sound; ctrl -/+, m, 9 or 0 start the loopback again".into(),
+            ]
+        );
+        assert_eq!(messages(&said), [format!("Audio stopped ({GONE}): ctrl -/+, m, 9 or 0 start it again")]);
+        assert_eq!(notices(&script), [crate::desktop::Notice::NoSound(DIED.into())]);
+        assert_eq!(script.live.audio_said(), ("failed".into(), DIED.into(), vec![DIED.into()]));
+        // Every later wake (a volume message, another stream's error): once.
+        keys.wake();
+        assert!(lines(&script).is_empty() && messages(&said).is_empty() && notices(&script).is_empty());
+        assert_eq!(loopback.summary(), ["granted: none", "status: none"], "--stats still has the dead one's numbers");
+    }
+
+    #[test]
+    fn a_sync_key_starts_a_stopped_loopback_again_at_the_new_delay() {
+        let (loopback, script) = fake::loopback(50);
+        let keys = loopback.keys();
+        keys.start();
+        let said = overlay(&keys);
+        fake::kill(&keys);
+        keys.wake();
+        forget(&script, &said);
+        keys.sync(10);
+        assert_eq!(*script.starts.borrow(), [50, 60]);
+        assert!(matches!(keys.status(), Status::Running { delay_ms: 60, .. }));
+        assert_eq!(lines(&script), ["audio: card-in -> speakers"]);
+        assert_eq!(messages(&said), ["Audio back", "Audio sync 60 ms"]);
+        assert!(notices(&script).is_empty());
+        assert_eq!(script.live.audio_said(), ("running".into(), String::new(), vec![DIED.into(), "audio back, sync 60 ms".into()]));
+        // A running one only moves its sync: no restart.
+        keys.sync(-10);
+        assert_eq!(script.starts.borrow().len(), 2);
+        assert_eq!(messages(&said), ["Audio sync 50 ms"]);
+        // Dead again, the key before the death's wake: the death is said
+        // first, then the new start.
+        fake::kill(&keys);
+        keys.sync(10);
+        assert_eq!(*script.starts.borrow(), [50, 60, 60]);
+        let said_now = lines(&script);
+        assert_eq!(said_now[0], format!("warning: the audio loopback stopped mid-feed: {GONE}"));
+        assert_eq!(said_now.last().map(String::as_str), Some("audio: card-in -> speakers"));
+        assert!(matches!(keys.status(), Status::Running { .. }));
+    }
+
+    #[test]
+    fn m_starts_a_stopped_loopback_again_with_its_level_carried_over() {
+        let (loopback, script) = fake::loopback(50);
+        let keys = loopback.keys();
+        keys.start();
+        keys.level(LevelChange::Volume(-30));
+        let was = Level { volume: 70, mute: false };
+        assert_eq!(fake::level_settles(&keys, was), Some(Ok(was)));
+        fake::kill(&keys);
+        // m before the death's wake is handled: the dead one is not used.
+        keys.level(LevelChange::Mute);
+        assert_eq!(*script.starts.borrow(), [50, 50], "at the delay it had");
+        let want = Level { volume: 70, mute: true };
+        assert_eq!(fake::level_settles(&keys, want), Some(Ok(want)), "70 % carried over, then muted");
+    }
+
+    #[test]
+    fn a_restart_that_fails_says_the_new_reason() {
+        let (loopback, script) = fake::loopback(50);
+        let keys = loopback.keys();
+        keys.start();
+        let said = overlay(&keys);
+        fake::kill(&keys);
+        keys.wake();
+        forget(&script, &said);
+        *script.fail.borrow_mut() = Some(NO_SRC.into());
+        keys.sync(10);
+        assert_eq!(keys.status(), Status::Stopped(NO_SRC.into()));
+        assert_eq!(lines(&script), [format!("warning: no audio: {NO_SRC}")]);
+        assert_eq!(messages(&said), [format!("Audio: {NO_SRC}")], "no sync message for a loopback that did not start");
+        assert_eq!(notices(&script), [crate::desktop::Notice::NoSound(NO_SRC.into())]);
+        let (state, why, events) = script.live.audio_said();
+        assert_eq!((state.as_str(), why.as_str()), ("failed", NO_SRC));
+        assert_eq!(events.last().cloned(), Some(format!("audio did not start again: {NO_SRC}")));
+        // The next key tries again, at the delay asked for last.
+        *script.fail.borrow_mut() = None;
+        keys.level(LevelChange::Volume(5));
+        assert_eq!(*script.starts.borrow(), [50, 60, 60]);
+        assert!(matches!(keys.status(), Status::Running { delay_ms: 60, .. }));
+    }
+
+    #[test]
+    fn a_sync_key_clamps_and_after_the_feed_starts_nothing() {
+        let (loopback, script) = fake::loopback(50);
+        let keys = loopback.keys();
+        keys.start();
+        let said = overlay(&keys);
+        fake::kill(&keys);
+        keys.sync(MAX_DELAY_MS as i32);
+        assert!(matches!(keys.status(), Status::Running { delay_ms: MAX_DELAY_MS, .. }), "clamped to DELAY's range");
         // The feed ended it: the keys start nothing more.
         drop(loopback);
-        *script.fail.borrow_mut() = None;
-        assert_eq!(keys.start(50).err().as_deref(), Some("the feed is ending"));
-        assert_eq!(*script.starts.borrow(), [80]);
+        messages(&said);
+        keys.sync(10);
+        assert_eq!(keys.status(), Status::Stopped("the feed is ending".into()));
+        assert_eq!(messages(&said), ["Audio: the feed is ending"]);
+        assert_eq!(*script.starts.borrow(), [50, MAX_DELAY_MS]);
     }
 
     #[test]

@@ -181,6 +181,17 @@ impl Live {
         }
         e.push_back(format!("{:7.1} s  {text}", self.up().as_secs_f64()));
     }
+
+    /// The audio's state as the dashboard shows it ("off", "failed",
+    /// "running") and why, and the events without their stamps: what
+    /// audio.rs's tests read back (#42).
+    #[cfg(test)]
+    pub fn audio_said(&self) -> (String, String, Vec<String>) {
+        let audio = audio_json(&self.audio.lock().expect("the audio's lock is never poisoned"));
+        let field = |k: &str| audio[k].as_str().unwrap_or_default().to_string();
+        let events = self.events.lock().expect("the events' lock is never poisoned");
+        (field("state"), field("why"), events.iter().map(|e| e.split_once(" s  ").map_or(e.clone(), |(_, t)| t.to_string())).collect())
+    }
 }
 
 /// The Display section (#30), as view.sh's dashboard has it: the monitors

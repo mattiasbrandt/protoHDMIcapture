@@ -84,9 +84,10 @@ fn environment() {
 /// The audio loopback the settings ask for, not started yet: None for
 /// AUDIO=none. Each start (the first, and the keys' restarts, #29) finds
 /// the source again and starts it at the delay asked for; a failed one is
-/// reported and the feed goes on without sound, as in view.sh.
+/// reported (the terminal, `live` for the dashboard, a desktop
+/// notification) and the feed goes on without sound, as in view.sh.
 /// `card`: None with `--test-pattern`, where only SRC can name an input.
-fn audio(s: &Settings, card: Option<&card::Node>) -> Option<audio::Loopback> {
+fn audio(s: &Settings, card: Option<&card::Node>, live: &Arc<dashboard::Live>) -> Option<audio::Loopback> {
     // AUDIO=mpv is refused before this (view_sh_only).
     if s.get("AUDIO") == "none" {
         return None;
@@ -102,7 +103,7 @@ fn audio(s: &Settings, card: Option<&card::Node>) -> Option<audio::Loopback> {
         let a = audio::Audio::start(&source, sink.as_deref(), delay_ms, buffer_ms)?;
         Ok(Box::new(a))
     });
-    Some(audio::Loopback::new(start, delay_ms))
+    Some(audio::Loopback::new(start, delay_ms, live.clone(), audio::Say::desktop()))
 }
 
 /// The card's own audio input (card.rs `audio_inputs`), by its id: on
@@ -465,11 +466,11 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
             }
         }
     }
-    match audio(&s, node.as_ref()) {
+    match audio(&s, node.as_ref(), &live) {
         Some(loopback) => {
             let keys = feed.set_audio(loopback).keys();
-            let now = app::audio_started(&live, &keys, keys.start(keys.delay_ms()));
-            opts.audio = app::AudioSetup::Loopback { keys, now };
+            keys.start();
+            opts.audio = app::AudioSetup::Loopback(keys);
         }
         None => {
             opts.audio = app::AudioSetup::Off("none".into());
