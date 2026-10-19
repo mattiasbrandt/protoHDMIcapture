@@ -30,7 +30,8 @@ them all; by package:
 
 | Distro | Packages |
 |---|---|
-| Ubuntu, Debian | `libpipewire-0.3-0 libasound2 libdbus-1-3 libwayland-client0 libxkbcommon0 libvulkan1 mesa-vulkan-drivers` |
+| Debian 12 | `libpipewire-0.3-0 libasound2 libdbus-1-3 libwayland-client0 libxkbcommon0 libvulkan1 mesa-vulkan-drivers` |
+| Ubuntu 24.04+, Debian 13+ | `libpipewire-0.3-0t64 libasound2t64 libdbus-1-3 libwayland-client0 libxkbcommon0 libvulkan1 mesa-vulkan-drivers` |
 | Fedora | `pipewire-libs alsa-lib dbus-libs libwayland-client libxkbcommon vulkan-loader mesa-vulkan-drivers` |
 | Arch | `libpipewire alsa-lib dbus wayland libxkbcommon vulkan-icd-loader` and a `vulkan-driver` |
 
