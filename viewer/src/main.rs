@@ -104,48 +104,14 @@ fn audio(s: &Settings, card: Option<&card::Node>) -> Option<audio::Loopback> {
     Some(audio::Loopback::new(start, delay_ms))
 }
 
-/// The card's own audio input, found as view.sh finds it: the PipeWire
-/// source on the card's USB device.
-#[cfg(target_os = "linux")]
+/// The card's own audio input (card.rs `audio_inputs`), by its id: on
+/// Windows not by name, which said only "USB Audio Device" for the
+/// MS2130's audio function (the #18 VM run). Else SRC must name it.
 fn card_audio_input(card: Option<&card::Node>) -> Result<String, String> {
-    let card = card.ok_or("no card to find the audio input of (--test-pattern); set SRC=<name from pactl list short sources>")?;
-    let usb = card::usb_dir(&card.path).ok_or(
-        "the card is not on USB, so its audio input cannot be found; set SRC=<name from pactl list short sources>",
-    )?;
-    let usb = usb.to_string_lossy();
-    pw::snapshot()?
-        .card_source(usb.strip_prefix("/sys").unwrap_or(&usb))
-        .ok_or_else(|| "the card has no PipeWire source; set SRC=<name from pactl list short sources>".to_string())
-}
-
-/// The card's own audio input on Windows (#18): the one input in the
-/// card's container (one physical device), by its endpoint id. Not by name:
-/// Windows called the MS2130 only "USB Video Device" and its audio function
-/// "USB Audio Device" (the #18 VM run); else SRC must name it.
-#[cfg(windows)]
-fn card_audio_input(card: Option<&card::Node>) -> Result<String, String> {
-    let inputs: Vec<(String, String, Option<u128>)> =
-        audio::inputs()?.into_iter().map(|i| (i.name, i.id, i.container)).collect();
-    let set_src = || format!("set SRC to one of: {}", inputs.iter().map(|i| i.0.as_str()).collect::<Vec<_>>().join(" | "));
-    let card = card.ok_or_else(|| format!("no card to find the audio input of (--test-pattern); {}", set_src()))?;
-    let container = capture::mf::container(&card.path)
-        .map_err(|e| format!("the card's audio input cannot be found: {e}; {}", set_src()))?
-        .to_u128();
-    let id = card_input(container, &inputs).map_err(|e| format!("{e} ({}); {}", card.card_type, set_src()))?;
-    eprintln!("audio: the card's input: {}", inputs.iter().find(|i| i.1 == id).map_or(id, |i| i.0.as_str()));
-    Ok(id.to_string())
-}
-
-/// The one input (name, endpoint id, container id) in the card's
-/// container: its id.
-#[cfg(any(windows, test))]
-fn card_input(card: u128, inputs: &[(String, String, Option<u128>)]) -> Result<&str, &'static str> {
-    let mut found = inputs.iter().filter(|i| i.2 == Some(card));
-    match (found.next(), found.next()) {
-        (Some(one), None) => Ok(&one.1),
-        (None, _) => Err("no audio input belongs to the card"),
-        (Some(_), Some(_)) => Err("more than one audio input belongs to the card"),
-    }
+    let inputs = card::audio_inputs(card)?;
+    let input = inputs.card.map_err(|why| format!("{why}; {}", card::set_src(&inputs.all)))?;
+    eprintln!("audio: the card's input: {}", input.name);
+    Ok(input.id)
 }
 
 /// The setup wizard (#13), in the viewer window: `--setup`, or a first run.
@@ -177,14 +143,11 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
         fallback("LAT_MS", "10");
         10
     });
-    #[cfg(target_os = "linux")]
-    let sys = wizard::Linux {
+    let sys = wizard::Machine {
         sink: s.get("SINK").to_string(),
         buffer_ms,
         refresh: matches!(desktop, desktop::Desktop::Hyprland(_)),
     };
-    #[cfg(windows)]
-    let sys = wizard::Windows { sink: s.get("SINK").to_string(), buffer_ms };
     let wiz = Rc::new(RefCell::new(Wizard::new(Box::new(sys), s.config_file.clone(), first_run, &|k| env::var_os(k).is_some())?));
     // After every early return above, so none leaves it behind.
     std::fs::write(dir.join("setup.pid"), format!("{}\n", std::process::id())).map_err(|e| format!("setup.pid: {e}"))?;
@@ -246,7 +209,7 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
                     let Some((node, format)) = wiz.borrow().feed() else {
                         return Err("the wizard reached the feed without a card".into());
                     };
-                    let source = match format.and_then(|f| open_node(&node, f)) {
+                    let source = match format.and_then(|f| card::open(&node, f)) {
                         Ok(source) => source,
                         Err(e) => {
                             wiz.borrow_mut().feed_failed(e);
@@ -345,9 +308,8 @@ fn pin_source(s: &Settings) -> String {
     }
 }
 
-/// The card the settings pin, opened at `format`: V4L2 on Linux, Media
-/// Foundation on Windows (#18), where DEV may hold the device's friendly
-/// name or its symbolic link.
+/// The card the settings pin, opened at `format` (card.rs `open`). On
+/// Windows DEV may hold the device's friendly name or its symbolic link.
 fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::FrameSource>, card::Node), Fatal> {
     let source = pin_source(s);
     let pins = card::Pins {
@@ -362,7 +324,7 @@ fn open_card(s: &Settings, format: capture::Format) -> Result<(Box<dyn capture::
         eprintln!("warning: {w}");
     }
     eprintln!("video device: {} ({})", picked.node.path.display(), picked.node.card_type);
-    Ok((open_node(&picked.node, format)?, picked.node))
+    Ok((card::open(&picked.node, format)?, picked.node))
 }
 
 /// The viewer's end when its capture ended on its own (#40). It is not
@@ -376,16 +338,6 @@ fn capture_ended(error: &str) -> String {
         Some(error) => format!("capture: the card was unplugged ({error}). Plug it back in and start the viewer again; {STUCK}"),
         None => format!("capture: {error}. Start the viewer again; {STUCK}"),
     }
-}
-
-/// The capture node opened at `format`, a busy card's error saying who
-/// holds it where that can be read (Linux).
-fn open_node(node: &card::Node, format: capture::Format) -> Result<Box<dyn capture::FrameSource>, String> {
-    #[cfg(target_os = "linux")]
-    let source = capture::V4l2::open(&node.path, format).map_err(|e| card::open_error(e, &card::holders(&node.path)))?;
-    #[cfg(windows)]
-    let source = capture::MediaFoundation::open(&node.path, format).map_err(|e| card::open_error(e, &[]))?;
-    Ok(Box::new(source))
 }
 
 /// The settings; with `menu`, a menu launch's defaults (`--menu`, #28).
@@ -813,7 +765,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Fatal, Held, card, card_input, hold_prompt, holds_console, on_key};
+    use super::{Fatal, Held, card, hold_prompt, holds_console, on_key};
 
     #[test]
     fn a_held_console_offers_the_setup_only_for_the_missing_card() {
@@ -889,23 +841,5 @@ mod tests {
         assert!(!holds_console(3, true));
         // Its own console, but stdin redirected: nobody can press Enter.
         assert!(!holds_console(1, false));
-    }
-
-    fn input(name: &str, id: &str, container: Option<u128>) -> (String, String, Option<u128>) {
-        (name.into(), id.into(), container)
-    }
-
-    #[test]
-    fn the_cards_input_is_the_one_in_its_container() {
-        // Names that say nothing of the card, as on Windows (#18).
-        let inputs = [
-            input("Remote Audio", "{0.0.1.00000000}.{a}", None),
-            input("Microphone (USB Audio Device)", "{0.0.1.00000000}.{b}", Some(7)),
-            input("Microphone (Yeti Nano)", "{0.0.1.00000000}.{c}", Some(9)),
-        ];
-        assert_eq!(card_input(7, &inputs), Ok("{0.0.1.00000000}.{b}"));
-        assert_eq!(card_input(8, &inputs), Err("no audio input belongs to the card"));
-        let two = [input("a", "1", Some(7)), input("b", "2", Some(7))];
-        assert_eq!(card_input(7, &two), Err("more than one audio input belongs to the card"));
     }
 }

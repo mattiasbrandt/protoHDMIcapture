@@ -2,14 +2,21 @@
 //! (lib/card.sh). The first video capture node that is not an ignored
 //! device, narrowed by the pins (`CARD_SERIAL`, else `CARD_PORT`); a `DEV`
 //! that is gone, not a capture node, or ignored is set aside for the pins.
-//! Listing the nodes is the platform part: V4L2 and sysfs here, Media
-//! Foundation on Windows (capture/mf.rs, #18).
+//!
+//! It is also the capture card's platform seam (#43): every question about
+//! a card (its nodes, its USB link, its modes, its own audio input, who
+//! holds it, opening it) is one function here, split by platform inside:
+//! V4L2, sysfs and PipeWire on Linux, Media Foundation and WASAPI on
+//! Windows (capture/mf.rs, #18). Callers ask this module, never the
+//! platform's.
 
 #[cfg(target_os = "linux")]
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::path::Path;
 use std::path::PathBuf;
+
+use crate::capture::{Format, FrameSource};
 
 #[cfg(target_os = "linux")]
 use linuxvideo::{CapabilityFlags, Device};
@@ -97,7 +104,7 @@ impl std::fmt::Display for PickError {
 
 #[cfg(target_os = "linux")]
 /// The node's USB device directory in sysfs, if it is on USB.
-pub fn usb_dir(node: &Path) -> Option<PathBuf> {
+fn usb_dir(node: &Path) -> Option<PathBuf> {
     let name = node.file_name()?;
     let intf = fs::canonicalize(Path::new("/sys/class/video4linux").join(name).join("device")).ok()?;
     let dev = intf.parent()?.to_path_buf();
@@ -264,7 +271,7 @@ pub fn describe_dev(dev: &str) -> Option<Option<(String, bool)>> {
 
 /// An error from opening the card, with the hint lib/setup.sh gives when
 /// the card is busy: who holds it, where that can be read (`holders`).
-pub fn open_error(e: String, holders: &[String]) -> String {
+fn open_error(e: String, holders: &[String]) -> String {
     if !e.contains("busy") {
         return e;
     }
@@ -277,7 +284,7 @@ pub fn open_error(e: String, holders: &[String]) -> String {
 /// The processes that have `node` open, as "name (pid N)", from /proc.
 /// Another user's processes cannot be read and are not listed.
 #[cfg(target_os = "linux")]
-pub fn holders(node: &Path) -> Vec<String> {
+fn holders(node: &Path) -> Vec<String> {
     let Ok(procs) = fs::read_dir("/proc") else { return Vec::new() };
     let mut out = Vec::new();
     for p in procs.flatten() {
@@ -289,6 +296,178 @@ pub fn holders(node: &Path) -> Vec<String> {
         }
     }
     out
+}
+
+/// The capture node opened at `format`: V4L2 on Linux, Media Foundation
+/// on Windows (#18), a busy card's error saying who holds it where that
+/// can be read (Linux).
+pub fn open(node: &Node, format: Format) -> Result<Box<dyn FrameSource>, String> {
+    #[cfg(target_os = "linux")]
+    let source = crate::capture::V4l2::open(&node.path, format).map_err(|e| open_error(e, &holders(&node.path)))?;
+    #[cfg(windows)]
+    let source = crate::capture::MediaFoundation::open(&node.path, format).map_err(|e| open_error(e, &[]))?;
+    Ok(Box::new(source))
+}
+
+/// How a node is named on the wizard's pages: its path, or on Windows
+/// "USB 1e4e:7016" for Media Foundation's device link, which is a line
+/// long (the link itself where it names no USB device).
+pub fn label(node: &Node) -> String {
+    #[cfg(windows)]
+    {
+        let link = node.path.to_string_lossy();
+        crate::capture::mf::link_usb_id(&link).map_or_else(|| link.into_owned(), |id| format!("USB {id}"))
+    }
+    #[cfg(not(windows))]
+    {
+        node.path.display().to_string()
+    }
+}
+
+/// The card's USB device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Usb {
+    /// vid:pid.
+    pub id: String,
+    /// The port: on Linux the device directory's name ("3-2").
+    pub port: String,
+    /// bcdUSB as sysfs gives it (" 3.20").
+    pub version: String,
+    /// The link speed in Mbit/s ("5000"); empty when unknown.
+    pub speed: String,
+    /// Why the speed is unknown, where the platform says (Windows: the step
+    /// of asking the hub that failed); empty otherwise.
+    pub unknown: String,
+}
+
+/// The node's USB device, None when it is not on USB: sysfs on Linux, the
+/// device tree and the hub on Windows.
+pub fn usb(node: &Node) -> Option<Usb> {
+    #[cfg(target_os = "linux")]
+    {
+        let dir = usb_dir(&node.path)?;
+        let read = |f: &str| fs::read_to_string(dir.join(f)).map(|s| s.trim_end_matches('\n').to_string()).unwrap_or_default();
+        Some(Usb {
+            id: format!("{}:{}", read("idVendor"), read("idProduct")),
+            port: dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+            version: read("version"),
+            speed: read("speed"),
+            unknown: String::new(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        let d = crate::capture::mf::usb(&node.path)?;
+        let ((version, speed), unknown) = match d.link {
+            Ok(link) => (link, String::new()),
+            Err(why) => (Default::default(), why),
+        };
+        Some(Usb { id: d.id, port: d.port, version, speed, unknown })
+    }
+}
+
+/// A mode the card lists: FMT, RES and FPS as the settings spell them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mode {
+    pub fmt: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+}
+
+/// The modes the node lists, in its own order: the formats this viewer
+/// captures, each size and rate; none (said) when they cannot be read.
+pub fn modes(node: &Node) -> Vec<Mode> {
+    #[cfg(target_os = "linux")]
+    let modes = crate::capture::V4l2::modes(&node.path);
+    #[cfg(windows)]
+    let modes = crate::capture::mf::modes(&node.path);
+    match modes {
+        Ok(modes) => modes
+            .into_iter()
+            .map(|(p, width, height, fps)| Mode { fmt: p.setting().into(), width, height, fps: rounded_fps(fps) })
+            .collect(),
+        Err(e) => {
+            eprintln!("warning: the card's modes: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// A rate as FPS spells it: rounded as lib/setup.sh rounds v4l2-ctl's
+/// "(%.3f fps)".
+fn rounded_fps(fps: f64) -> u32 {
+    (fps + 0.5).floor() as u32
+}
+
+/// An audio input: what SRC may say to name it (`id`) and how it is shown
+/// (`name`). On Linux both are its PipeWire node name; on Windows the
+/// endpoint id and the friendly name, which can say nothing of the card
+/// ("USB Audio Device", #18).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioInput {
+    pub id: String,
+    pub name: String,
+}
+
+/// The audio inputs, and which one is the card's.
+pub struct AudioInputs {
+    /// The card's own input, or why it is not known.
+    pub card: Result<AudioInput, String>,
+    /// Every input's name (no monitors), as SRC may say it.
+    pub all: Vec<String>,
+}
+
+/// The audio inputs, with the card's own: on Linux the PipeWire source on
+/// the card's USB device, on Windows the one input in the card's container
+/// (one physical device). `card`: None with `--test-pattern`. Err: the
+/// inputs cannot be listed at all.
+pub fn audio_inputs(card: Option<&Node>) -> Result<AudioInputs, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let snap = crate::pw::snapshot()?;
+        let found = card.ok_or("no card to find the audio input of (--test-pattern)").and_then(|card| {
+            let usb = usb_dir(&card.path).ok_or("the card is not on USB, so its audio input cannot be found")?;
+            let usb = usb.to_string_lossy();
+            snap.card_source(usb.strip_prefix("/sys").unwrap_or(&usb)).ok_or("the card has no PipeWire source")
+        });
+        let card = found.map(|n| AudioInput { id: n.clone(), name: n }).map_err(str::to_string);
+        Ok(AudioInputs { card, all: snap.audio_sources() })
+    }
+    #[cfg(windows)]
+    {
+        let inputs: Vec<(String, String, Option<u128>)> =
+            crate::audio::inputs()?.into_iter().map(|i| (i.name, i.id, i.container)).collect();
+        let found = match card {
+            None => Err("no card to find the audio input of (--test-pattern)".to_string()),
+            Some(card) => crate::capture::mf::container(&card.path)
+                .map_err(|e| format!("the card's audio input cannot be found: {e}"))
+                .and_then(|g| card_input(g.to_u128(), &inputs).map_err(|e| format!("{e} ({})", card.card_type))),
+        };
+        Ok(AudioInputs { card: found, all: inputs.into_iter().map(|i| i.0).collect() })
+    }
+}
+
+/// How to name the audio input by hand, after why the card's own is not
+/// known.
+pub fn set_src(all: &[String]) -> String {
+    if cfg!(windows) {
+        format!("set SRC to one of: {}", all.join(" | "))
+    } else {
+        "set SRC=<name from pactl list short sources>".to_string()
+    }
+}
+
+/// The one input (name, endpoint id, container id) in the card's
+/// container.
+#[cfg(any(windows, test))]
+fn card_input(card: u128, inputs: &[(String, String, Option<u128>)]) -> Result<AudioInput, &'static str> {
+    let mut found = inputs.iter().filter(|i| i.2 == Some(card));
+    match (found.next(), found.next()) {
+        (Some(one), None) => Ok(AudioInput { id: one.1.clone(), name: one.0.clone() }),
+        (None, _) => Err("no audio input belongs to the card"),
+        (Some(_), Some(_)) => Err("more than one audio input belongs to the card"),
+    }
 }
 
 #[cfg(test)]
@@ -309,6 +488,35 @@ mod tests {
         );
         // Any other error is left as it is.
         assert_eq!(open_error("/dev/video0: No such device".into(), &["mpv (pid 1)".into()]), "/dev/video0: No such device");
+    }
+
+    fn input(name: &str, id: &str, container: Option<u128>) -> (String, String, Option<u128>) {
+        (name.into(), id.into(), container)
+    }
+
+    #[test]
+    fn the_cards_input_is_the_one_in_its_container() {
+        // Names that say nothing of the card, as on Windows (#18).
+        let inputs = [
+            input("Remote Audio", "{0.0.1.00000000}.{a}", None),
+            input("Microphone (USB Audio Device)", "{0.0.1.00000000}.{b}", Some(7)),
+            input("Microphone (Yeti Nano)", "{0.0.1.00000000}.{c}", Some(9)),
+        ];
+        let card = AudioInput { id: "{0.0.1.00000000}.{b}".into(), name: "Microphone (USB Audio Device)".into() };
+        assert_eq!(card_input(7, &inputs), Ok(card));
+        assert_eq!(card_input(8, &inputs), Err("no audio input belongs to the card"));
+        let two = [input("a", "1", Some(7)), input("b", "2", Some(7))];
+        assert_eq!(card_input(7, &two), Err("more than one audio input belongs to the card"));
+    }
+
+    #[test]
+    fn a_rate_is_rounded_as_lib_setup_sh_rounds_it() {
+        // 59.94 (60000/1001) and 29.97 as FPS says them; .5 rounds up.
+        assert_eq!(rounded_fps(60000.0 / 1001.0), 60);
+        assert_eq!(rounded_fps(30000.0 / 1001.0), 30);
+        assert_eq!(rounded_fps(25.0), 25);
+        assert_eq!(rounded_fps(24.5), 25);
+        assert_eq!(rounded_fps(24.49), 24);
     }
 
     #[test]

@@ -68,6 +68,33 @@ impl V4l2 {
         let stream = capture.into_stream().map_err(at)?;
         Ok(Self { stream, format: want, stride })
     }
+
+    /// The modes the device at `node` lists, in its own order: the formats
+    /// this viewer captures, each discrete size and interval (as
+    /// lib/setup.sh reads v4l2-ctl's list), the rate in frames per second.
+    pub fn modes(node: &Path) -> Result<Vec<(Pixels, u32, u32, f64)>, String> {
+        use linuxvideo::BufType;
+        use linuxvideo::format::{FrameIntervals, FrameSizes};
+        let dev = Device::open(node).map_err(|e| format!("{}: {e}", node.display()))?;
+        let mut out = Vec::new();
+        for desc in dev.formats(BufType::VIDEO_CAPTURE).flatten() {
+            let pf = desc.pixel_format();
+            // Only what the viewer captures: the wizard's `best_modes` drops the rest anyway.
+            let Some(pixels) = Pixels::ALL.into_iter().find(|p| p.fourcc() == pf) else { continue };
+            let Ok(FrameSizes::Discrete(sizes)) = dev.frame_sizes(pf) else { continue };
+            for s in sizes {
+                let Ok(FrameIntervals::Discrete(ivals)) = dev.frame_intervals(pf, s.width(), s.height()) else { continue };
+                for i in ivals {
+                    let f = i.fract();
+                    if f.numerator() == 0 {
+                        continue;
+                    }
+                    out.push((pixels, s.width(), s.height(), f64::from(f.denominator()) / f64::from(f.numerator())));
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 impl FrameSource for V4l2 {

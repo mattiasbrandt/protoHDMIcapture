@@ -27,7 +27,8 @@ use regex::Regex;
 
 use crate::capture::{Format, FrameSource, Pixels, Raw, Reason, Signal, Stream};
 use crate::capture_cards::{self, Known};
-use crate::card::Node;
+use crate::card::{AudioInput, Node};
+pub use crate::card::{Mode, Usb};
 use crate::overlay::wrap;
 use crate::settings;
 use crate::sources;
@@ -113,15 +114,6 @@ pub enum Outcome {
     Close,
 }
 
-/// A mode the card lists: FMT, RES and FPS as the settings spell them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Mode {
-    pub fmt: String,
-    pub width: u32,
-    pub height: u32,
-    pub fps: u32,
-}
-
 impl Mode {
     fn size(&self) -> String {
         format!("{}x{}", self.width, self.height)
@@ -133,27 +125,12 @@ impl Mode {
     }
 }
 
-/// The card's USB device, from sysfs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Usb {
-    /// vid:pid.
-    pub id: String,
-    /// The device directory's name (the port, "3-2").
-    pub port: String,
-    /// bcdUSB as sysfs gives it (" 3.20").
-    pub version: String,
-    /// The link speed in Mbit/s ("5000"); empty when unknown.
-    pub speed: String,
-    /// Why the speed is unknown, where the platform says (Windows: the step
-    /// of asking the hub that failed); empty otherwise.
-    pub unknown: String,
-}
-
 /// The audio inputs the audio stage offers.
 #[derive(Debug, Clone, Default)]
 pub struct AudioInputs {
-    /// The card's own input, found on its USB device.
-    pub card: Option<String>,
+    /// The card's own input, found on its USB device: shown by its name,
+    /// opened by its id.
+    pub card: Option<AudioInput>,
     /// Every input (no monitors).
     pub all: Vec<String>,
 }
@@ -1216,7 +1193,7 @@ impl Wizard {
             AudioInputs::default()
         });
         let mut items = Vec::new();
-        let matched = self.audio_inputs.card.clone();
+        let matched = self.audio_inputs.card.as_ref().map(|c| c.name.clone());
         match &matched {
             Some(m) => {
                 body.push("The card's own audio input, found on its USB device:".into());
@@ -1344,7 +1321,8 @@ impl Wizard {
     fn sync_start(&mut self) {
         let source = match &self.new["SRC"] {
             s if !s.is_empty() => Some(s.clone()),
-            _ => self.audio_inputs.card.clone(),
+            // By its id: a Windows name can be another device's too.
+            _ => self.audio_inputs.card.as_ref().map(|c| c.id.clone()),
         };
         // A DELAY lib/settings.sh refuses starts the tuner from the default.
         let delay = self.cur("DELAY");
@@ -1919,12 +1897,13 @@ impl Stream for Idle {
     }
 }
 
-#[cfg(target_os = "linux")]
-/// The machine as the wizard sees it on Linux: V4L2, sysfs, PipeWire.
-pub struct Linux {
+/// The machine as the wizard sees it (#19): the capture card through
+/// card.rs, the sync stage's loopback on the platform's audio.
+pub struct Machine {
     /// SINK and LAT_MS, for the sync stage's loopback.
     pub sink: String,
     pub buffer_ms: u32,
+    /// Whether this desktop can match the refresh rate (Hyprland's).
     pub refresh: bool,
 }
 
@@ -1954,59 +1933,23 @@ impl Tuner for Loopback {
     }
 }
 
-#[cfg(target_os = "linux")]
-impl System for Linux {
+impl System for Machine {
     fn cards(&self) -> Vec<Node> {
         crate::card::list()
     }
 
     fn usb(&self, node: &Node) -> Option<Usb> {
-        let dir = crate::card::usb_dir(&node.path)?;
-        let read = |f: &str| std::fs::read_to_string(dir.join(f)).map(|s| s.trim_end_matches('\n').to_string()).unwrap_or_default();
-        Some(Usb {
-            id: format!("{}:{}", read("idVendor"), read("idProduct")),
-            port: dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-            version: read("version"),
-            speed: read("speed"),
-            unknown: String::new(),
-        })
+        crate::card::usb(node)
     }
 
     fn modes(&self, node: &Node) -> Vec<Mode> {
-        use linuxvideo::format::{FrameIntervals, FrameSizes};
-        let Ok(dev) = linuxvideo::Device::open(&node.path) else { return Vec::new() };
-        let mut out = Vec::new();
-        for desc in dev.formats(linuxvideo::BufType::VIDEO_CAPTURE).flatten() {
-            let pf = desc.pixel_format();
-            // Only what the Rust viewer captures: `best_modes` drops the
-            // rest anyway.
-            let Some(fmt) = Pixels::ALL.into_iter().find(|p| p.fourcc() == pf).map(Pixels::setting) else { continue };
-            // Discrete sizes and intervals only, as lib/setup.sh reads
-            // v4l2-ctl's list.
-            let Ok(FrameSizes::Discrete(sizes)) = dev.frame_sizes(pf) else { continue };
-            for s in sizes {
-                let Ok(FrameIntervals::Discrete(ivals)) = dev.frame_intervals(pf, s.width(), s.height()) else { continue };
-                for i in ivals {
-                    let f = i.fract();
-                    if f.numerator() == 0 {
-                        continue;
-                    }
-                    // v4l2-ctl prints "(%.3f fps)"; lib/setup.sh rounds that.
-                    let fps = (f64::from(f.denominator()) / f64::from(f.numerator()) + 0.5).floor() as u32;
-                    out.push(Mode { fmt: fmt.into(), width: s.width(), height: s.height(), fps });
-                }
-            }
-        }
-        out
+        crate::card::modes(node)
     }
 
     fn audio_inputs(&self, node: &Node) -> Result<AudioInputs, String> {
-        let snap = crate::pw::snapshot()?;
-        let card = crate::card::usb_dir(&node.path).and_then(|d| {
-            let d = d.to_string_lossy().to_string();
-            snap.card_source(d.strip_prefix("/sys").unwrap_or(&d))
-        });
-        Ok(AudioInputs { card, all: snap.audio_sources() })
+        let inputs = crate::card::audio_inputs(Some(node))?;
+        let card = inputs.card.map_err(|e| eprintln!("warning: the card's audio input: {e}")).ok();
+        Ok(AudioInputs { card, all: inputs.all })
     }
 
     fn can_match_refresh(&self) -> bool {
@@ -2016,77 +1959,14 @@ impl System for Linux {
     fn start_audio(&self, source: &str, delay_ms: u32) -> Result<Box<dyn Tuner>, String> {
         Loopback::start(source, &self.sink, delay_ms, self.buffer_ms)
     }
-}
 
-#[cfg(windows)]
-/// The machine as the wizard sees it on Windows (#19): Media Foundation,
-/// the device tree and its USB hubs, WASAPI. No refresh matching.
-pub struct Windows {
-    /// SINK and LAT_MS, for the sync stage's loopback.
-    pub sink: String,
-    pub buffer_ms: u32,
-}
-
-#[cfg(windows)]
-impl System for Windows {
-    fn cards(&self) -> Vec<Node> {
-        crate::card::list()
-    }
-
-    fn usb(&self, node: &Node) -> Option<Usb> {
-        let d = crate::capture::mf::usb(&node.path)?;
-        let ((version, speed), unknown) = match d.link {
-            Ok(link) => (link, String::new()),
-            Err(why) => (Default::default(), why),
-        };
-        Some(Usb { id: d.id, port: d.port, version, speed, unknown })
-    }
-
-    fn modes(&self, node: &Node) -> Vec<Mode> {
-        let modes = crate::capture::mf::modes(&node.path).unwrap_or_else(|e| {
-            eprintln!("warning: the card's modes: {e}");
-            Vec::new()
-        });
-        // Rounded as lib/setup.sh rounds v4l2-ctl's "(%.3f fps)".
-        modes.into_iter().map(|(p, width, height, fps)| Mode { fmt: p.setting().into(), width, height, fps: (fps + 0.5).floor() as u32 }).collect()
-    }
-
-    /// By friendly name, as SRC may say it: the card's input is the one in
-    /// the card's container (main.rs `card_audio_input`).
-    fn audio_inputs(&self, node: &Node) -> Result<AudioInputs, String> {
-        let inputs = crate::audio::inputs()?;
-        let container = match crate::capture::mf::container(&node.path) {
-            Ok(g) => Some(g.to_u128()),
-            Err(e) => {
-                eprintln!("warning: the card's audio input: {e}");
-                None
-            }
-        };
-        let mut in_card = inputs.iter().filter(|i| container.is_some() && i.container == container);
-        let card = match (in_card.next(), in_card.next()) {
-            (Some(one), None) => Some(one.name.clone()),
-            _ => None,
-        };
-        Ok(AudioInputs { card, all: inputs.into_iter().map(|i| i.name).collect() })
-    }
-
-    fn can_match_refresh(&self) -> bool {
-        false
-    }
-
-    fn start_audio(&self, source: &str, delay_ms: u32) -> Result<Box<dyn Tuner>, String> {
-        Loopback::start(source, &self.sink, delay_ms, self.buffer_ms)
-    }
-
-    /// "USB 1e4e:7016" for Media Foundation's device link, which is a line
-    /// long; the link itself where it names no USB device.
     fn label(&self, node: &Node) -> String {
-        let link = node.path.to_string_lossy();
-        crate::capture::mf::link_usb_id(&link).map_or_else(|| link.into_owned(), |id| format!("USB {id}"))
+        crate::card::label(node)
     }
 
+    /// view.sh runs on Linux only.
     fn has_view_sh(&self) -> bool {
-        false
+        cfg!(target_os = "linux")
     }
 }
 
@@ -2144,7 +2024,8 @@ mod tests {
             self.modes.clone()
         }
         fn audio_inputs(&self, _: &Node) -> Result<AudioInputs, String> {
-            Ok(AudioInputs { card: Some("alsa_input.usb-card".into()), all: vec!["alsa_input.usb-card".into(), "alsa_input.mic".into()] })
+            let card = AudioInput { id: "alsa_input.usb-card".into(), name: "alsa_input.usb-card".into() };
+            Ok(AudioInputs { card: Some(card), all: vec!["alsa_input.usb-card".into(), "alsa_input.mic".into()] })
         }
         fn can_match_refresh(&self) -> bool {
             self.refresh
