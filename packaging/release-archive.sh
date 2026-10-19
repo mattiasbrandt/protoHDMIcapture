@@ -25,7 +25,7 @@ trap 'rm -rf "$stage"' EXIT
 d="$stage/$name"
 install -Dm755 "$target/release/protohdmicapture" "$d/bin/protohdmicapture"
 # The release profile keeps debug info (debug = 1, for profiling); the
-# archive ships without it, as makepkg's strip does for the package.
+# archive ships without it.
 strip --strip-debug "$d/bin/protohdmicapture"
 install -Dm644 "$root/packaging/protohdmicapture.desktop" "$d/share/applications/protohdmicapture.desktop"
 # The app icon at every size, as the hicolor theme lays it out (#35).

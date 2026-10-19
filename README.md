@@ -84,8 +84,7 @@ Packages are on the [GitHub releases](https://github.com/mattiasbrandt/protoHDMI
 
 | Platform | How |
 |---|---|
-| Arch Linux | the AUR package `protohdmicapture` (once published), or `cd packaging && makepkg -si` |
-| Other Linux | the release archive: `tar xf protohdmicapture-<version>-x86_64-linux.tar.gz`, then `./install.sh` in it |
+| Linux (glibc 2.35+: Ubuntu 22.04, Debian 12, Fedora, Arch and newer) | the release archive: `tar xf protohdmicapture-<version>-x86_64-linux.tar.gz`, then `./install.sh` in it |
 | Windows 10/11 | the release's `.msi`: per user, no administrator prompt |
 
 Linux needs a Wayland desktop with a Vulkan driver and PipeWire. Refresh
@@ -336,7 +335,7 @@ in [docs/view-sh.md](docs/view-sh.md).
 | `viewer/` | the Rust viewer |
 | `capture-cards/`, `sources/` | capture card profiles and source profiles, read by both viewers |
 | `view.sh`, `launch.sh`, `lib/`, `desktop/` | the script viewer |
-| `packaging/` | the PKGBUILD, the release archive, the Windows installer, the icons |
+| `packaging/` | the Linux release archive, the Windows installer, the icons |
 | `tools/` | `check`, the hardware-free harnesses, the lost-frame simulation, fixtures |
 | `docs/` | testing, the run directory, the capture card table, ADRs, research |
 | `assets/brand/` | the logo and the social preview |

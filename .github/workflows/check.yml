@@ -10,7 +10,7 @@
 #                            C wrappers, clang for bindgen (PipeWire), pkgconf
 #                            to find the libraries below
 #   libpipewire, alsa-lib, dbus, wayland
-#                            the libraries the viewer links (packaging/PKGBUILD)
+#                            the libraries the viewer links (packaging/INSTALL.md)
 #   v4l-utils, mpv, libpulse, pipewire, pipewire-audio, util-linux
 #                            tools/harness/preflight.sh puts v4l2-ctl, mpv,
 #                            pactl, pw-link, pw-loopback and flock on a PATH

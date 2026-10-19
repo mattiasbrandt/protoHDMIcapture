@@ -10,18 +10,11 @@ On Linux it needs a Wayland desktop with a Vulkan driver, and PipeWire for
 the sound. Refresh matching and window placement need Hyprland; other
 desktops get the feed without them. Windows: see [Windows](#windows).
 
-## Arch Linux
+## Linux: the release archive
 
-From the AUR (once published): `protohdmicapture`. To build the package
-from this checkout instead:
-
-```bash
-cd packaging && makepkg -si
-```
-
-The PKGBUILD builds a tagged release (`v<version>` on GitHub).
-
-## Other distributions: the release archive
+One archive for every distro with glibc 2.35 or later: Ubuntu 22.04,
+Debian 12, Fedora, Arch and newer. Each release is installed and run on
+those in CI before it is published.
 
 ```bash
 tar xf protohdmicapture-<version>-x86_64-linux.tar.gz
@@ -30,12 +23,20 @@ cd protohdmicapture-<version>-x86_64-linux
 ./install.sh --uninstall      # the same prefix removes it again
 ```
 
-Run-time libraries: glibc, libgcc, PipeWire's libpipewire, ALSA's
-libasound, libdbus, Wayland's libwayland-client, libxkbcommon, the Vulkan
-loader (libvulkan) and a Vulkan driver.
+Run-time libraries: glibc 2.35 or later, libgcc, PipeWire's libpipewire,
+ALSA's libasound, libdbus, Wayland's libwayland-client, libxkbcommon, the
+Vulkan loader (libvulkan) and a Vulkan driver. A desktop with PipeWire has
+them all; by package:
+
+| Distro | Packages |
+|---|---|
+| Ubuntu, Debian | `libpipewire-0.3-0 libasound2 libdbus-1-3 libwayland-client0 libxkbcommon0 libvulkan1 mesa-vulkan-drivers` |
+| Fedora | `pipewire-libs alsa-lib dbus-libs libwayland-client libxkbcommon vulkan-loader mesa-vulkan-drivers` |
+| Arch | `libpipewire alsa-lib dbus wayland libxkbcommon vulkan-icd-loader` and a `vulkan-driver` |
 
 To build the archive: `packaging/release-archive.sh [OUT_DIR]` (Rust
-toolchain, clang and the libraries' development files).
+toolchain, clang and the libraries' development files). Built on a newer
+distro, it needs that distro's glibc.
 
 ## Windows
 
