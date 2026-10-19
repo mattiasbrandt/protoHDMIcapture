@@ -39,7 +39,6 @@ use crate::capture::{Format, FrameSource};
 use crate::card::Node;
 use crate::dashboard::{self, AudioLive, Live, Server};
 use crate::debuglog::{self, DebugLog};
-use crate::desktop::Desktop;
 use crate::pattern::Pattern;
 use crate::run::{Outcome, Quit};
 use crate::session::{AlreadyRunning, Session};
@@ -104,7 +103,6 @@ pub struct Start {
     pub format: Format,
     /// --test-pattern: the pattern instead of the card.
     pub test_pattern: bool,
-    pub desktop: Desktop,
 }
 
 /// Where a viewer's feed gets what it opens: the machine's in main.rs,
@@ -136,9 +134,8 @@ pub enum Ran {
 /// the order above. Err: why the viewer ends in error, said in the debug
 /// log too.
 pub fn run(start: Start, parts: Parts, quit: &Quit) -> Result<Ran, Fatal> {
-    let Start { run_dir, settings, opts, format, test_pattern, desktop } = start;
     let Parts { open_card, loopback, debug_log, window } = parts;
-    let session = match Session::start(&run_dir, desktop.clone())? {
+    let session = match Session::start(&start.run_dir, start.opts.desktop.clone())? {
         Ok(s) => s,
         Err(running) => return Ok(Ran::AlreadyRunning(running)),
     };
@@ -146,12 +143,12 @@ pub fn run(start: Start, parts: Parts, quit: &Quit) -> Result<Ran, Fatal> {
     // (a refused second launch must not truncate the running one's), as
     // view.sh's debug_tee. It outlives the feed's teardown. A log that
     // cannot start costs only the log.
-    let mut log = match settings.get("DEBUG") {
+    let mut log = match start.settings.get("DEBUG") {
         "off" => None,
-        _ => match debug_log(&run_dir.join("debug.log")) {
+        _ => match debug_log(&start.run_dir.join("debug.log")) {
             Ok(log) => {
-                log.header(&desktop);
-                log.settings(&settings);
+                log.header(&start.opts.desktop);
+                log.settings(&start.settings);
                 Some(log)
             }
             Err(e) => {
@@ -161,27 +158,12 @@ pub fn run(start: Start, parts: Parts, quit: &Quit) -> Result<Ran, Fatal> {
         },
     };
     let mut feed: Feed = Feed::new(Some(session));
-    let open = Open { run_dir, settings, opts, format, test_pattern, desktop, open_card, loopback, window };
-    let result = feed.run(open, log.as_mut(), quit);
+    let result = feed.run(start, open_card, loopback, window, log.as_mut(), quit);
     feed.finish();
     if let Some(log) = log {
         log.ended(&result.as_ref().map(drop).map_err(Fatal::to_string));
     }
     result.map(|()| Ran::Ended)
-}
-
-/// `Start` and the `Parts` still to use, once the session and the log are
-/// held.
-struct Open {
-    run_dir: PathBuf,
-    settings: Settings,
-    opts: app::Options,
-    format: Format,
-    test_pattern: bool,
-    desktop: Desktop,
-    open_card: OpenCard,
-    loopback: MakeLoopback,
-    window: Window,
 }
 
 pub type OpenCard = Box<dyn FnOnce(&Settings, Format) -> Result<(Box<dyn FrameSource>, Node), Fatal>>;
@@ -191,10 +173,17 @@ pub type Window = Box<dyn FnOnce(Box<dyn FrameSource>, app::Options, &Quit) -> O
 
 impl Feed {
     /// The steps after the session and the log, through the window.
-    fn run(&mut self, o: Open, log: Option<&mut DebugLog>, quit: &Quit) -> Result<(), Fatal> {
-        let Open { run_dir, settings: s, mut opts, format, test_pattern, desktop, open_card, loopback, window } = o;
+    fn run(
+        &mut self,
+        start: Start,
+        open_card: OpenCard,
+        loopback: MakeLoopback,
+        window: Window,
+        log: Option<&mut DebugLog>,
+        quit: &Quit,
+    ) -> Result<(), Fatal> {
+        let Start { run_dir, settings: s, mut opts, format, test_pattern } = start;
         let live = opts.live.clone();
-        opts.desktop = desktop;
         let (source, node): (Box<dyn FrameSource>, _) = if test_pattern {
             eprintln!("video: the test pattern at {}x{} {} fps", format.width, format.height, format.fps);
             (Box::new(Pattern::new(format)), None)
@@ -455,7 +444,7 @@ mod tests {
                 dashboard: None,
                 refocus: None,
             };
-            Start { run_dir: dir.to_path_buf(), settings, opts, format: FORMAT, test_pattern, desktop: Desktop::Generic }
+            Start { run_dir: dir.to_path_buf(), settings, opts, format: FORMAT, test_pattern }
         }
 
         /// What the stand-ins saw: the order of the steps that left a mark,

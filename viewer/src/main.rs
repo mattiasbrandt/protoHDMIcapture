@@ -394,7 +394,8 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
 
     // One video window at a time, with view.sh too (docs/run-dir.md): the
     // feed's start and end, in their order (feed.rs).
-    let start = feed::Start { run_dir: session::run_dir(), settings: s, opts, format, test_pattern, desktop: desktop::detect()? };
+    opts.desktop = desktop::detect()?;
+    let start = feed::Start { run_dir: session::run_dir(), settings: s, opts, format, test_pattern };
     let parts = feed::Parts {
         open_card: Box::new(open_card),
         loopback: Box::new(audio),
