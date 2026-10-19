@@ -281,7 +281,7 @@ pub struct Wizard {
     sys: Box<dyn System>,
     pub config_file: PathBuf,
     first_run: bool,
-    /// The settings the wizard decides, in lib/settings.sh's order.
+    /// The settings the wizard decides, in settings.rows' order.
     managed: Vec<String>,
     defaults: HashMap<String, String>,
     /// What the file says now.
@@ -1325,7 +1325,7 @@ impl Wizard {
             // By its id: a Windows name can be another device's too.
             _ => self.audio_inputs.card.as_ref().map(|c| c.id.clone()),
         };
-        // A DELAY lib/settings.sh refuses starts the tuner from the default.
+        // A DELAY settings.rows refuses starts the tuner from the default.
         let delay = self.cur("DELAY");
         let default = live_changes::DEFAULT_DELAY_MS;
         self.sync_note =

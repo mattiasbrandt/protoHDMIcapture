@@ -33,7 +33,7 @@ pub enum Pixels {
     Mjpeg,
 }
 
-/// The FMT values lib/settings.sh accepts that the Rust viewer does not
+/// The FMT values settings.rows accepts that the Rust viewer does not
 /// capture, each with the reason. view.sh plays them.
 pub const NOT_CAPTURED: [(&str, &str); 3] = [
     ("nv12", "not captured by the Rust viewer yet"),
@@ -221,11 +221,11 @@ mod tests {
         }
     }
 
-    /// Every FMT value lib/settings.sh accepts is captured or refused on
+    /// Every FMT value settings.rows accepts is captured or refused on
     /// purpose: a new one fails here until it is one or the other.
     #[test]
     fn every_fmt_value_is_captured_or_refused_on_purpose() {
-        let row = crate::settings::rows().into_iter().find(|r| r.name == "FMT").expect("lib/settings.sh has FMT");
+        let row = crate::settings::rows().into_iter().find(|r| r.name == "FMT").expect("settings.rows has FMT");
         let mut values: Vec<&str> = row.values.strip_prefix("enum:").expect("FMT is an enum").split(',').collect();
         if row.has_flag("empty") {
             values.push("");
@@ -237,7 +237,7 @@ mod tests {
         }
         // And nothing is decided for a value the settings do not have.
         for v in Pixels::ALL.iter().map(|p| p.setting()).chain(NOT_CAPTURED.iter().map(|(n, _)| *n)) {
-            assert!(values.contains(&v), "FMT={v} is not in lib/settings.sh");
+            assert!(values.contains(&v), "FMT={v} is not in settings.rows");
         }
     }
 }

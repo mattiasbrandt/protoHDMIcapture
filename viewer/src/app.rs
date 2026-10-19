@@ -1699,7 +1699,7 @@ mod tests {
 
         assert!(press(&mut app, "l"));
         assert!(press(&mut app, "c"));
-        assert_eq!(panel(&app)[9], "w     Save         SCALING=fast LEVELS=limited", "lib/settings.sh's order");
+        assert_eq!(panel(&app)[9], "w     Save         SCALING=fast LEVELS=limited", "settings.rows' order");
         assert!(press(&mut app, "w"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "# mine\nLEVELS=limited\nCONTRAST=2\nSCALING=fast\n");
         assert_eq!(app.overlay.current_message(Instant::now()), Some("Saved: SCALING=fast LEVELS=limited"));

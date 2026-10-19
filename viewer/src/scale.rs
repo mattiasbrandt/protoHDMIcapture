@@ -53,7 +53,7 @@ impl Scaling {
         }
     }
 
-    /// The overlay's c: lib/settings.sh's order, without config.
+    /// The overlay's c: settings.rows' order, without config.
     pub fn next(self) -> Self {
         match self {
             Self::Balanced => Self::Fast,

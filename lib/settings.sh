@@ -18,53 +18,9 @@
 # Reading and writing the config file stays in lib/card.sh (_config_line,
 # config_read, config_write), which this module calls at run time.
 #
-# Row: name | default | values | players | flags
-#   values   enum:a,b,c  int:LO..HI  num:LO..HI  size (WxH)  text
-#   players  all, or the players that honour it (mpv,gst,ffplay); a value
-#            set for a player that does not honour it earns a warning
-#   flags    save      the overlay's w saves it
-#            wizard    the setup wizard decides it
-#            pin       picks the capture card; the environment setting any
-#                      pin skips every pin in the saved settings
-#            suggest   a source profile's Suggest: line may set it
-#            empty     an empty value means something (not "unset")
-#            deprecated=NEW   an old name, translated to NEW
-
-_SETTINGS_ROWS='
-SOURCE          |                               |text                               |all            |wizard
-CARD_SERIAL     |                               |text                               |all            |pin,wizard
-CARD_PORT       |                               |text                               |all            |pin,wizard
-DEV             |                               |text                               |all            |pin,wizard
-IGNORE_CARDS_RE |                               |text                               |all            |wizard
-SRC             |                               |text                               |all            |wizard
-SINK            |                               |text                               |all            |
-RES             |1920x1080                      |size                               |all            |wizard,suggest
-FPS             |60                             |num:1..1000                        |all            |wizard,suggest
-# FMT: empty leaves the device on whatever it was last set to, which is luck,
-# not a setting, so the default is the uncompressed format, not empty.
-FMT             |yuyv422                        |enum:yuyv422,mjpeg,nv12,rawvideo   |all            |wizard,empty
-DELAY           |0.05                           |num:0..1                           |all            |save,wizard
-LAT_MS          |10                             |int:1..1000                        |all            |
-BACKEND         |mpv                            |enum:mpv,gst,ffplay                |all            |wizard
-AUDIO           |loopback                       |enum:loopback,mpv,none             |all            |wizard
-WINDOW          |fullscreen                     |enum:fullscreen,borderless,windowed|all            |save,wizard
-WINDOW_SIZE     |1280x720                       |size                               |mpv,ffplay     |wizard
-SCALING         |balanced                       |enum:balanced,fast,high-quality,config|mpv         |save,wizard
-LEVELS          |auto                           |enum:auto,limited,full             |mpv            |save
-BRIGHTNESS      |0                              |int:-100..100                      |mpv            |save
-CONTRAST        |0                              |int:-100..100                      |mpv            |save
-SATURATION      |0                              |int:-100..100                      |mpv            |save
-GAMMA           |0                              |int:-100..100                      |mpv            |save
-# IPC: empty disables the socket.
-IPC             |/tmp/mpv-protohdmicapture.sock |text                               |mpv            |empty
-# REFRESH: match switches the focused monitor to its mode nearest FPS
-# for the session (Hyprland). keep by default: a terminal run never touches
-# the display unasked; the menu launcher asks for match (launch.sh).
-REFRESH         |keep                           |enum:keep,match                    |all            |wizard
-GST_IO_MODE     |mmap                           |enum:mmap,dmabuf                   |gst            |
-DEBUG           |off                            |enum:off,log,window                |all            |wizard
-FULLSCREEN      |                               |enum:yes,no                        |all            |wizard,deprecated=WINDOW
-'
+# The rows are settings.rows at the repo root, read here at run time (the
+# format is described there).
+_SETTINGS_ROWS_FILE="$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")/settings.rows"
 
 SETTINGS=()
 declare -A _S_DEFAULT=() _S_VALUES=() _S_PLAYERS=() _S_FLAGS=()
@@ -78,9 +34,9 @@ _settings_load() {
         SETTINGS+=("$name")
         _S_DEFAULT[$name]="$def"; _S_VALUES[$name]="$values"
         _S_PLAYERS[$name]="$players"; _S_FLAGS[$name]="$flags"
-    done <<<"$_SETTINGS_ROWS"
+    done <"$_SETTINGS_ROWS_FILE"
 }
-_settings_load
+_settings_load || { echo "settings: cannot read $_SETTINGS_ROWS_FILE" >&2; return 1 2>/dev/null || exit 1; }
 
 _settings_has_flag() { [[ ",${_S_FLAGS[$1]}," == *",$2,"* ]]; }
 

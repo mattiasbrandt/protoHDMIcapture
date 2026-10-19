@@ -1,12 +1,13 @@
-//! Settings: the same file, names and rules as view.sh (decided in #10).
+//! Settings: the same file, names and rules as protoHDMIcapture legacy
+//! (decided in #10).
 //!
-//! The rows come from `lib/settings.sh` itself, read at build time, so the
-//! table has one source of truth. Reading mirrors `lib/settings.sh`
-//! (`settings_resolve`, `settings_validate`) and `lib/card.sh`
-//! (`_config_line`, `CONFIG_FILE`): environment, else the saved settings,
-//! else the default; the pins are one setting; a deprecated name translates
-//! to its replacement. `tools/check` runs every settings fixture through
-//! both viewers and requires the same `--settings` output.
+//! The rows are `settings.rows` at the repo root, compiled in, the one
+//! table (#47): protoHDMIcapture legacy reads the same file at run time.
+//! Reading mirrors legacy's `lib/settings.sh` (`settings_resolve`,
+//! `settings_validate`) and `lib/card.sh` (`_config_line`, `CONFIG_FILE`):
+//! environment, else the saved settings, else the default; the pins are one
+//! setting; a deprecated name translates to its replacement. `tools/check`
+//! runs every settings fixture through `--settings`.
 
 use std::collections::HashMap;
 use std::env;
@@ -15,7 +16,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-const SETTINGS_SH: &str = include_str!("../../lib/settings.sh");
+const SETTINGS_ROWS: &str = include_str!("../../settings.rows");
 
 /// One row: name | default | values | players | flags.
 #[derive(Debug, Clone)]
@@ -36,19 +37,17 @@ impl Row {
     }
 }
 
-/// The rows of `_SETTINGS_ROWS` in lib/settings.sh, in order.
+/// The rows of settings.rows, in order.
 pub fn rows() -> Vec<Row> {
-    let start = SETTINGS_SH.find("_SETTINGS_ROWS='").expect("lib/settings.sh has _SETTINGS_ROWS") + "_SETTINGS_ROWS='".len();
-    let end = start + SETTINGS_SH[start..].find('\'').expect("_SETTINGS_ROWS is closed");
-    SETTINGS_SH[start..end]
+    SETTINGS_ROWS
         .lines()
         // `[ -n "${line// /}" ] && [[ "$line" != '#'* ]]`
         .filter(|l| !l.replace(' ', "").is_empty() && !l.starts_with('#'))
         .map(|l| {
             let mut f = l.splitn(5, '|');
             let mut next = || f.next().unwrap_or("").to_string();
-            // The players column says which of view.sh's players honour a
-            // setting; the Rust viewer is not one of them.
+            // The players column says which of legacy's players honour a
+            // setting; protoHDMIcapture is not one of them.
             let (name, default, values, _players, flags) = (next(), next(), next(), next(), next());
             Row {
                 name: name.replace(' ', ""),
@@ -417,14 +416,14 @@ pub fn read_file(config_file: &Path) -> Result<HashMap<String, String>, String> 
         .collect())
 }
 
-/// Is `v` a valid value for the setting `name` (lib/settings.sh's ranges)?
+/// Is `v` a valid value for the setting `name` (settings.rows' ranges)?
 pub fn check_value(name: &str, v: &str) -> Result<(), String> {
     let rows = rows();
     let r = rows.iter().find(|r| r.name == name).ok_or(format!("{name} is not a setting"))?;
     check(r, v).map_err(|e| format!("{name}={v}: {e}"))
 }
 
-/// The names carrying `flag`, in lib/settings.sh's order (`settings_with`).
+/// The names carrying `flag`, in settings.rows' order (`settings_with`).
 pub fn with_flag(flag: &str) -> Vec<String> {
     rows().into_iter().filter(|r| r.has_flag(flag)).map(|r| r.name).collect()
 }
@@ -507,10 +506,10 @@ mod tests {
     }
 
     #[test]
-    fn the_table_is_read_from_lib_settings_sh() {
+    fn the_table_is_read_from_settings_rows() {
         let names: Vec<String> = rows().into_iter().map(|r| r.name).collect();
-        // `bash -c '. lib/settings.sh; settings_with'`, 2026-10-14. A change
-        // to the table shows up here first.
+        // settings.rows' names, in order (as `settings_with` lists them on
+        // 2026-10-14). A change to the table shows up here first.
         let expected = "SOURCE CARD_SERIAL CARD_PORT DEV IGNORE_CARDS_RE SRC SINK RES FPS FMT DELAY LAT_MS BACKEND AUDIO \
                         WINDOW WINDOW_SIZE SCALING LEVELS BRIGHTNESS CONTRAST SATURATION GAMMA IPC REFRESH GST_IO_MODE DEBUG FULLSCREEN";
         assert_eq!(names.join(" "), expected);

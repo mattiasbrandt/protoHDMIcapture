@@ -1668,7 +1668,7 @@ mod tests {
         assert_eq!(nudged(50, 10), 60);
         assert_eq!(nudged(5, -10), 0);
         assert_eq!(nudged(990, 50), MAX_DELAY_MS);
-        // DELAY's range in lib/settings.sh is the ring's.
+        // DELAY's range in settings.rows is the ring's.
         let rows = crate::settings::rows();
         let delay = rows.iter().find(|r| r.name == "DELAY").unwrap();
         assert_eq!(delay.values, format!("num:0..{}", MAX_DELAY_MS / 1000));

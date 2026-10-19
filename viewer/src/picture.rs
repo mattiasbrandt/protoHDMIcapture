@@ -25,7 +25,7 @@ pub enum Coding {
     Jpeg,
 }
 
-/// LEVELS, in the order the overlay's l cycles them (lib/settings.sh).
+/// LEVELS, in the order the overlay's l cycles them (settings.rows).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Levels {
     /// What mpv makes of the card's frames: ffmpeg's V4L2 input tags no
@@ -88,7 +88,7 @@ pub fn bytes(u: &[[f32; 4]; 4]) -> Vec<u8> {
     u.as_flattened().iter().flat_map(|v| v.to_ne_bytes()).collect()
 }
 
-/// The colour values' range, mpv's and lib/settings.sh's.
+/// The colour values' range, mpv's and settings.rows'.
 const COLOUR_RANGE: std::ops::RangeInclusive<i32> = -100..=100;
 
 impl Picture {

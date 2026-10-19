@@ -5,6 +5,15 @@ set -uo pipefail
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
 
 fail=0
+# The names in settings.rows carrying flag $1 (every name without one), in
+# its order, as legacy's settings_with lists them.
+rows_with() {
+    awk -F'|' -v flag="${1:-}" '
+        { line = $0; gsub(/ /, "", line) }
+        line == "" || substr($0, 1, 1) == "#" { next }
+        { name = $1; flags = $5; gsub(/ /, "", name); gsub(/ /, "", flags)
+          if (flag == "" || index("," flags ",", "," flag ",")) print name }' settings.rows
+}
 step() { printf '\033[36m:: %s\033[0m\n' "$1"; }
 bad()  { printf '\033[31m!! %s\033[0m\n' "$1"; fail=1; }
 
@@ -86,7 +95,7 @@ tools/process-globals || bad "process-global state without \`// process-global: 
 
 # A source profile may suggest only the settings flagged "suggest".
 step "source profile suggestions"
-mapfile -t SUGGESTABLE < <(bash -c '. lib/settings.sh; settings_with suggest')
+mapfile -t SUGGESTABLE < <(rows_with suggest)
 for f in sources/*.md; do
     for kv in $(sed -n 's/^Suggest:[[:space:]]*//p' "$f"); do
         [[ " ${SUGGESTABLE[*]} " == *" ${kv%%=*} "* ]] \
@@ -97,7 +106,7 @@ done
 # Every setting has a row in README's settings table (first cell) and is named
 # in config.example; the table names nothing that is not a setting.
 step "settings documented"
-mapfile -t ALL_SETTINGS < <(bash -c '. lib/settings.sh; settings_with')
+mapfile -t ALL_SETTINGS < <(rows_with)
 documented=$(sed -n '/^### The settings worth knowing/,/^#/p' README.md | grep '^| `' \
              | cut -d'|' -f2 | grep -oE '`[A-Z_]+`' | tr -d '`' | sort -u)
 for n in "${ALL_SETTINGS[@]}"; do
@@ -105,7 +114,7 @@ for n in "${ALL_SETTINGS[@]}"; do
     grep -qE "(^|[^A-Z_])$n([^A-Z_]|$)" config.example || bad "config.example: setting $n is not mentioned"
 done
 for d in $documented; do
-    [[ " ${ALL_SETTINGS[*]} " == *" $d "* ]] || bad "README: $d has a settings row but is not a setting (lib/settings.sh)"
+    [[ " ${ALL_SETTINGS[*]} " == *" $d "* ]] || bad "README: $d has a settings row but is not a setting (settings.rows)"
 done
 
 # Hardware-free checks of the functions behind past defects (each names the

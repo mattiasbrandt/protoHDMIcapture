@@ -2,7 +2,7 @@
 //! runs, from their start values to the overlay's w. Each one is an entry
 //! of `ENTRIES`, which says how it is read from the settings and how it is
 //! spelled back, as the settings file spells it; the entries are the rows
-//! lib/settings.sh flags `save`, in its order (a test holds them to it).
+//! settings.rows flags `save`, in its order (a test holds them to it).
 //!
 //! DELAY is the loopback's, not held here: what it is now comes in as the
 //! loopback's delay in ms while the loopback runs, and None means it is
@@ -33,7 +33,7 @@ fn colour(name: &str, v: &str) -> Result<i32, String> {
     v.parse().map_err(|_| format!("{name}={v} is not a whole number"))
 }
 
-/// lib/settings.sh's `save` rows, in its order.
+/// settings.rows' `save` rows, in its order.
 const ENTRIES: [Entry; 8] = [
     Entry {
         name: "DELAY",
@@ -138,7 +138,7 @@ pub struct LiveChanges {
 }
 
 impl LiveChanges {
-    /// Every live setting at lib/settings.sh's default.
+    /// Every live setting at settings.rows' default.
     pub const DEFAULT: Self = Self {
         window: WindowMode::Fullscreen,
         window_size: (1280, 720),
@@ -237,7 +237,7 @@ impl LiveChanges {
     }
 
     /// What w would save: each value that differs from the baseline, as
-    /// `NAME=value`, in lib/settings.sh's order.
+    /// `NAME=value`, in settings.rows' order.
     pub fn changes(&self, delay_ms: Option<u32>) -> Vec<String> {
         let now = self.values(delay_ms);
         ENTRIES
@@ -314,7 +314,7 @@ mod tests {
         assert_eq!(l.adjust_colour(Colour::Gamma, -3), -3);
         assert_eq!(l.adjust_colour(Colour::Saturation, 1), 8);
         assert_eq!(l.cycle_window(), WindowMode::Borderless);
-        assert_eq!(l.changes(Some(50)), ["WINDOW=borderless", "SCALING=fast", "LEVELS=limited", "SATURATION=8", "GAMMA=-3"], "lib/settings.sh's order");
+        assert_eq!(l.changes(Some(50)), ["WINDOW=borderless", "SCALING=fast", "LEVELS=limited", "SATURATION=8", "GAMMA=-3"], "settings.rows' order");
         assert_eq!(l.save(&s, Some(50)).unwrap().len(), 5);
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),

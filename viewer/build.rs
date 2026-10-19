@@ -1,6 +1,6 @@
 //! Embeds the source profiles (`../sources/*.md`) and the capture card
 //! profiles (`../capture-cards/*.md`), as `settings.rs` embeds
-//! lib/settings.sh: the overlay's setup tips and the wizard's card facts
+//! settings.rows: the overlay's setup tips and the wizard's card facts
 //! travel with the binary.
 
 use std::fmt::Write as _;
