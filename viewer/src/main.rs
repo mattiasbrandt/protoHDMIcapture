@@ -21,6 +21,7 @@ mod live_changes;
 mod mjpeg;
 mod osd;
 mod overlay;
+mod pacing;
 mod pattern;
 mod picture;
 mod present;

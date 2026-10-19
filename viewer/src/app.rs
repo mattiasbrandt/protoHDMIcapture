@@ -31,10 +31,11 @@ use crate::keys::{self, Action};
 use crate::live_changes::LiveChanges;
 use crate::osd::{Osd, PageKind, Scene};
 use crate::overlay::{self, Notify, Overlay, Page};
+use crate::pacing::{Pacing, Waiting};
 use crate::picture::{self, Colour};
 #[cfg(target_os = "linux")]
 use crate::present::Presentation;
-use crate::present::{self, Feedback, Tag};
+use crate::present::{Feedback, Tag};
 use crate::run::{End, Host, Outcome, Plan, Quit, Slot, Wake, Waker};
 use crate::scale::{self, Axis, Filter};
 use crate::screenshot::Screenshot;
@@ -43,21 +44,9 @@ use crate::sources;
 use crate::stats::Stats;
 use crate::wizard::Wizard;
 
-/// A frame callback this late counts as lost: pacing stops waiting for it.
-const PACE_TIMEOUT: Duration = Duration::from_millis(100);
-/// A held frame this fresh goes out on the compositor's frame callback
-/// instead of waiting to be replaced: it came within the capture's jitter
-/// of the callback. With none, every phase crossing of the capture and
-/// display clocks (one each ~37 s at 60.00 against 59.97 Hz) dropped
-/// frames in bursts, about 4.7 % of them; 5 ms leaves about one per two
-/// minutes for 3.5 ms more latency (MS2130, 2026-10-16, decided with the
-/// user).
-const HOLD: Duration = Duration::from_millis(5);
 /// How long a new dashboard has to map (`Desktop::move_dashboard`'s wait):
 /// d meanwhile starts no second one.
 const DASHBOARD_MAPS: Duration = Duration::from_secs(3);
-/// How often the device is polled while a screenshot comes back.
-const READBACK_POLL: Duration = Duration::from_millis(10);
 
 /// WINDOW and WINDOW_SIZE.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,23 +237,16 @@ struct App {
     /// Messages from other threads, taken on `UserEvent::Notice`.
     notices: Arc<Mutex<Vec<(String, Duration)>>>,
     notify: Notify,
-    /// Draw again without a new frame (the overlay changed).
-    repaint: bool,
-    /// A card frame came on this wake (`about_to_wait` sends it).
-    arrived: bool,
     /// When d last started a dashboard (`DASHBOARD_MAPS`).
     dashboard_opened: Option<Instant>,
     /// LEVELS or a colour value changed: convert the last frame again on a
     /// repaint, so a frozen feed shows it too.
     reconvert: bool,
-    /// When the overlay next changes on its own.
-    deadline: Option<Instant>,
     /// The window placement worker, once started.
     placer: Option<std::sync::mpsc::Sender<Placement>>,
     modifiers: ModifiersState,
-    stats: Stats,
-    in_flight: u32,
-    last_submit: Duration,
+    /// When to draw and wake (pacing.rs), and the presentation numbers.
+    pacing: Pacing,
     /// The run's end (run.rs): set here when the window closes or fails.
     end: End,
 }
@@ -485,22 +467,17 @@ impl Host for Winit {
             window_no,
             frame_wake: self.frame_wake.clone(),
             format,
-            stats: Stats::new(start, opts.stats, opts.live.clone()),
+            pacing: Pacing::new(start, format.fps, Stats::new(start, opts.stats, opts.live.clone())),
             overlay: Overlay::new(&opts.source, Instant::now()),
             notices,
             notify,
-            repaint: false,
-            arrived: false,
             dashboard_opened: None,
             reconvert: false,
-            deadline: None,
             placer: None,
             modifiers: ModifiersState::empty(),
             opts,
             slot: slot.clone(),
             gfx: None,
-            in_flight: 0,
-            last_submit: start,
             end: end.clone(),
         };
         let delay_ms = app.delay_ms();
@@ -513,7 +490,7 @@ impl Host for Winit {
         }
         if app.opts.stats {
             let superseded = slot.lock().expect("the slot's lock is never poisoned").superseded;
-            app.stats.summary(superseded);
+            app.pacing.stats().summary(superseded);
         }
     }
 }
@@ -570,7 +547,7 @@ fn feedback(_: &Window) -> Result<Option<Box<dyn Feedback>>, String> {
 /// presents timed, paced by DX12's waitable swapchain as before.
 #[cfg(windows)]
 fn frame_statistics(surface: &wgpu::Surface) -> Option<Box<dyn Feedback>> {
-    match present::FrameStatistics::new(surface) {
+    match crate::present::FrameStatistics::new(surface) {
         Some(f) => Some(Box::new(f)),
         None => {
             eprintln!("note: no DXGI swapchain to time presents by; frames are paced by the swapchain only");
@@ -914,7 +891,7 @@ impl App {
             let u = self.opts.live_changes.picture().uniform(self.format.width, self.format.height, self.format.coding());
             gfx.queue.write_buffer(&gfx.picture_buffer, 0, &picture::bytes(&u));
         }
-        self.repaint = true;
+        self.pacing.repaint();
         self.reconvert = true;
     }
 
@@ -986,7 +963,7 @@ impl App {
             }
             Action::Picture(colour, by) => self.adjust_colour(colour, by),
         }
-        self.repaint = true;
+        self.pacing.repaint();
         false
     }
 
@@ -998,11 +975,8 @@ impl App {
             w.borrow_mut().signal(&s);
         }
         // Back after no signal: the refreshes without frames are no repeats.
-        if s == Signal::Picture && matches!(self.overlay.signal, Signal::NoSignal { .. }) {
-            self.stats.picture_back();
-        }
+        self.pacing.signal(&s);
         self.overlay.signal = s;
-        self.repaint = true;
     }
 
     /// Another thread's wake (`Notify`): a loopback that died is said
@@ -1015,7 +989,7 @@ impl App {
         for (text, for_) in self.notices.lock().expect("the notices' lock is never poisoned").drain(..) {
             self.overlay.message(text, for_, now);
         }
-        self.repaint = true;
+        self.pacing.repaint();
     }
 
     /// The loopback runs: its delay in ms.
@@ -1036,7 +1010,7 @@ impl App {
         // (not mapped yet, so not listed).
         if self.dashboard_opened.is_some_and(|t| now.duration_since(t) < DASHBOARD_MAPS) {
             self.overlay.message("The debug dashboard is opening", Duration::from_millis(1500), now);
-            self.repaint = true;
+            self.pacing.repaint();
             return;
         }
         let before = match self.opts.desktop.dashboards() {
@@ -1050,7 +1024,7 @@ impl App {
             && self.opts.desktop.focus_window(open)
         {
             self.overlay.message("The debug dashboard is open", Duration::from_millis(1500), now);
-            self.repaint = true;
+            self.pacing.repaint();
             return;
         }
         match crate::dashboard::open(Some(self.notify.clone())) {
@@ -1066,7 +1040,7 @@ impl App {
                 self.overlay.message(format!("Dashboard: {e}"), Duration::from_secs(3), now);
             }
         }
-        self.repaint = true;
+        self.pacing.repaint();
     }
 
     /// f: the next display mode, through the toolkit and then the desktop
@@ -1096,7 +1070,7 @@ impl App {
         if self.overlay.page.is_none() {
             self.overlay.message(format!("Display: {}", mode.names().1), Duration::from_millis(1500), Instant::now());
         }
-        self.repaint = true;
+        self.pacing.repaint();
     }
 
     /// The desktop adapter's part of the current mode, off this thread (it
@@ -1236,15 +1210,9 @@ impl App {
         })
     }
 
-    /// Whether `about_to_wait` sends now: a frame came on this wake, the
-    /// overlay changed, or a held frame is fresh (`HOLD`) or overdue (held
-    /// for longer than one and a half frame times: the next one is late).
-    /// One in between waits for the next card frame to replace it.
-    fn send_now(&self) -> bool {
-        let slot = self.slot.lock().expect("the slot's lock is never poisoned");
-        let held = slot.tag.map(|t| now_monotonic().saturating_sub(t.dequeued));
-        let overdue = Duration::from_secs_f64(1.5 / self.format.fps.max(1.0));
-        self.arrived || self.repaint || held.is_some_and(|age| age < HOLD || age > overdue)
+    /// When the held card frame, if any, was dequeued.
+    fn held(&self) -> Option<Duration> {
+        self.slot.lock().expect("the slot's lock is never poisoned").tag.map(|t| t.dequeued)
     }
 
     fn drain(&mut self) -> Result<(), String> {
@@ -1257,32 +1225,22 @@ impl App {
         if let Some(timer) = gfx.timer.as_mut()
             && let Some([convert, scale]) = timer.take()?
         {
-            self.stats.gpu(convert, scale);
+            self.pacing.stats().gpu(convert, scale);
         }
         let Some(feedback) = gfx.feedback.as_mut() else { return Ok(()) };
         for o in feedback.drain()? {
-            match o {
-                present::Outcome::Presented { tag, at, refresh, flags } => self.stats.presented(tag, at, refresh, flags),
-                present::Outcome::Discarded => self.stats.discarded(),
-                present::Outcome::FrameDone => self.in_flight = self.in_flight.saturating_sub(1),
-            }
+            self.pacing.feedback(o);
         }
         Ok(())
     }
 
     /// Uploads the newest frame and presents it, now; paced, only once the
-    /// compositor has taken the previous one (its frame callback). Meanwhile
-    /// the slot keeps only the newest frame.
+    /// compositor has taken the previous one (pacing.rs). Meanwhile the
+    /// slot keeps only the newest frame.
     fn render(&mut self) -> Result<(), String> {
         let paced = self.gfx.as_ref().and_then(|g| g.feedback.as_ref()).is_some_and(|f| f.paces());
-        if paced && self.in_flight > 0 {
-            if now_monotonic() - self.last_submit < PACE_TIMEOUT {
-                return Ok(());
-            }
-            self.stats.pace_timeout();
-            self.in_flight = 0;
-        }
-        if self.gfx.as_ref().is_none_or(|g| g.hidden) {
+        let hidden = self.gfx.as_ref().is_none_or(|g| g.hidden);
+        if !self.pacing.may_present(now_monotonic(), paced, hidden) {
             return Ok(());
         }
         // Built before the frame is taken: it reads the app's state.
@@ -1297,7 +1255,7 @@ impl App {
                 }
                 // Nothing new from the card, but the overlay changed: the
                 // last frame (black before the first) drawn again.
-                None if self.repaint => {
+                None if self.pacing.repaint_wanted() => {
                     let now = now_monotonic();
                     Tag { captured: now, dequeued: now, repaint: true }
                 }
@@ -1310,17 +1268,17 @@ impl App {
         let frame = match gfx.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                self.stats.not_acquired();
+                self.pacing.stats().not_acquired();
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 gfx.surface.configure(&gfx.device, &gfx.config);
-                self.stats.not_acquired();
+                self.pacing.stats().not_acquired();
                 return Ok(());
             }
             other => return Err(format!("get_current_texture: {other:?}")),
         };
-        self.stats.acquired(now_monotonic() - acquire_start);
+        self.pacing.stats().acquired(now_monotonic() - acquire_start);
 
         let (w, h) = (self.format.width, self.format.height);
         if new_frame {
@@ -1448,14 +1406,9 @@ impl App {
         }
         gfx.window.pre_present_notify();
         gfx.queue.present(frame);
-        self.in_flight += 1;
-        self.last_submit = now_monotonic();
-        self.repaint = false;
+        self.pacing.presented(now_monotonic(), new_frame);
         if convert {
             self.reconvert = false;
-        }
-        if new_frame {
-            self.stats.submitted();
         }
         self.drain()
     }
@@ -1472,7 +1425,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.relayout();
                 // Drawn at once, card frame or not: on Wayland a window maps
                 // with its first buffer, and the key bar shows from the start.
-                self.repaint = true;
+                self.pacing.repaint();
                 // As view.sh's place job: the start mode, finished.
                 self.place_window();
             }
@@ -1496,7 +1449,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(w) = &self.opts.wizard {
                     w.borrow_mut().frame(Instant::now());
                 }
-                self.arrived = true;
+                self.pacing.arrived();
                 Ok(())
             }
             What::Run(Wake::Signal(s)) => {
@@ -1546,7 +1499,7 @@ impl ApplicationHandler<UserEvent> for App {
                         gfx.surface.configure(&gfx.device, &gfx.config);
                         self.relayout();
                         // The new size drawn even without a card frame.
-                        self.repaint = true;
+                        self.pacing.repaint();
                     }
                 }
             }
@@ -1555,15 +1508,10 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Something shown changed on its own (a message went, the banner
-        // came): draw again even without a frame.
-        if self.deadline.is_some_and(|d| d <= Instant::now()) {
-            self.repaint = true;
-        }
         if let Some(w) = &self.opts.wizard
             && w.borrow_mut().tick(Instant::now())
         {
-            self.repaint = true;
+            self.pacing.repaint();
         }
         // Feedback may have freed the way for a frame that had to wait: one
         // that came on this wake, a fresh one, or one overdue (the card
@@ -1571,37 +1519,25 @@ impl ApplicationHandler<UserEvent> for App {
         // the next card frame replaces a stale one. Sending every one there
         // kept each later frame a refresh behind (kernel -> presented 55 ms,
         // not 41; the wake comes here under WaitUntil, 2026-10-16).
-        let send = self.send_now();
-        self.arrived = false;
+        let send = self.pacing.wake(now_monotonic(), self.held());
         if let Err(e) = self.drain().and_then(|()| if send { self.render() } else { Ok(()) }) {
             self.fail(event_loop, e);
         }
-        // Wake for the next change, and while a repaint waits on pacing
-        // (no frame from the card may come to wake us); not while the
-        // window has no area, which nothing is drawn into.
+        // The next change of the overlay or the wizard's page, as a delay
+        // from now: pacing's clock is the capture's.
         let now = Instant::now();
-        self.deadline = self.overlay.next_change(now);
+        let mut page = self.overlay.next_change(now);
         if let Some(w) = self.opts.wizard.as_ref().and_then(|w| w.borrow().next_change(now)) {
-            self.deadline = Some(self.deadline.map_or(w, |d| d.min(w)));
+            page = Some(page.map_or(w, |d| d.min(w)));
         }
-        let hidden = self.gfx.as_ref().is_some_and(|g| g.hidden);
-        // A card frame held back by pacing: if the card stops now, nothing
-        // else would wake the loop for it.
-        let held = self.slot.lock().expect("the slot's lock is never poisoned").tag.is_some();
-        // A screenshot on its way back is taken by polling the device.
-        let reading = self.gfx.as_ref().is_some_and(|g| g.screenshot.reading());
-        let soon = if reading {
-            Some(now + READBACK_POLL)
-        } else if (self.repaint || held) && !hidden {
-            Some(now + PACE_TIMEOUT)
-        } else {
-            None
+        let waiting = Waiting {
+            page: page.map(|d| d.saturating_duration_since(now)),
+            held: self.held().is_some(),
+            hidden: self.gfx.as_ref().is_some_and(|g| g.hidden),
+            reading: self.gfx.as_ref().is_some_and(|g| g.screenshot.reading()),
         };
-        let wake = match (self.deadline, soon) {
-            (Some(d), Some(s)) => Some(d.min(s)),
-            (d, s) => d.or(s),
-        };
-        event_loop.set_control_flow(wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+        let wake = self.pacing.next_wake(now_monotonic(), waiting);
+        event_loop.set_control_flow(wake.map_or(ControlFlow::Wait, |in_| ControlFlow::WaitUntil(now + in_)));
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
@@ -1644,16 +1580,11 @@ mod tests {
             overlay: Overlay::new("ps5", Instant::now()),
             notices: Arc::default(),
             notify: Arc::new(|_| {}),
-            repaint: false,
-            arrived: false,
             dashboard_opened: None,
             reconvert: false,
-            deadline: None,
             placer: None,
             modifiers: ModifiersState::empty(),
-            stats: Stats::new(Duration::ZERO, false, Arc::new(crate::dashboard::Live::new())),
-            in_flight: 0,
-            last_submit: Duration::ZERO,
+            pacing: Pacing::new(Duration::ZERO, format.fps, Stats::new(Duration::ZERO, false, Arc::new(crate::dashboard::Live::new()))),
             end: End::new(Arc::new(|_| {})),
             opts: Options {
                 live_changes,
@@ -1730,55 +1661,6 @@ mod tests {
     }
 
     #[test]
-    fn a_held_frame_waits_for_the_next_one_unless_it_is_fresh_or_overdue() {
-        // Sent on the compositor's frame callback alone, a held frame kept
-        // every later one a refresh behind (55 ms kernel -> presented, not
-        // 41, on the MS2130 2026-10-16): the next card frame replaces it.
-        let (mut app, _) = app_with("# held frame\n");
-        let held = |app: &App, ago: Duration| {
-            let at = now_monotonic().saturating_sub(ago);
-            app.slot.lock().unwrap().tag = Some(Tag { captured: at, dequeued: at, repaint: false });
-        };
-        held(&app, Duration::from_millis(2));
-        assert!(app.send_now(), "within HOLD of the callback: sent, not dropped");
-        held(&app, Duration::from_millis(10));
-        assert!(!app.send_now(), "a stale held frame waits for the next");
-        app.arrived = true;
-        assert!(app.send_now(), "a frame that came on this wake goes out");
-        app.arrived = false;
-        app.repaint = true;
-        assert!(app.send_now(), "an overlay change goes out");
-        app.repaint = false;
-        held(&app, Duration::from_millis(30));
-        assert!(app.send_now(), "past 1.5 frame times (25 ms at 60 fps) the card has stopped: sent alone");
-    }
-
-    #[test]
-    fn the_refreshes_without_a_picture_are_not_counted_as_repeats() {
-        // The laptop (#40): "repeated refreshes 1614" after the picture was
-        // gone. The last presents' outcomes before it came in after the
-        // no-signal state, with their earlier times; the first present after
-        // the return counted every refresh since. An HDMI pull, here.
-        let (mut app, _) = app_with("# repeats\n");
-        let live = Arc::new(crate::dashboard::Live::new());
-        app.stats = Stats::new(Duration::ZERO, false, live.clone());
-        let refresh = Duration::from_micros(16_681);
-        let present = |app: &mut App, at: Duration| {
-            let tag = Tag { captured: at - Duration::from_millis(30), dequeued: at - Duration::from_millis(20), repaint: false };
-            app.stats.presented(tag, at, refresh, 0);
-        };
-        let at = Duration::from_secs;
-        present(&mut app, at(1));
-        app.signal(Signal::NoSignal { since: crate::capture::Since::Stopped, reason: crate::capture::Reason::Nothing });
-        // An outcome arriving after the no-signal state, from before it.
-        present(&mut app, at(1) + refresh);
-        app.signal(Signal::Picture);
-        present(&mut app, at(26));
-        present(&mut app, at(26) + refresh);
-        assert_eq!(live.counts().repeated, 0);
-    }
-
-    #[test]
     fn the_audio_keys_and_the_panel_go_through_the_loopback() {
         // What happens to the loopback is audio.rs's (#42): here, that the
         // window passes the keys and the wake on, and shows its status.
@@ -1828,11 +1710,11 @@ mod tests {
         assert_eq!(app.overlay.page, Some(Page::Tips));
         assert!(press(&mut app, "Esc"));
         assert_eq!(app.overlay.page, None);
-        assert!(app.repaint, "every change draws again");
-        app.repaint = false;
+        assert!(app.pacing.repaint_wanted(), "every change draws again");
+        app.pacing.drew();
         app.reconvert = false;
         assert!(press(&mut app, "2"));
-        assert!(app.repaint && app.reconvert, "a colour key redraws a frozen frame converted again");
+        assert!(app.pacing.repaint_wanted() && app.reconvert, "a colour key redraws a frozen frame converted again");
 
         // f: the panel's Display line and w's WINDOW follow it.
         press(&mut app, "Tab");

@@ -123,6 +123,11 @@ impl Stats {
         self.pace_timeouts += 1;
     }
 
+    #[cfg(test)]
+    pub fn pace_timeouts(&self) -> u64 {
+        self.pace_timeouts
+    }
+
     pub fn not_acquired(&mut self) {
         self.not_acquired += 1;
     }
