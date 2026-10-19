@@ -1,9 +1,9 @@
-# Installing the Rust viewer
+# Installing protoHDMIcapture
 
-The Rust viewer (`protohdmicapture`, in `viewer/`) is the viewer the
-releases ship; `view.sh` + mpv, run from a checkout, is the older
-alternative ([docs/view-sh.md](../docs/view-sh.md)). Both read the same
-settings file, `~/.config/protohdmicapture/config`.
+protoHDMIcapture (`protohdmicapture`, in `viewer/`) is what the releases
+ship. protoHDMIcapture legacy, `view.sh` + mpv run from a checkout, is a
+best-effort alternative ([legacy/README.md](../legacy/README.md)). Both read
+the same settings file, `~/.config/protohdmicapture/config`.
 With no settings file, it opens the setup wizard in its window.
 
 On Linux it needs a Wayland desktop with a Vulkan driver, and PipeWire for

@@ -1,6 +1,6 @@
-//! The session's share of view.sh's run directory (docs/run-dir.md): one
-//! video window at a time across both viewers, and refresh matching that
-//! a view.sh started meanwhile cannot undo under us.
+//! The session's share of the run directory (docs/run-dir.md): one video
+//! window at a time across protoHDMIcapture and legacy's view.sh, and
+//! refresh matching that a view.sh started meanwhile cannot undo under us.
 //!
 //! - `video.lock`: flock held for the whole run, the same lock view.sh
 //!   takes (`take_video_lock`). Held by another session: that window is

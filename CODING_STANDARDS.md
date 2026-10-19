@@ -11,25 +11,25 @@ Rules for reviewing a change to this repo. Mechanical ones are enforced by
    ownership (its parent is your child) before signalling; a PID read from
    the shared run directory may belong to another session. See
    [`docs/run-dir.md`](docs/run-dir.md). One exception: an orphan a killed
-   session left running (`view.sh` `kill_orphan`, and the Rust viewer's
-   in `viewer/src/session.rs`), signalled only while
+   session left running (legacy's `view.sh` `kill_orphan`, and
+   protoHDMIcapture's in `viewer/src/session.rs`), signalled only while
    holding the lock its session held, and only if it is the user's own and
    its command line is ours.
 3. **A setting whose empty value means something carries the `empty` flag**
-   in `lib/settings.sh` (`IPC=` disables the socket). Without it, an empty
+   in `settings.rows` (`IPC=` disables the socket). Without it, an empty
    value counts as unset and falls back to the saved setting, then the
    default. Outside the settings, the same rule: `${X-default}` when empty
    means something, `${X:-default}` only when it should mean the default.
 4. **Cleanup reaches every path.** Anything a session starts (player,
    loopback, refresh switch, preview feed) is undone from its EXIT trap
-   (the Rust viewer: `Drop`), and
+   (protoHDMIcapture: `Drop`), and
    a background job is stopped explicitly: it ignores SIGINT.
 5. **A lock stays with the script that holds it.** `exec {fd}>` is inherited
    by every child, so each child closes the script's lock fds first:
    players, background helpers, process substitutions (a stderr filter or
    a `tee` lives as long as the pipe it reads), and the wizard's children
    (`setup.lock`). A child that outlives its parent keeps the lock held
-   otherwise. view.sh: `_close_locks`; the wizard: `run_child`.
+   otherwise. Legacy's view.sh: `_close_locks`; its wizard: `run_child`.
 6. **A record is written or removed after what it records.** A file that
    says something is up (`audio.env`) is written once it is checked, and
    a check that fails comes before it, before any announcing line and

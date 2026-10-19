@@ -5,9 +5,12 @@ with unstaged or untracked changes, a copy in `.git/precommit-tree`) plus
 real runs against the card.
 `tools/check` includes `tools/harness/`: hardware-free checks of the
 functions behind past defects. Fixing one that a stand-in can reach, add a
-harness there (`lib.sh` lifts functions out of view.sh and lib/setup.sh,
-which run when sourced), and make it fail with the bug put back before
-trusting it. Below: the traps that produce false results on real runs.
+harness or a test, and make it fail with the bug put back before trusting
+it. protoHDMIcapture legacy's harnesses are in `legacy/tests/`
+(`lib.sh` there lifts functions out of view.sh and lib/setup.sh, which run
+when sourced); no check runs them (ADR 0002). Below: the traps that
+produce false results on real runs; the ones that name view.sh, mpv,
+gst or ffplay are legacy's.
 
 ## Before a run
 
@@ -42,10 +45,11 @@ trusting it. Below: the traps that produce false results on real runs.
 
 ## Driving the interactive parts
 
-- **The wizard** reads a terminal, so run it in a pty and pipe the answers:
+- **Legacy's wizard** reads a terminal, so run it in a pty and pipe the
+  answers:
 
   ```bash
-  printf '\n\n\n...y\n' | CONFIG_FILE=$scratch timeout 60 script -qec './view.sh --setup' out.ts >/dev/null
+  printf '\n\n\n...y\n' | CONFIG_FILE=$scratch timeout 60 script -qec 'legacy/view.sh --setup' out.ts >/dev/null
   ```
 
   Count the answers against the stages actually shown. The card stage asks
@@ -55,7 +59,7 @@ trusting it. Below: the traps that produce false results on real runs.
   timeout rather than failing: a "hang" usually means one answer too few.
 - **Keys in the mpv window** go through its IPC socket:
   `echo '{"command":["keypress","f"]}' | socat - /tmp/mpv-protohdmicapture.sock`.
-- **Keys in the Rust viewer's window** have no socket: focus it, then type.
+- **Keys in protoHDMIcapture's window** have no socket: focus it, then type.
   Omarchy's Hyprland takes Lua dispatches only, and the old
   `dispatch focuswindow` form fails without a word:
 
@@ -85,8 +89,8 @@ trusting it. Below: the traps that produce false results on real runs.
   back to 100 % before finishing.
 - **The menu path**: `gtk-launch protohdmicapture`. A stand-in
   `xdg-terminal-exec` first on `PATH` can run the wizard with scripted answers.
-  The repo's own entry (`desktop/`, the one installed here) runs `launch.sh`
-  (view.sh); packaging's runs `protohdmicapture --menu`. Reach that path the
+  Legacy's entry (`legacy/desktop/`) runs `legacy/launch.sh` (view.sh);
+  packaging's runs `protohdmicapture --menu`. Reach that path the
   way a menu starts it: `setsid protohdmicapture --menu </dev/null >log 2>&1 &`
   (no terminal, so it notifies).
 - **A new window takes the fullscreen** of a fullscreen viewer on its
@@ -152,10 +156,11 @@ and `hyprctl monitors -j` shows the original refresh rate.
 ## Stand-ins and inspection
 
 - **A missing tool:** a `PATH` of symlinks to every `/usr/bin` program but
-  that one (`tools/harness/preflight.sh` builds one with just the tools it
+  that one (`legacy/tests/preflight.sh` builds one with just the tools it
   wants).
 - **A tool that misbehaves:** a directory first on `PATH` with a script of
   the same name, e.g. a `pw-loopback` that exits at once or never links, or
-  a `hyprctl` whose `eval` fails (`tools/harness/refresh-record.sh`).
+  a `hyprctl` whose `eval` fails (`legacy/tests/refresh-record.sh`;
+  `viewer/src/desktop.rs`'s tests do the same for protoHDMIcapture).
 - **Who holds a lock:** `fuser -v $XDG_RUNTIME_DIR/protohdmicapture/*.lock`.
   A scan of `/proc/*/fd` takes over a minute.

@@ -42,7 +42,7 @@ taken with a PS5, the MS2130 and the MS2109. Nothing in it is PS5-specific.
 - [Debugging and the dashboard](#debugging-and-the-dashboard)
 - [Capture cards and sources](#capture-cards-and-sources)
 - [Troubleshooting](#troubleshooting)
-- [The script viewer (view.sh)](#the-script-viewer-viewsh)
+- [protoHDMIcapture legacy (view.sh)](#protohdmicapture-legacy-viewsh)
 - [Development](#development)
 - [License](#license)
 
@@ -195,7 +195,8 @@ wizard writes it, and so does **w** in the overlay. `--settings` shows every
 value, where it came from, and whether it is valid; a value out of bounds
 stops the run with a message naming it.
 
-`lib/settings.sh` holds one row per setting, shared by both viewers.
+[`settings.rows`](settings.rows) holds one row per setting; protoHDMIcapture
+legacy reads the same rows.
 
 ### The settings worth knowing
 
@@ -210,20 +211,20 @@ stops the run with a message naming it.
 | `SINK` | — | the output to play it on; default: the desktop's default output, followed when it changes |
 | `RES` | `1920x1080` | capture size; the wizard picks it from the card's own modes |
 | `FPS` | `60` | capture frame rate; also what `REFRESH=match` matches |
-| `FMT` | `yuyv422` | capture format: `yuyv422` (uncompressed) or `mjpeg`. `nv12` and `rawvideo` are view.sh only |
+| `FMT` | `yuyv422` | capture format: `yuyv422` (uncompressed) or `mjpeg`. `nv12` and `rawvideo` are legacy only |
 | `DELAY` | `0.05` | the audio sync in seconds, 0 to 1; **ctrl/alt −/+** tune it live, **w** saves it |
 | `LAT_MS` | `10` | the audio loopback's buffer in ms; raise it if the sound crackles |
-| `AUDIO` | `loopback` | `loopback`, or `none` for no sound; `mpv` is view.sh only |
+| `AUDIO` | `loopback` | `loopback`, or `none` for no sound; `mpv` is legacy only |
 | `WINDOW` | `fullscreen` | `fullscreen`, `borderless` or `windowed` (see below); **f** cycles it |
 | `WINDOW_SIZE` | `1280x720` | the window's size when windowed |
 | `REFRESH` | `keep` | `match` switches the monitor to its refresh nearest `FPS` for the session and restores it after (Hyprland) |
-| `SCALING` | `balanced` | `balanced` (spline36 or mitchell), `fast` (bilinear, the least GPU time, softer) or `high-quality` (EWA Lanczos upscale, more GPU time); `config` is view.sh's mpv.conf, read as balanced here. **c** cycles it |
+| `SCALING` | `balanced` | `balanced` (spline36 or mitchell), `fast` (bilinear, the least GPU time, softer) or `high-quality` (EWA Lanczos upscale, more GPU time); `config` is legacy's mpv.conf, read as balanced here. **c** cycles it |
 | `LEVELS` | `auto` | the range of the card's frames: `limited` or `full` if blacks look crushed or washed out. `auto` reads YUYV as limited and MJPEG as full |
 | `BRIGHTNESS`, `CONTRAST`, `SATURATION`, `GAMMA` | `0` | colour adjustments, -100 to 100; keys **1**–**8** change them, **w** saves them |
 | `DEBUG` | `off` | `log` or `window`; see [Debugging](#debugging-and-the-dashboard). `--debug` is `window` for one run |
-| `BACKEND` | `mpv` | view.sh's player: `mpv`, or `gst` and `ffplay` for comparisons; the Rust viewer refuses the last two |
-| `IPC` | `/tmp/mpv-protohdmicapture.sock` | view.sh only: mpv's IPC socket |
-| `GST_IO_MODE` | `mmap` | view.sh's gst only: `mmap` or `dmabuf` |
+| `BACKEND` | `mpv` | legacy's player: `mpv`, or `gst` and `ffplay` for comparisons; protoHDMIcapture refuses the last two |
+| `IPC` | `/tmp/mpv-protohdmicapture.sock` | legacy only: mpv's IPC socket |
+| `GST_IO_MODE` | `mmap` | legacy's gst only: `mmap` or `dmabuf` |
 | `FULLSCREEN` | — | deprecated: `yes` is `WINDOW=fullscreen`, `no` is `WINDOW=windowed` |
 
 ## Display modes and refresh
@@ -315,34 +316,33 @@ How long a frame really takes, glass to glass: film the card's loop-out
 display and the viewer side by side at 240 fps and count the frames
 between them.
 
-## The script viewer (view.sh)
+## protoHDMIcapture legacy (view.sh)
 
-`view.sh` is the original viewer, bash around mpv and `pw-loopback`, Linux
-only, run from this checkout. It reads the same settings file, so it plays
-the same setup; it is kept as an alternative until the Rust viewer replaces
-it everywhere. Its players, its menu entry and its own troubleshooting are
-in [docs/view-sh.md](docs/view-sh.md).
-
-```bash
-./view.sh            # the feed; the first run offers the wizard in the terminal
-./view.sh --help     # every flag
-```
+The original edition, bash around mpv and `pw-loopback`, Linux only, run
+from this checkout's `legacy/`. It reads the same settings file, so it plays
+the same setup. It is kept best effort: nothing checks it beyond lint, and
+it may lag behind or break
+([ADR 0002](docs/adr/0002-legacy-kept-best-effort.md)). How to run it, its
+players, its menu entry and its own troubleshooting:
+[legacy/README.md](legacy/README.md).
 
 ## Development
 
 | Path | What it is |
 |---|---|
-| `viewer/` | the Rust viewer |
-| `capture-cards/`, `sources/` | capture card profiles and source profiles, read by both viewers |
-| `view.sh`, `launch.sh`, `lib/`, `desktop/` | the script viewer |
+| `viewer/` | protoHDMIcapture, the Rust program |
+| `settings.rows` | the settings table: names, defaults, ranges, flags |
+| `capture-cards/`, `sources/` | capture card profiles and source profiles, read by protoHDMIcapture and legacy |
+| `legacy/` | protoHDMIcapture legacy: `view.sh`, `launch.sh`, `lib/`, `desktop/`, its harnesses |
 | `packaging/` | the Linux release archive, the Windows installer, the icons |
 | `tools/` | `check`, the hardware-free harnesses, the lost-frame simulation, fixtures |
 | `docs/` | testing, the run directory, the capture card table, ADRs, research |
 | `assets/brand/` | the logo and the social preview |
 
 - `tools/check` runs every check: lint, syntax, consistency between code
-  and docs, the Rust viewer's build, tests and clippy (for Windows too,
-  with the `x86_64-pc-windows-msvc` target), and the harnesses. CI runs it
+  and docs, protoHDMIcapture's build, tests and clippy (for Windows too,
+  with the `x86_64-pc-windows-msvc` target), and the harnesses in
+  `tools/harness/`; legacy gets lint and syntax only. CI runs it
   on every push; `git config core.hooksPath .githooks` runs it before each
   commit.
 - [docs/testing.md](docs/testing.md) lists the traps that fake failures in

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The Linux release archive (#14): the Rust viewer's binary with its desktop
+# The Linux release archive (#14): protoHDMIcapture's binary with its desktop
 # entry, icon, licenses and the data files, for a distro without a package.
 # The profiles in capture-cards/ and sources/ are built into the binary
 # (viewer/build.rs); the archive carries them as documentation.

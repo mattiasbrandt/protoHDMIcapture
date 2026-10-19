@@ -31,9 +31,9 @@ OWNERSHIP
   theory that involves them; report the theory instead.
 
 THE WORK
-- Read the source of truth every time: the crate's source, the bash it
-  mirrors (`lib/`, `view.sh`), the registry for any crate name. Resolve a
-  dependency against crates.io before it enters `Cargo.toml`.
+- Read the source of truth every time: the crate's source, legacy's bash
+  where a rule came from it (`legacy/`), the registry for any crate name.
+  Resolve a dependency against crates.io before it enters `Cargo.toml`.
 - The source is the deliverable. New code is wired in and called; the code it
   replaces is deleted, not left beside it; every call site is moved.
 - No swallowed errors: every error path handles or propagates.
