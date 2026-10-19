@@ -1,20 +1,27 @@
 # The release packages (#14). A v* tag:
-#   draft    checks the tag is v<viewer/Cargo.toml's version> (the assets are
-#            named by it), then creates the GitHub release as a draft, or
-#            finds the draft on a re-run; a published release is refused;
-#   archive  builds the Linux archive (packaging/release-archive.sh, on Arch);
-#   msi      builds the Windows installer (packaging/windows/build-msi.ps1:
-#            WiX 7, ICE validation) and smoke-tests it (test-msi.ps1: install,
-#            check, uninstall) on Windows;
-#   publish  adds SHA256SUMS over every asset and publishes the release.
+#   draft         checks the tag is v<viewer/Cargo.toml's version> (the
+#                 assets are named by it), then creates the GitHub release as
+#                 a draft, or finds the draft on a re-run; a published
+#                 release is refused;
+#   archive       builds the Linux archive (packaging/release-archive.sh) on
+#                 Ubuntu 22.04, so the binary needs glibc 2.35 at most, and
+#                 fails if it needs more;
+#   archive-test  installs and runs the archive on each distro below;
+#   msi           builds the Windows installer (packaging/windows/
+#                 build-msi.ps1: WiX 7, ICE validation) and smoke-tests it
+#                 (test-msi.ps1: install, check, uninstall) on Windows;
+#   publish       uploads the archive, adds SHA256SUMS over every asset and
+#                 publishes the release.
 # Nothing is public until every asset is in: a failed job leaves a draft,
 # and a re-run replaces a draft's assets (--clobber). A published release is
-# never changed: its files and SHA256SUMS are what users downloaded. The PKGBUILD and AUR half of
-# #14 stays by hand (updpkgsums, .SRCINFO, the AUR push).
-# Linux packages: the viewer's build (as check.yml), python3 for the
-# script's cargo-metadata parse, binutils for strip, github-cli for the
-# upload. Windows: the runner's Rust (latest stable), Visual Studio (link.exe;
-# rc.exe for the icon), .NET for WiX 7 as a dotnet tool, and gh.
+# never changed: its files and SHA256SUMS are what users downloaded.
+# Run by hand (workflow_dispatch) it builds and tests both packages and
+# releases nothing: draft, the MSI's upload and publish are skipped.
+# Linux packages: the viewer's build (clang for bindgen, pkg-config, the
+# development files of the libraries it links), python3 for the script's
+# cargo-metadata parse, binutils for strip and objdump. Windows: the
+# runner's Rust (latest stable), Visual Studio (link.exe; rc.exe for the
+# icon), .NET for WiX 7 as a dotnet tool, and gh.
 # WiX 7's Open Source Maintenance Fee EULA is accepted for this project in
 # build-msi.ps1 (see there).
 name: release
@@ -22,6 +29,7 @@ name: release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -32,6 +40,7 @@ env:
 
 jobs:
   draft:
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -59,18 +68,24 @@ jobs:
 
   archive:
     needs: draft
+    # Run by hand, draft is skipped and this runs all the same.
+    if: ${{ !cancelled() && (needs.draft.result == 'success' || needs.draft.result == 'skipped') }}
     runs-on: ubuntu-24.04
-    container: archlinux:latest
+    container: ubuntu:22.04
     timeout-minutes: 30
-    permissions:
-      contents: write
+    env:
+      # The oldest glibc the archive supports: Ubuntu 22.04's.
+      GLIBC_MAX: '2.35'
     steps:
       - name: Packages
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          pacman -Syu --noconfirm --needed \
-            git github-cli python binutils \
-            rustup gcc clang pkgconf \
-            libpipewire alsa-lib dbus wayland
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git python3 binutils \
+            build-essential clang pkg-config \
+            libpipewire-0.3-dev libasound2-dev libdbus-1-dev libwayland-dev
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -80,19 +95,76 @@ jobs:
 
       - name: Rust
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Archive
         run: packaging/release-archive.sh dist
 
-      - name: Upload
+      - name: glibc
+        run: |
+          tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP"
+          need=$(objdump -T "$RUNNER_TEMP"/protohdmicapture-*/bin/protohdmicapture | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' | sort -uV | tail -1)
+          echo "the binary needs glibc $need (at most $GLIBC_MAX)"
+          [ "$(printf '%s\n%s\n' "$need" "$GLIBC_MAX" | sort -V | tail -1)" = "$GLIBC_MAX" ]
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-archive
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  # The archive installed with its install.sh and run on each distro: the
+  # run-time libraries INSTALL.md names, nothing else. --help and
+  # --settings start no window, so no display or GPU is needed.
+  archive-test:
+    needs: archive
+    if: ${{ !cancelled() && needs.archive.result == 'success' }}
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['ubuntu:22.04', 'ubuntu:24.04', 'debian:12', 'fedora:latest', 'archlinux:latest']
+    steps:
+      - name: Run-time libraries
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" dist/*.tar.gz --clobber
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          # Exactly packaging/INSTALL.md's table, so its names are checked;
+          # findutils, tar and gzip for the steps below on Fedora.
+          if command -v apt-get >/dev/null; then
+            apt-get update
+            apt-get install -y --no-install-recommends libpipewire-0.3-0 libasound2 libdbus-1-3 libwayland-client0 libxkbcommon0 libvulkan1 mesa-vulkan-drivers
+          elif command -v dnf >/dev/null; then
+            dnf install -y pipewire-libs alsa-lib dbus-libs libwayland-client libxkbcommon vulkan-loader mesa-vulkan-drivers findutils tar gzip
+          else
+            pacman -Syu --noconfirm --needed libpipewire alsa-lib dbus wayland libxkbcommon vulkan-icd-loader vulkan-swrast
+          fi
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: linux-archive
+          path: dist
+
+      - name: Install, run, uninstall
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -xzf dist/*.tar.gz
+          cd protohdmicapture-*-linux
+          prefix="$RUNNER_TEMP/prefix"
+          ./install.sh "$prefix"
+          "$prefix/bin/protohdmicapture" --help
+          CONFIG_FILE="$RUNNER_TEMP/none" "$prefix/bin/protohdmicapture" --settings
+          ./install.sh --uninstall "$prefix"
+          left=$(find "$prefix" -type f | wc -l)
+          [ "$left" = 0 ] || { echo "uninstall left $left files"; exit 1; }
 
   msi:
     needs: draft
+    if: ${{ !cancelled() && (needs.draft.result == 'success' || needs.draft.result == 'skipped') }}
     runs-on: windows-2025
     timeout-minutes: 30
     permissions:
@@ -123,23 +195,31 @@ jobs:
         run: packaging/windows/test-msi.ps1 -Msi (Get-ChildItem dist/*.msi).FullName -Log "$env:RUNNER_TEMP/install.log"
 
       - name: Upload
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload $env:TAG (Get-ChildItem dist/*.msi).FullName --clobber
 
   publish:
-    needs: [archive, msi]
+    needs: [archive-test, msi]
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: write
     steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: linux-archive
+          path: assets
+
       - name: Checksums and publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir assets && cd assets
-          gh release download "$TAG" --pattern '*.tar.gz' --pattern '*.msi'
+          cd assets
+          gh release upload "$TAG" *.tar.gz --clobber
+          gh release download "$TAG" --pattern '*.msi'
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
           gh release upload "$TAG" SHA256SUMS --clobber
