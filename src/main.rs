@@ -162,20 +162,11 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
         eprintln!("warning: the wizard's feed: {w}");
     }
     let live_changes = live_changes.with_window(app::WindowMode::Windowed { width: 1280, height: 720 }, (1280, 720));
+    // Each feed window's numbers are its own, and nobody reads them.
     let opts = || app::Options {
-        live_changes: live_changes.clone(),
-        monitor: None,
-        seconds: None,
-        stats: false,
         audio: app::AudioSetup::Off("the wizard's".into()),
-        desktop: desktop::Desktop::Generic,
-        source: String::new(),
-        settings: None,
         wizard: Some(wiz.clone()),
-        // Each feed window's numbers are its own, and nobody reads them.
-        live: Arc::new(dashboard::Live::new()),
-        dashboard: None,
-        refocus: None,
+        ..app::Options::new(live_changes.clone(), Arc::new(dashboard::Live::new()))
     };
 
     let result = (|| -> Result<(), String> {
@@ -330,6 +321,36 @@ fn settings(menu: bool) -> Settings {
     if menu { s.with_menu_defaults() } else { s }
 }
 
+/// The viewer's own flags (USAGE): the measurement flags, the test
+/// pattern, and --debug.
+#[derive(Debug, Default, PartialEq)]
+struct Args {
+    seconds: Option<u64>,
+    monitor: Option<String>,
+    stats: bool,
+    test_pattern: bool,
+    /// As view.sh's: DEBUG=window, as if from the environment.
+    debug: bool,
+}
+
+/// None for anything USAGE does not allow: an unknown flag, a missing or
+/// non-numeric value.
+fn parse_args(args: &[String]) -> Option<Args> {
+    let mut a = Args::default();
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--seconds" => a.seconds = Some(it.next()?.parse().ok()?),
+            "--monitor" => a.monitor = Some(it.next()?.clone()),
+            "--stats" => a.stats = true,
+            "--test-pattern" => a.test_pattern = true,
+            "--debug" => a.debug = true,
+            _ => return None,
+        }
+    }
+    Some(a)
+}
+
 fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     // First run: no settings file, so the wizard, as view.sh offers it
     // (not for a measurement run, nor for the wizard's own children).
@@ -345,34 +366,8 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
 
     // The viewer's numbers, from here on: the dashboard serves these. The
     // wizard's feed windows (--setup, or the first run above) had their own.
-    let mut opts = app::Options {
-        live_changes: live_changes::LiveChanges::DEFAULT,
-        monitor: None,
-        seconds: None,
-        stats: false,
-        audio: app::AudioSetup::Off(String::new()),
-        desktop: desktop::Desktop::Generic,
-        source: String::new(),
-        settings: None,
-        wizard: None,
-        live: Arc::new(dashboard::Live::new()),
-        dashboard: None,
-        refocus: None,
-    };
-    let mut test_pattern = false;
-    let mut debug = false;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--seconds" => opts.seconds = Some(it.next().ok_or(USAGE)?.parse().map_err(|_| USAGE)?),
-            "--monitor" => opts.monitor = Some(it.next().ok_or(USAGE)?.clone()),
-            "--stats" => opts.stats = true,
-            "--test-pattern" => test_pattern = true,
-            // As view.sh's: DEBUG=window, as if from the environment.
-            "--debug" => debug = true,
-            _ => return Err(USAGE.into()),
-        }
-    }
+    let Args { seconds, monitor, stats, test_pattern, debug } = parse_args(args).ok_or(USAGE)?;
+    let mut opts = app::Options { seconds, monitor, stats, ..app::Options::new(live_changes::LiveChanges::DEFAULT, Arc::new(dashboard::Live::new())) };
 
     let s = if debug {
         Settings::resolve_with(&|k| if k == "DEBUG" { Some("window".into()) } else { env::var(k).ok() })
@@ -611,7 +606,29 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Fatal, Held, card, hold_prompt, holds_console, on_key};
+    use super::{Args, Fatal, Held, card, hold_prompt, holds_console, on_key, parse_args};
+
+    fn parse(args: &[&str]) -> Option<Args> {
+        parse_args(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn the_viewers_flags_parse_as_usage_says() {
+        assert_eq!(parse(&[]), Some(Args::default()));
+        assert_eq!(
+            parse(&["--seconds", "30", "--monitor", "DP-1", "--stats", "--test-pattern", "--debug"]),
+            Some(Args { seconds: Some(30), monitor: Some("DP-1".into()), stats: true, test_pattern: true, debug: true })
+        );
+        // The last of a repeated flag wins.
+        assert_eq!(parse(&["--seconds", "1", "--seconds", "2"]).unwrap().seconds, Some(2));
+    }
+
+    #[test]
+    fn a_flag_usage_does_not_allow_is_refused() {
+        for bad in [&["--seconds"][..], &["--seconds", "ten"], &["--seconds", "-1"], &["--monitor"], &["--bogus"], &["DP-1"]] {
+            assert_eq!(parse(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn a_held_console_offers_the_setup_only_for_the_missing_card() {

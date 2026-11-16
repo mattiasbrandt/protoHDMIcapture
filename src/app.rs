@@ -104,6 +104,28 @@ pub struct Options {
     pub refocus: Option<String>,
 }
 
+impl Options {
+    /// A window with these picture settings and dashboard numbers, and
+    /// nothing else: no measurement, no audio, the generic desktop, no
+    /// wizard. Callers set what differs with `..Options::new(..)`.
+    pub fn new(live_changes: LiveChanges, live: Arc<crate::dashboard::Live>) -> Self {
+        Options {
+            live_changes,
+            monitor: None,
+            seconds: None,
+            stats: false,
+            audio: AudioSetup::Off(String::new()),
+            desktop: Desktop::Generic,
+            source: String::new(),
+            settings: None,
+            wizard: None,
+            live,
+            dashboard: None,
+            refocus: None,
+        }
+    }
+}
+
 /// A job for the placement worker: the window's mode, and a dashboard to
 /// move off its monitor first (the windows there before it was started).
 struct Placement {
@@ -1587,18 +1609,10 @@ mod tests {
             pacing: Pacing::new(Duration::ZERO, format.fps, Stats::new(Duration::ZERO, false, Arc::new(crate::dashboard::Live::new()))),
             end: End::new(Arc::new(|_| {})),
             opts: Options {
-                live_changes,
-                monitor: None,
-                seconds: None,
-                stats: false,
                 audio: AudioSetup::Off("none".into()),
-                desktop: Desktop::Generic,
                 source: "ps5".into(),
                 settings: Some(s),
-                wizard: None,
-                live: Arc::new(crate::dashboard::Live::new()),
-                dashboard: None,
-                refocus: None,
+                ..Options::new(live_changes, Arc::new(crate::dashboard::Live::new()))
             },
         };
         app.opts.live_changes.mark_baseline(None);

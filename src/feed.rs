@@ -430,20 +430,7 @@ mod tests {
             let path = file.display().to_string();
             let settings = Settings::resolve_with(&move |k| (k == "CONFIG_FILE").then(|| path.clone()));
             assert!(settings.errors().is_empty(), "{:?}", settings.errors());
-            let opts = app::Options {
-                live_changes: LiveChanges::DEFAULT,
-                monitor: None,
-                seconds: None,
-                stats: false,
-                audio: AudioSetup::Off(String::new()),
-                desktop: Desktop::Generic,
-                source: String::new(),
-                settings: None,
-                wizard: None,
-                live: Arc::new(Live::new()),
-                dashboard: None,
-                refocus: None,
-            };
+            let opts = app::Options::new(LiveChanges::DEFAULT, Arc::new(Live::new()));
             Start { run_dir: dir.to_path_buf(), settings, opts, format: FORMAT, test_pattern }
         }
 
