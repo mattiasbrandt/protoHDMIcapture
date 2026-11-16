@@ -38,13 +38,14 @@ if grep -nE "IFS=\\\$'\\\\t'[[:space:]]+read" "${SH[@]}"; then
     bad "IFS=\$'\\t' read collapses empty fields; use a non-whitespace separator"
 fi
 
-# protoHDMIcapture (the crate at the root): build, tests and clippy; then every settings
+# protoHDMIcapture (the crate at the root): formatting, build, tests and clippy; then every settings
 # fixture through its --settings.
 mapfile -t FIX < <(ls tools/fixtures/settings/*.config 2>/dev/null)
-step "protoHDMIcapture: cargo build, test, clippy"
+step "protoHDMIcapture: cargo fmt, build, test, clippy"
 if ! command -v cargo >/dev/null; then
     bad "cargo not found: protoHDMIcapture needs a Rust toolchain (rustup)"
 else
+    cargo fmt --check >/dev/null || bad "protoHDMIcapture: not formatted (cargo fmt; rustfmt.toml holds the style)"
     cargo build --quiet || bad "protoHDMIcapture: cargo build"
     # The output is kept until the end: a test that fails once (a flake)
     # must name itself here, as a rerun may pass.

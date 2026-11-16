@@ -21,7 +21,7 @@ protoHDMIcapture need not touch it.
   `--settings` over `tools/fixtures/settings/` and checks the README's
   settings table and `config.example` against the rows.
 - **Checks:** `tools/check` (lint and syntax, legacy's included,
-  consistency between code and docs, protoHDMIcapture's build, tests and
+  consistency between code and docs, protoHDMIcapture's formatting, build, tests and
   clippy, and the hardware-free harnesses in `tools/harness/`; each check
   prints its name); enable the hook per clone with
   `git config core.hooksPath .githooks`. Legacy's own harnesses

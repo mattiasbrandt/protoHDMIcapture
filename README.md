@@ -340,7 +340,7 @@ players, its menu entry and its own troubleshooting:
 | `assets/brand/` | the logo and the social preview |
 
 - `tools/check` runs every check: lint, syntax, consistency between code
-  and docs, protoHDMIcapture's build, tests and clippy (for Windows too,
+  and docs, protoHDMIcapture's formatting, build, tests and clippy (for Windows too,
   with the `x86_64-pc-windows-msvc` target), and the harnesses in
   `tools/harness/`; legacy gets lint and syntax only. CI runs it
   on every push; `git config core.hooksPath .githooks` runs it before each
