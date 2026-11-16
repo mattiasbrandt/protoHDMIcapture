@@ -26,7 +26,7 @@
 //! Each step runs whatever happened in the one before; each reports its own
 //! failures. Dropping the owner finishes it, so an early return keeps the
 //! order. The setup wizard's feed windows hold only the session, and keep
-//! their own short path (main.rs `setup`).
+//! their own short path (setup.rs).
 
 use std::io;
 use std::path::{Path, PathBuf};

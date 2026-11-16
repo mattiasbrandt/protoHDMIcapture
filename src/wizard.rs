@@ -1974,7 +1974,8 @@ impl System for Machine {
 }
 
 #[cfg(test)]
-mod tests {
+/// The stand-in machine and the key and signal helpers: setup.rs's tests drive the wizard with them too.
+pub(crate) mod tests {
     use super::*;
     use std::cell::Cell;
     use std::rc::Rc;
@@ -1991,7 +1992,7 @@ mod tests {
         }
     }
 
-    struct Fake {
+    pub(crate) struct Fake {
         nodes: Vec<Node>,
         modes: Vec<Mode>,
         refresh: bool,
@@ -2039,7 +2040,7 @@ mod tests {
         }
     }
 
-    fn fake() -> Fake {
+    pub(crate) fn fake() -> Fake {
         Fake {
             nodes: vec![
                 node("/dev/video0", "CAM1", "pci-a", "OBSBOT Meet 2"),
@@ -2067,7 +2068,7 @@ mod tests {
         Wizard::new(Box::new(sys), file.to_path_buf(), first_run, &|_| false).unwrap()
     }
 
-    fn press(w: &mut Wizard, keys: &[&str]) {
+    pub(crate) fn press(w: &mut Wizard, keys: &[&str]) {
         for k in keys {
             let key = match *k {
                 "Enter" => Key::Enter,
@@ -2092,7 +2093,7 @@ mod tests {
     }
 
     /// The signal check passes: a frame every 1/60 s with a picture.
-    fn signal_ok(w: &mut Wizard) {
+    pub(crate) fn signal_ok(w: &mut Wizard) {
         let t0 = Instant::now();
         w.tick(t0);
         let mut frame = vec![0u8; Idle::FORMAT.frame_size()];

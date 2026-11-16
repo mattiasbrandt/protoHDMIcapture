@@ -32,6 +32,7 @@ mod scale;
 mod screenshot;
 mod session;
 mod settings;
+mod setup;
 mod sources;
 mod stats;
 mod view_sh_only;
@@ -116,25 +117,9 @@ fn card_audio_input(card: Option<&card::Node>) -> Result<String, String> {
     Ok(input.id)
 }
 
-/// The setup wizard (#13), in the viewer window: `--setup`, or a first run.
-/// Holds setup.lock as legacy/lib/setup.sh does (one wizard at a time) and leaves
-/// setup.done. True when the feed should start: saved and asked for, or
-/// the first run skipped.
+/// The setup wizard (#13), in the viewer window: `--setup`, or a first run
+/// (setup.rs). True when the feed should start.
 fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    use wizard::{Outcome, Phase, Wizard};
-
-    let dir = session::run_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let lock = std::fs::File::create(dir.join("setup.lock")).map_err(|e| format!("setup.lock: {e}"))?;
-    // flock(LOCK_EX | LOCK_NB) on Linux, legacy/lib/setup.sh's lock; LockFileEx on Windows.
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => return Err("another setup wizard is already running".into()),
-        Err(std::fs::TryLockError::Error(e)) => return Err(format!("setup.lock: {e}")),
-    }
-
     let s = Settings::resolve();
     let desktop = desktop::detect()?;
     // The wizard's feed and loopback start from the saved values; one that
@@ -145,16 +130,13 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
         fallback("LAT_MS", "10");
         10
     });
-    let sys = wizard::Machine {
+    let system = wizard::Machine {
         sink: s.get("SINK").to_string(),
         buffer_ms,
         // Linux only, as the Windows adapter had it: DESKTOP=hyprland is
         // read on Windows too.
         refresh: cfg!(target_os = "linux") && matches!(desktop, desktop::Desktop::Hyprland(_)),
     };
-    let wiz = Rc::new(RefCell::new(Wizard::new(Box::new(sys), s.config_file.clone(), first_run, &|k| env::var_os(k).is_some())?));
-    // After every early return above, so none leaves it behind.
-    std::fs::write(dir.join("setup.pid"), format!("{}\n", std::process::id())).map_err(|e| format!("setup.pid: {e}"))?;
     // The feed in the wizard's window: the saved picture settings, or the
     // defaults where they are not valid; windowed, the display left alone.
     let (live_changes, warnings) = live_changes::LiveChanges::read_picture_lenient(&s);
@@ -162,78 +144,16 @@ fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
         eprintln!("warning: the wizard's feed: {w}");
     }
     let live_changes = live_changes.with_window(app::WindowMode::Windowed { width: 1280, height: 720 }, (1280, 720));
-    // Each feed window's numbers are its own, and nobody reads them.
-    let opts = || app::Options {
-        audio: app::AudioSetup::Off("the wizard's".into()),
-        wizard: Some(wiz.clone()),
-        ..app::Options::new(live_changes.clone(), Arc::new(dashboard::Live::new()))
+    let start = setup::Start {
+        run_dir: session::run_dir(),
+        system: Box::new(system),
+        config_file: s.config_file.clone(),
+        first_run,
+        live_changes,
+        desktop,
     };
-
-    let result = (|| -> Result<(), String> {
-        loop {
-            if quit.requested() {
-                wiz.borrow_mut().abandon();
-            }
-            if wiz.borrow().outcome().is_some() {
-                return Ok(());
-            }
-            let phase = wiz.borrow().phase();
-            wiz.borrow_mut().running = phase;
-            let outcome = match phase {
-                Phase::Choose => app::run(Box::new(wizard::Idle), opts(), quit),
-                Phase::Feed => {
-                    // One video window at a time, with view.sh too.
-                    let session = match session::Session::start(&dir, desktop.clone())? {
-                        Ok(s) => s,
-                        Err(running) => {
-                            let pid = running.pid.map_or(String::new(), |p| format!(" (pid {p})"));
-                            wiz.borrow_mut().feed_failed(format!("a feed is running{pid}. Close it first."));
-                            continue;
-                        }
-                    };
-                    // The feed owner with the session only: the audio-sync
-                    // loopback is the wizard's.
-                    let mut feed: feed::Feed = feed::Feed::new(Some(session));
-                    let Some((node, format)) = wiz.borrow().feed() else {
-                        return Err("the wizard reached the feed without a card".into());
-                    };
-                    let source = match format.and_then(|f| card::open(&node, f)) {
-                        Ok(source) => source,
-                        Err(e) => {
-                            wiz.borrow_mut().feed_failed(e);
-                            continue;
-                        }
-                    };
-                    if let Some(s) = feed.session() {
-                        s.announce()?;
-                    }
-                    let outcome = app::run(source, opts(), quit);
-                    feed.finish();
-                    outcome
-                }
-            };
-            match outcome {
-                // The wizard moved on, or ended (its window's close button
-                // ends it unsaved): its state says what comes next.
-                run::Outcome::Closed | run::Outcome::TimeUp => {}
-                run::Outcome::Signal => wiz.borrow_mut().abandon(),
-                // The card gone mid-check, or the feed's window failing,
-                // is the wizard's to say, not the end.
-                run::Outcome::CaptureEnded(e) if phase == Phase::Feed => wiz.borrow_mut().feed_failed(format!("capture: {e}")),
-                run::Outcome::Failed(e) if phase == Phase::Feed => wiz.borrow_mut().feed_failed(e),
-                run::Outcome::CaptureEnded(e) => return Err(format!("capture: {e}")),
-                run::Outcome::Failed(e) => return Err(e),
-            }
-        }
-    })();
-    let saved = wiz.borrow().saved();
-    // legacy/launch.sh reads a missing setup.done as "not saved".
-    if let Err(e) = std::fs::write(dir.join("setup.done"), if saved { "saved\n" } else { "cancelled\n" }) {
-        eprintln!("warning: setup.done: {e}; legacy/launch.sh will read the wizard as cancelled");
-    }
-    let _ = std::fs::remove_file(dir.join("setup.pid"));
-    result?;
-    Ok(wiz.borrow().outcome() == Some(Outcome::Play) && !quit.requested())
+    let parts = setup::Parts { window: Box::new(app::run), open_card: Box::new(card::open) };
+    setup::run(start, parts, quit)
 }
 
 /// Why the viewer ends in error. The saved card not plugged in is told
