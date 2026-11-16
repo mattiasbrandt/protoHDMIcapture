@@ -4,7 +4,7 @@
 #   diffutils                tools/capture-cards-table --check (diff)
 #   shellcheck, lua, python  the shell, Lua and Python checks
 #   rustup, gcc, clang, pkgconf
-#                            the viewer: cargo and clippy; cc for libspa-sys's
+#                            the viewer: cargo, rustfmt and clippy; cc for libspa-sys's
 #                            C wrappers, clang for bindgen (PipeWire), pkgconf
 #                            to find the libraries below
 #   libpipewire, alsa-lib, dbus, wayland
@@ -59,7 +59,7 @@ jobs:
 
       - name: Rust
         run: |
-          rustup toolchain install stable --profile minimal --component clippy
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
           rustup default stable
           rustup target add x86_64-pc-windows-msvc
 
@@ -73,8 +73,8 @@ jobs:
       - name: tools/check
         run: tools/check
 
-      # tools/check runs the tests quietly ("rerun it to see which"); here
-      # nobody can rerun them, so a red run shows them in full.
+      # tools/check names a failing test, not its output; a red run shows
+      # them in full here.
       - name: Failing tests, in full
         if: failure()
         run: cargo test --no-fail-fast
