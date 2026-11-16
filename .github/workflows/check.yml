@@ -37,7 +37,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     container: archlinux:latest
-    # The repo is private, so minutes are metered; a cold run takes ~5.5 min.
+    # A cold run takes ~5.5 min.
     timeout-minutes: 20
     steps:
       # Before the checkout, so that it is a git clone and not a tarball.
