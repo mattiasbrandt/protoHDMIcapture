@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::audio::{Counters, RATE};
-use crate::capture::{Dropped, Reason, Since, Signal};
+use crate::capture::{Dropped, Reason, Signal, Since};
 use crate::desktop::{Desktop, fmt_g};
 use crate::overlay::Notify;
 use crate::stats::percentiles;
@@ -515,7 +515,8 @@ mod transport {
     use std::time::{Duration, Instant};
 
     use windows::Win32::Foundation::{
-        ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_LISTENING, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree,
+        ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, ERROR_PIPE_LISTENING, HANDLE, HLOCAL,
+        INVALID_HANDLE_VALUE, LocalFree,
     };
     use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
@@ -524,8 +525,8 @@ mod transport {
         PIPE_ACCESS_OUTBOUND,
     };
     use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, PIPE_NOWAIT, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PeekNamedPipe,
-        WaitNamedPipeW,
+        ConnectNamedPipe, CreateNamedPipeW, PIPE_NOWAIT, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
+        PeekNamedPipe, WaitNamedPipeW,
     };
     use windows::core::{HRESULT, HSTRING, w};
 
@@ -570,7 +571,16 @@ mod transport {
         let mode = if first { PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE } else { PIPE_ACCESS_OUTBOUND };
         // Safety: a NUL-terminated name and attributes that outlive the call.
         let h = unsafe {
-            CreateNamedPipeW(name, mode, PIPE_TYPE_BYTE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, BUFFER, 0, 0, Some(&sa))
+            CreateNamedPipeW(
+                name,
+                mode,
+                PIPE_TYPE_BYTE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                PIPE_UNLIMITED_INSTANCES,
+                BUFFER,
+                0,
+                0,
+                Some(&sa),
+            )
         };
         if h == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error());
@@ -623,7 +633,6 @@ mod transport {
         pub fn set_nonblocking(&self, _: bool) -> io::Result<()> {
             Ok(())
         }
-
     }
 
     pub fn set_read_timeout(s: &mut Stream, t: Option<Duration>) -> io::Result<()> {
@@ -674,7 +683,9 @@ mod transport {
         let name = HSTRING::from(path.as_os_str());
         loop {
             // Safety: a NUL-terminated name; the handle goes to the File.
-            match unsafe { CreateFileW(&name, FILE_GENERIC_READ.0, FILE_SHARE_NONE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) } {
+            match unsafe {
+                CreateFileW(&name, FILE_GENERIC_READ.0, FILE_SHARE_NONE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None)
+            } {
                 // Safety: a fresh handle this File now owns.
                 Ok(h) => return Ok(Stream { file: unsafe { File::from_raw_handle(h.0) }, read_timeout: None }),
                 // Safety: a NUL-terminated name.
@@ -895,7 +906,12 @@ fn render(s: &Value, p: &Paint) -> String {
             if v.is_null() {
                 p.dim("no frame presented yet")
             } else {
-                format!("median {} ms · p99 {} ms {}", n2(&v["median_ms"]), n2(&v["p99_ms"]), p.dim(&format!("({window}, {} frames)", int(&v["n"]))))
+                format!(
+                    "median {} ms · p99 {} ms {}",
+                    n2(&v["median_ms"]),
+                    n2(&v["p99_ms"]),
+                    p.dim(&format!("({window}, {} frames)", int(&v["n"])))
+                )
             },
         );
     }
@@ -1064,7 +1080,9 @@ pub fn client(run_dir: &Path) -> Result<(), String> {
 /// Windows Terminal does already, conhost only when asked.
 #[cfg(windows)]
 fn enable_vt() {
-    use windows::Win32::System::Console::{ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_OUTPUT_HANDLE, SetConsoleMode};
+    use windows::Win32::System::Console::{
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_OUTPUT_HANDLE, SetConsoleMode,
+    };
     // Safety: this process's own console handle, read then set.
     unsafe {
         let mut mode = Default::default();
@@ -1346,7 +1364,8 @@ mod tests {
         counters.target_ms.store(80, Ordering::Relaxed);
         live.set_audio(AudioLive::Running { source: "card-in".into(), sink: "speakers".into(), buffer_ms: 10, counters });
         // The next snapshot after the changes.
-        let s = (0..20).map(|_| read_line(&mut r)).find(|v| v["frames"] == 6 && !v["dequeue_present"].is_null()).expect("the numbers arrive");
+        let s =
+            (0..20).map(|_| read_line(&mut r)).find(|v| v["frames"] == 6 && !v["dequeue_present"].is_null()).expect("the numbers arrive");
         assert_eq!(s["gaps"], 1);
         assert_eq!(s["lost"], 2);
         assert_eq!(s["signal"], "stopped");
@@ -1498,7 +1517,10 @@ mod tests {
         s["signal_why"] = json!("MJPEG frames do not decode: not a JPEG");
         s["dropped"] = json!({ "undecodable": 120, "unusable": 0 });
         let text = render(&s, &Paint { on: false });
-        for w in ["  signal            no picture: MJPEG frames do not decode: not a JPEG", "  dropped           120 · 120 undecodable · 0 unusable"] {
+        for w in [
+            "  signal            no picture: MJPEG frames do not decode: not a JPEG",
+            "  dropped           120 · 120 undecodable · 0 unusable",
+        ] {
             assert!(text.lines().any(|l| l == w), "no line {w:?} in\n{text}");
         }
     }
@@ -1590,7 +1612,14 @@ mod tests {
         let monitors = vec![
             crate::desktop::Monitor { name: "DP-1".into(), width: 3440, height: 1440, refresh_hz: 100.0, focused: false, viewer: false },
             crate::desktop::Monitor { name: "DP-2".into(), width: 1920, height: 1200, refresh_hz: 59.950001, focused: true, viewer: true },
-            crate::desktop::Monitor { name: "HDMI-A-1".into(), width: 2560, height: 720, refresh_hz: 60.266, focused: false, viewer: false },
+            crate::desktop::Monitor {
+                name: "HDMI-A-1".into(),
+                width: 2560,
+                height: 720,
+                refresh_hz: 60.266,
+                focused: false,
+                viewer: false,
+            },
         ];
         let mut s = sample();
         s["display"] = display_json(Ok(monitors), Ok(Some("DP-2|60|59.95|hl.monitor({})\n".into())));
@@ -1614,7 +1643,10 @@ mod tests {
         }
         s["display"] = not_on_windows();
         let text = render(&s, &Paint { on: false });
-        for w in ["  monitors          not known: they are known on Hyprland only, not on Windows", "  refresh           REFRESH=match is not on Windows"] {
+        for w in [
+            "  monitors          not known: they are known on Hyprland only, not on Windows",
+            "  refresh           REFRESH=match is not on Windows",
+        ] {
             assert!(text.lines().any(|l| l == w), "no line {w:?} in\n{text}");
         }
         // No section from a viewer that sends none.
@@ -1627,6 +1659,9 @@ mod tests {
         assert_eq!(signal_json(&Signal::Picture), ("ok", Value::Null));
         assert_eq!(signal_json(&no(Since::Never, Reason::Nothing)), ("never", Value::Null));
         assert_eq!(signal_json(&no(Since::Stopped, Reason::Nothing)), ("stopped", Value::Null));
-        assert_eq!(signal_json(&no(Since::Never, Reason::Unusable("short".into()))), ("never", json!("frames the viewer cannot use: short")));
+        assert_eq!(
+            signal_json(&no(Since::Never, Reason::Unusable("short".into()))),
+            ("never", json!("frames the viewer cannot use: short"))
+        );
     }
 }

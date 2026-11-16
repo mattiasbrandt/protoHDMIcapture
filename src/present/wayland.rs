@@ -14,9 +14,7 @@ use wayland_client::protocol::wl_registry::WlRegistry;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
 use wayland_protocols::wp::presentation_time::client::wp_presentation::{self, WpPresentation};
-use wayland_protocols::wp::presentation_time::client::wp_presentation_feedback::{
-    self, WpPresentationFeedback,
-};
+use wayland_protocols::wp::presentation_time::client::wp_presentation_feedback::{self, WpPresentationFeedback};
 
 use super::{Feedback, Outcome, Tag};
 
@@ -42,14 +40,11 @@ impl Presentation {
     pub unsafe fn new(display: *mut c_void, surface: *mut c_void) -> Result<Self, String> {
         let backend = unsafe { Backend::from_foreign_display(display.cast()) };
         let conn = Connection::from_backend(backend);
-        let (globals, mut queue) =
-            registry_queue_init::<State>(&conn).map_err(|e| format!("wayland registry: {e}"))?;
+        let (globals, mut queue) = registry_queue_init::<State>(&conn).map_err(|e| format!("wayland registry: {e}"))?;
         let qh = queue.handle();
-        let presentation: WpPresentation = globals
-            .bind(&qh, 1..=1, ())
-            .map_err(|e| format!("the compositor offers no wp_presentation: {e}"))?;
-        let id = unsafe { ObjectId::from_ptr(WlSurface::interface(), surface.cast()) }
-            .map_err(|e| format!("wl_surface: {e}"))?;
+        let presentation: WpPresentation =
+            globals.bind(&qh, 1..=1, ()).map_err(|e| format!("the compositor offers no wp_presentation: {e}"))?;
+        let id = unsafe { ObjectId::from_ptr(WlSurface::interface(), surface.cast()) }.map_err(|e| format!("wl_surface: {e}"))?;
         let surface = WlSurface::from_id(&conn, id).map_err(|e| format!("wl_surface: {e}"))?;
         let mut state = State::default();
         queue.roundtrip(&mut state).map_err(|e| format!("wayland roundtrip: {e}"))?;
@@ -60,7 +55,6 @@ impl Presentation {
     pub fn clock_id(&self) -> Option<u32> {
         self.state.clock_id
     }
-
 }
 
 impl Feedback for Presentation {
@@ -83,34 +77,18 @@ impl Feedback for Presentation {
                 Err(e) => return Err(format!("wayland read: {e}")),
             }
         }
-        self.queue
-            .dispatch_pending(&mut self.state)
-            .map_err(|e| format!("wayland dispatch: {e}"))?;
+        self.queue.dispatch_pending(&mut self.state).map_err(|e| format!("wayland dispatch: {e}"))?;
         Ok(std::mem::take(&mut self.state.outcomes))
     }
 }
 
 impl Dispatch<WlRegistry, GlobalListContents> for State {
-    fn event(
-        _: &mut Self,
-        _: &WlRegistry,
-        _: <WlRegistry as Proxy>::Event,
-        _: &GlobalListContents,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
+    fn event(_: &mut Self, _: &WlRegistry, _: <WlRegistry as Proxy>::Event, _: &GlobalListContents, _: &Connection, _: &QueueHandle<Self>) {
     }
 }
 
 impl Dispatch<WlCallback, ()> for State {
-    fn event(
-        state: &mut Self,
-        _: &WlCallback,
-        event: wl_callback::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
+    fn event(state: &mut Self, _: &WlCallback, event: wl_callback::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
         if let wl_callback::Event::Done { .. } = event {
             state.outcomes.push(Outcome::FrameDone);
         }
@@ -118,14 +96,7 @@ impl Dispatch<WlCallback, ()> for State {
 }
 
 impl Dispatch<WpPresentation, ()> for State {
-    fn event(
-        state: &mut Self,
-        _: &WpPresentation,
-        event: wp_presentation::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
+    fn event(state: &mut Self, _: &WpPresentation, event: wp_presentation::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
         if let wp_presentation::Event::ClockId { clk_id } = event {
             state.clock_id = Some(clk_id);
         }

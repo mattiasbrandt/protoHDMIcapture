@@ -113,10 +113,7 @@ fn usb_dir(node: &Path) -> Option<PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn serial(node: &Path) -> String {
-    usb_dir(node)
-        .and_then(|d| fs::read_to_string(d.join("serial")).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+    usb_dir(node).and_then(|d| fs::read_to_string(d.join("serial")).ok()).map(|s| s.trim().to_string()).unwrap_or_default()
 }
 
 #[cfg(target_os = "linux")]
@@ -143,9 +140,7 @@ fn probe(node: &Path) -> Option<(String, bool)> {
 #[cfg(target_os = "linux")]
 /// `card_list`: every video capture node, in /dev order.
 pub fn list() -> Vec<Node> {
-    let mut paths: Vec<PathBuf> = fs::read_dir("/dev")
-        .map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect())
-        .unwrap_or_default();
+    let mut paths: Vec<PathBuf> = fs::read_dir("/dev").map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect()).unwrap_or_default();
     paths.retain(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("video")));
     // view.sh walks /dev/video* in glob order (video0, video1, video10...).
     paths.sort();
@@ -169,7 +164,10 @@ pub fn pick(nodes: &[Node], pins: &Pins, dev_node: Option<Option<(String, bool)>
     let ignore = if pins.ignore.is_empty() {
         None
     } else {
-        Some(Regex::new(pins.ignore).map_err(|e| PickError::Other(format!("IGNORE_CARDS_RE={} is not a valid pattern: {e}", pins.ignore)))?)
+        Some(
+            Regex::new(pins.ignore)
+                .map_err(|e| PickError::Other(format!("IGNORE_CARDS_RE={} is not a valid pattern: {e}", pins.ignore)))?,
+        )
     };
     let mut warning = None;
     if !pins.dev.is_empty() {
@@ -650,7 +648,10 @@ mod tests {
     fn the_missing_card_by_serial_says_what_is_there_and_how_to_choose_again() {
         // The laptop (#39): the card unplugged, its serial from the file.
         let laptop = [node(r"\\?\usb#vid_5986", "", r"PCIROOT(0)#USB(5)", "Integrated Camera")];
-        let p = Pins { source: r"in C:\Users\m\AppData\Roaming\protohdmicapture\config", ..pins("", "20000130041415", "", "Integrated Camera") };
+        let p = Pins {
+            source: r"in C:\Users\m\AppData\Roaming\protohdmicapture\config",
+            ..pins("", "20000130041415", "", "Integrated Camera")
+        };
         let m = missing_of(pick(&laptop, &p, None, "cfg"));
         assert_eq!(
             m.to_string(),
@@ -667,7 +668,10 @@ mod tests {
         // Not ignored: each device with its serial, or its port without one.
         assert_eq!(m.details[0], "found instead: Integrated Camera (port PCIROOT(0)#USB(5))");
         let m = missing_of(pick(&nodes(), &pins("", "NOPE", "", "OBSBOT"), None, "cfg"));
-        assert_eq!(m.details[0], "found instead: OBSBOT Meet 2 (ignored), UVC Camera (1e4e:7016) (serial 20000130041415), USB Video (port pci-c)");
+        assert_eq!(
+            m.details[0],
+            "found instead: OBSBOT Meet 2 (ignored), UVC Camera (1e4e:7016) (serial 20000130041415), USB Video (port pci-c)"
+        );
         // A serial pin: no "moved?" guess, the serial would have found it.
         assert!(!m.details.iter().any(|d| d.starts_with("moved?")), "{:?}", m.details);
         // Nothing plugged in at all.

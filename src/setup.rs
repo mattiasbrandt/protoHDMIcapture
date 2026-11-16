@@ -280,7 +280,9 @@ mod tests {
 
     #[test]
     fn the_choosing_window_failing_ends_the_wizard_with_its_error() {
-        for (outcome, error) in [(Outcome::Failed("no adapter".into()), "no adapter"), (Outcome::CaptureEnded("gone".into()), "capture: gone")] {
+        for (outcome, error) in
+            [(Outcome::Failed("no adapter".into()), "no adapter"), (Outcome::CaptureEnded("gone".into()), "capture: gone")]
+        {
             let d = dir("choose-failed");
             let (parts, _) = stand_ins(&d, vec![Box::new(move |_, _, _| outcome)], None);
             assert_eq!(run(start(&d, false), parts, &Quit::new()), Err(error.to_string()));
@@ -306,7 +308,10 @@ mod tests {
 
     #[test]
     fn the_feed_ending_goes_back_to_the_format_stage() {
-        for (outcome, why) in [(Outcome::CaptureEnded("the card is gone".into()), "capture: the card is gone"), (Outcome::Failed("no surface".into()), "no surface")] {
+        for (outcome, why) in [
+            (Outcome::CaptureEnded("the card is gone".into()), "capture: the card is gone"),
+            (Outcome::Failed("no surface".into()), "no surface"),
+        ] {
             let d = dir("feed-ended");
             let feed: Script = Box::new(move |_, phase, dir| {
                 assert_eq!(phase, Phase::Feed);

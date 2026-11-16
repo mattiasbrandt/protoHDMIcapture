@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::capture::{Reason, Since, Signal};
+use crate::capture::{Reason, Signal, Since};
 use crate::sources::{self, Profile};
 
 /// Tells the window something to show from another thread: a message and
@@ -106,19 +106,13 @@ impl Overlay {
 
     /// Anything to draw besides the feed.
     pub fn visible(&self, now: Instant) -> bool {
-        self.page.is_some()
-            || self.current_message(now).is_some()
-            || self.key_bar_showing(now)
-            || self.no_signal().is_some()
+        self.page.is_some() || self.current_message(now).is_some() || self.key_bar_showing(now) || self.no_signal().is_some()
     }
 
     /// The next moment something shown changes on its own: a message or
     /// the key bar going. The banner follows the policy's events.
     pub fn next_change(&self, now: Instant) -> Option<Instant> {
-        [self.message.as_ref().map(|(_, t)| *t).filter(|t| *t > now), self.key_bar_until.filter(|t| *t > now)]
-        .into_iter()
-        .flatten()
-        .min()
+        [self.message.as_ref().map(|(_, t)| *t).filter(|t| *t > now), self.key_bar_until.filter(|t| *t > now)].into_iter().flatten().min()
     }
 }
 
@@ -201,10 +195,7 @@ pub fn panel_lines(p: &Panel) -> Vec<String> {
     lines.extend([
         "r     Reset colour".to_string(),
         format!("t     Setup tips   {}", p.tips_name),
-        format!(
-            "w     Save         {}",
-            if p.changes.is_empty() { "nothing changed".to_string() } else { p.changes.join(" ") }
-        ),
+        format!("w     Save         {}", if p.changes.is_empty() { "nothing changed".to_string() } else { p.changes.join(" ") }),
         String::new(),
         "s screenshot   d dashboard   Tab/Esc close   q quit".to_string(),
     ]);
@@ -237,11 +228,7 @@ pub fn tips_lines(id: &str, profile: Option<&Profile>) -> Vec<String> {
     };
     let level = p.status.split_whitespace().next().unwrap_or("");
     let mut out = vec![
-        format!(
-            "Setup tips · {}{}",
-            p.name,
-            if level.is_empty() || level == "reported" { String::new() } else { format!(" · {level}") }
-        ),
+        format!("Setup tips · {}{}", p.name, if level.is_empty() || level == "reported" { String::new() } else { format!(" · {level}") }),
         String::new(),
     ];
     for tip in &p.tips {

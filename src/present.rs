@@ -49,7 +49,12 @@ pub trait Feedback {
 }
 
 pub enum Outcome {
-    Presented { tag: Tag, at: Duration, refresh: Duration, flags: u32 },
+    Presented {
+        tag: Tag,
+        at: Duration,
+        refresh: Duration,
+        flags: u32,
+    },
     Discarded,
     /// The frame callback: the compositor took the frame for a refresh and
     /// is ready for the next one (before that refresh is scanned out).

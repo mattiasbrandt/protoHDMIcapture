@@ -49,10 +49,7 @@ fn sync(core: &pw::core::CoreRc, mainloop: &pw::main_loop::MainLoopRc) -> Result
         t.set(true);
         l.quit();
     });
-    timer
-        .update_timer(Some(SYNC_TIMEOUT), None)
-        .into_sync_result()
-        .map_err(|e| format!("PipeWire timer: {e}"))?;
+    timer.update_timer(Some(SYNC_TIMEOUT), None).into_sync_result().map_err(|e| format!("PipeWire timer: {e}"))?;
     let done = Rc::new(Cell::new(false));
     let pending = core.sync(0).map_err(|e| format!("PipeWire sync: {e}"))?;
     let (d, l) = (done.clone(), mainloop.clone());
@@ -149,8 +146,7 @@ impl Snapshot {
     pub fn card_source(&self, usb_sysfs: &str) -> Option<String> {
         let s = &self.0;
         let under = format!("{usb_sysfs}/");
-        let devices: HashSet<u32> =
-            s.device_sysfs.iter().filter(|(_, p)| p.starts_with(&under)).map(|(id, _)| *id).collect();
+        let devices: HashSet<u32> = s.device_sysfs.iter().filter(|(_, p)| p.starts_with(&under)).map(|(id, _)| *id).collect();
         let mut names: Vec<&str> = s
             .nodes
             .values()
@@ -201,8 +197,6 @@ pub fn percent(linear: f32) -> u32 {
 pub fn linear(percent: u32) -> f32 {
     (f64::from(percent) / 100.0).powi(3) as f32
 }
-
-
 
 /// Reads the output stream's level and, with a change, sets it on the
 /// stream (Props: channelVolumes and mute), where WirePlumber remembers it
@@ -314,8 +308,7 @@ pub fn level(change: Option<LevelChange>) -> Result<Level, String> {
             },
         ],
     });
-    let (bytes, _) = PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &value)
-        .map_err(|e| format!("volume parameter: {e:?}"))?;
+    let (bytes, _) = PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &value).map_err(|e| format!("volume parameter: {e:?}"))?;
     let bytes = bytes.into_inner();
     let pod = Pod::from_bytes(&bytes).ok_or("volume parameter: not a pod")?;
     node.set_param(ParamType::Props, 0, pod);

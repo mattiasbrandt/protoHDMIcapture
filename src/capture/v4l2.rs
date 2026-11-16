@@ -36,9 +36,7 @@ impl V4l2 {
         let at = |e: io::Error| format!("{}: {e}", node.display());
         let device = Device::open(node).map_err(at)?;
         let pixel_format = want.pixels.fourcc();
-        let capture = device
-            .video_capture(PixFormat::new(want.width, want.height, pixel_format))
-            .map_err(at)?;
+        let capture = device.video_capture(PixFormat::new(want.width, want.height, pixel_format)).map_err(at)?;
         let fmt = capture.format();
         if (fmt.width(), fmt.height(), fmt.pixel_format()) != (want.width, want.height, pixel_format) {
             return Err(format!(
@@ -58,9 +56,7 @@ impl V4l2 {
         }
         let stride = fmt.bytes_per_line() as usize;
         // FPS may be fractional (59.94 = 60000/1001).
-        let interval = capture
-            .set_frame_interval(Fract::new(1000, (want.fps * 1000.0).round() as u32))
-            .map_err(at)?;
+        let interval = capture.set_frame_interval(Fract::new(1000, (want.fps * 1000.0).round() as u32)).map_err(at)?;
         let got = interval.denominator() as f64 / interval.numerator() as f64;
         if (got - want.fps).abs() > want.fps * 0.005 {
             return Err(format!("{}: the card gives {got:.3} fps, not {} (FPS)", node.display(), want.fps));
@@ -134,18 +130,27 @@ impl Stream for Running<'_> {
             return Err(io::Error::other(format!("poll on the stream: revents {:#x} (the card is gone?)", pfd.revents)));
         }
         let warned_clock = &mut self.warned_clock;
-        self.stream.dequeue(|buf| {
-            let dequeued = now_monotonic();
-            if !buf.is_timestamp_monotonic() && !*warned_clock {
-                *warned_clock = true;
-                eprintln!("warning: buffer timestamps are not CLOCK_MONOTONIC; latency figures are meaningless");
-            }
-            // The card's first buffers after stream-on come short and
-            // flagged (#5): the policy drops them.
-            take(Raw { data: &buf[..], captured: buf.timestamp(), dequeued, mark: Mark::Sequence(buf.sequence()), flagged: buf.is_error() });
-            Ok(())
-        })
-        // The node gone under the dequeue: the card unplugged, as POLLERR above.
-        .map_err(|e| if e.raw_os_error() == Some(libc::ENODEV) { io::Error::other(format!("dequeue: {e} (the card is gone?)")) } else { e })
+        self.stream
+            .dequeue(|buf| {
+                let dequeued = now_monotonic();
+                if !buf.is_timestamp_monotonic() && !*warned_clock {
+                    *warned_clock = true;
+                    eprintln!("warning: buffer timestamps are not CLOCK_MONOTONIC; latency figures are meaningless");
+                }
+                // The card's first buffers after stream-on come short and
+                // flagged (#5): the policy drops them.
+                take(Raw {
+                    data: &buf[..],
+                    captured: buf.timestamp(),
+                    dequeued,
+                    mark: Mark::Sequence(buf.sequence()),
+                    flagged: buf.is_error(),
+                });
+                Ok(())
+            })
+            // The node gone under the dequeue: the card unplugged, as POLLERR above.
+            .map_err(
+                |e| if e.raw_os_error() == Some(libc::ENODEV) { io::Error::other(format!("dequeue: {e} (the card is gone?)")) } else { e },
+            )
     }
 }

@@ -214,10 +214,7 @@ impl Feed {
         }
         opts.source = s.get("SOURCE").to_string();
         if !opts.source.is_empty() && sources::get(&opts.source).is_none() {
-            eprintln!(
-                "warning: SOURCE={} has no profile in sources/; the overlay shows the tips for any HDMI source",
-                opts.source
-            );
+            eprintln!("warning: SOURCE={} has no profile in sources/; the overlay shows the tips for any HDMI source", opts.source);
             opts.source.clear();
         }
         // Monitors are known on Hyprland only; decided not on Windows (#38).
@@ -260,7 +257,10 @@ impl Feed {
             Ok(server) => {
                 self.set_dashboard(server);
                 if debug_window {
-                    let before = opts.desktop.dashboards().map_err(|e| eprintln!("warning: dashboard: cannot list the windows ({e}); it opens where the desktop puts it"));
+                    let before = opts
+                        .desktop
+                        .dashboards()
+                        .map_err(|e| eprintln!("warning: dashboard: cannot list the windows ({e}); it opens where the desktop puts it"));
                     match dashboard::open(None) {
                         // Moved off the window's monitor once the window places.
                         Ok(()) => opts.dashboard = before.ok(),
@@ -379,7 +379,9 @@ mod tests {
     fn a_card_pulled_out_ends_the_viewer_with_how_to_start_it_again() {
         // The laptop's card pulled out (#40): Media Foundation's error.
         assert_eq!(
-            super::capture_ended(r"\\?\usb#vid_1e4e&pid_7016: The video recording device is no longer present. (0xC00D3EA2) (the card is gone?)"),
+            super::capture_ended(
+                r"\\?\usb#vid_1e4e&pid_7016: The video recording device is no longer present. (0xC00D3EA2) (the card is gone?)"
+            ),
             r"capture: the card was unplugged (\\?\usb#vid_1e4e&pid_7016: The video recording device is no longer present. (0xC00D3EA2)). Plug it back in and start the viewer again; if it then shows no picture, the card is stuck: take out its USB cable and its DC5V power for 10 s."
         );
         // Any other end is said as it is, not as an unplug: a source that
@@ -388,9 +390,11 @@ mod tests {
             super::capture_ended("the capture stopped"),
             "capture: the capture stopped. Start the viewer again; if it then shows no picture, the card is stuck: take out its USB cable and its DC5V power for 10 s."
         );
-        assert!(super::capture_ended(r"\\?\usb#vid_1e4e&pid_7016: the card's stream ended").starts_with(r"capture: \\?\usb#vid_1e4e&pid_7016: the card's stream ended. Start"));
+        assert!(
+            super::capture_ended(r"\\?\usb#vid_1e4e&pid_7016: the card's stream ended")
+                .starts_with(r"capture: \\?\usb#vid_1e4e&pid_7016: the card's stream ended. Start")
+        );
     }
-
 
     /// A viewer's feed run on stand-ins (#44): a temp run dir, the test
     /// pattern or a card that fails, a fake loopback, a window that returns
@@ -404,15 +408,15 @@ mod tests {
         use crate::Fatal;
         use crate::app::{self, AudioSetup};
         use crate::audio::{self, LoopbackKeys, Status};
+        use crate::capture::Format;
         use crate::dashboard::{self, Live};
         use crate::debuglog::{DebugLog, StandIn};
         use crate::desktop::Desktop;
+        use crate::feed::{self, Parts, Ran, Start};
         use crate::live_changes::LiveChanges;
         use crate::run::{Outcome, Quit};
         use crate::session::{AlreadyRunning, Session};
         use crate::settings::Settings;
-        use crate::capture::Format;
-        use crate::feed::{self, Parts, Ran, Start};
         use std::sync::Arc;
 
         const FORMAT: Format = Format { width: 4, height: 2, fps: 60.0, pixels: crate::capture::Pixels::Yuyv };
@@ -559,7 +563,11 @@ mod tests {
             let ran = feed::run(start(&dir, "DEBUG=log\n", false), p, &Quit::new());
             assert_eq!(ran.expect_err("the card's error").to_string(), "cannot open /dev/videoN: busy");
             assert_eq!(*seen.steps.borrow(), ["log", "card"], "no loopback started");
-            assert!(last_line(&dir.join("debug.log")).ends_with("[dbg] ended: cannot open /dev/videoN: busy"), "{}", std::fs::read_to_string(dir.join("debug.log")).unwrap());
+            assert!(
+                last_line(&dir.join("debug.log")).ends_with("[dbg] ended: cannot open /dev/videoN: busy"),
+                "{}",
+                std::fs::read_to_string(dir.join("debug.log")).unwrap()
+            );
             assert!(!dir.join("video.pid").exists(), "never announced");
             assert!(!dashboard::socket_path(&dir).exists());
             assert!(lock_is_free(&dir));
@@ -588,7 +596,12 @@ mod tests {
             let dir = run_dir("opens");
             let seen = Seen::default();
             let card = || {
-                let node = crate::card::Node { path: "/dev/videoN".into(), serial: String::new(), port: String::new(), card_type: "a card".into() };
+                let node = crate::card::Node {
+                    path: "/dev/videoN".into(),
+                    serial: String::new(),
+                    port: String::new(),
+                    card_type: "a card".into(),
+                };
                 Ok((Box::new(crate::pattern::Pattern::new(FORMAT)) as Box<dyn crate::capture::FrameSource>, node))
             };
             let p = parts(&seen, card, |_| Outcome::Closed);

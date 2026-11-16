@@ -89,11 +89,7 @@ impl Screenshot {
             frame.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &self.buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.row),
-                    rows_per_image: Some(self.height),
-                },
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(self.row), rows_per_image: Some(self.height) },
             },
             wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
         );
@@ -232,15 +228,7 @@ fn stamp() -> String {
     unsafe {
         libc::localtime_s(&mut tm, &now)
     };
-    format!(
-        "{:04}-{:02}-{:02}_{:02}-{:02}-{:02}",
-        tm.tm_year + 1900,
-        tm.tm_mon + 1,
-        tm.tm_mday,
-        tm.tm_hour,
-        tm.tm_min,
-        tm.tm_sec
-    )
+    format!("{:04}-{:02}-{:02}_{:02}-{:02}-{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec)
 }
 
 /// Gives the written `tmp` its name: `<stamp>.png`, or `<stamp>-2.png`

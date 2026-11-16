@@ -130,11 +130,8 @@ impl Picture {
         let (lr, lg, lb) = if bt709 { (0.2126, 0.7152, 0.0722) } else { (0.2990, 0.5870, 0.1140) };
         // luma_coeffs, then apply_hue_sat with hue 0: saturation scales the
         // Cb and Cr columns.
-        let mut m = [
-            [1.0, 0.0, 2.0 * (1.0 - lr)],
-            [1.0, -2.0 * (1.0 - lb) * lb / lg, -2.0 * (1.0 - lr) * lr / lg],
-            [1.0, 2.0 * (1.0 - lb), 0.0],
-        ];
+        let mut m =
+            [[1.0, 0.0, 2.0 * (1.0 - lr)], [1.0, -2.0 * (1.0 - lb) * lb / lg, -2.0 * (1.0 - lr) * lr / lg], [1.0, 2.0 * (1.0 - lb), 0.0]];
         for row in &mut m {
             row[1] *= saturation;
             row[2] *= saturation;

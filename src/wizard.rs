@@ -361,8 +361,7 @@ pub fn ignore_without(pattern: &str, name: &str) -> String {
     if parts.last() == Some(&"") {
         parts.pop();
     }
-    let kept: Vec<String> =
-        parts.into_iter().map(|a| a.replace('\x01', "\\|")).filter(|a| !matches(a, name)).collect();
+    let kept: Vec<String> = parts.into_iter().map(|a| a.replace('\x01', "\\|")).filter(|a| !matches(a, name)).collect();
     kept.join("|")
 }
 
@@ -455,8 +454,7 @@ impl Wizard {
         let managed = settings::with_flag("wizard");
         let defaults = rows.iter().map(|r| (r.name.clone(), r.default.clone())).collect();
         let cur = settings::read_file(&config_file)?;
-        let mut new: HashMap<String, String> =
-            managed.iter().map(|k| (k.clone(), cur.get(k).cloned().unwrap_or_default())).collect();
+        let mut new: HashMap<String, String> = managed.iter().map(|k| (k.clone(), cur.get(k).cloned().unwrap_or_default())).collect();
         // FULLSCREEN is the old spelling of WINDOW; the wizard always writes WINDOW.
         if !new["FULLSCREEN"].is_empty() {
             if new["WINDOW"].is_empty() {
@@ -471,15 +469,7 @@ impl Wizard {
         }
         // A setting in the environment beats the file at play time.
         let env_overrides = rows.iter().filter(|r| env(&r.name)).map(|r| r.name.clone()).collect();
-        let mut stages = vec![
-            Stage::Welcome,
-            Stage::Card,
-            Stage::Source,
-            Stage::Format,
-            Stage::Signal,
-            Stage::Audio,
-            Stage::Display,
-        ];
+        let mut stages = vec![Stage::Welcome, Stage::Card, Stage::Source, Stage::Format, Stage::Signal, Stage::Audio, Stage::Display];
         if sys.can_match_refresh() {
             stages.push(Stage::Refresh);
         }
@@ -648,7 +638,10 @@ impl Wizard {
         }
         if !self.env_overrides.is_empty() {
             body.push(String::new());
-            body.extend(wrap(&format!("Warning: set in your environment, and winning over the file: {}", self.env_overrides.join(" ")), WIDTH));
+            body.extend(wrap(
+                &format!("Warning: set in your environment, and winning over the file: {}", self.env_overrides.join(" ")),
+                WIDTH,
+            ));
         }
         let ask = if self.first_run {
             Ask::Choose {
@@ -682,10 +675,8 @@ impl Wizard {
     fn card_stage(&mut self) {
         self.nodes = self.sys.cards();
         if self.nodes.is_empty() {
-            let body = vec![
-                "No video capture device found.".into(),
-                "Plug the card in (USB 3 port), then press Enter to look again.".into(),
-            ];
+            let body =
+                vec!["No video capture device found.".into(), "Plug the card in (USB 3 port), then press Enter to look again.".into()];
             return self.show(Step::CardNone, body, Ask::Continue);
         }
         let ignore = self.new["IGNORE_CARDS_RE"].clone();
@@ -980,7 +971,8 @@ impl Wizard {
         // starts on always stays.
         let mut keep = items.len();
         loop {
-            let shown: Vec<Item> = items.iter().enumerate().filter(|(i, it)| *i < keep || it.key == def).map(|(_, it)| it.clone()).collect();
+            let shown: Vec<Item> =
+                items.iter().enumerate().filter(|(i, it)| *i < keep || it.key == def).map(|(_, it)| it.clone()).collect();
             let mut page = body.clone();
             if shown.len() < items.len() {
                 page.push(format!("({} lower modes left out: the window is too small for them.)", items.len() - shown.len()));
@@ -1013,12 +1005,7 @@ impl Wizard {
     /// The signal check's text; with `progress`, the count so far.
     fn signal_lines(&self, progress: bool) -> Vec<String> {
         let mut out = vec![
-            format!(
-                "Capturing {MEASURE_SECONDS} seconds at {} @ {} fps ({}) to see",
-                self.cur("RES"),
-                self.cur("FPS"),
-                self.cur("FMT")
-            ),
+            format!("Capturing {MEASURE_SECONDS} seconds at {} @ {} fps ({}) to see", self.cur("RES"), self.cur("FPS"), self.cur("FMT")),
             "whether frames really arrive at that rate.".into(),
         ];
         if progress {
@@ -1126,7 +1113,11 @@ impl Wizard {
                 ),
                 Some(Reason::Unusable(why)) => (
                     format!("frames arrive but the viewer cannot use them ({why})."),
-                    if self.sys.has_view_sh() { "Go back and pick another mode, or use legacy/view.sh." } else { "Go back and pick another mode." },
+                    if self.sys.has_view_sh() {
+                        "Go back and pick another mode, or use legacy/view.sh."
+                    } else {
+                        "Go back and pick another mode."
+                    },
                 ),
                 Some(Reason::Nothing) | None => (
                     "no frames in 6 seconds: no signal, or HDCP is on at the source.".into(),
@@ -1521,9 +1512,7 @@ impl Wizard {
                 self.ignore_next(i + 1);
             }
             Step::CardDetails => self.ignore_next(0),
-            Step::CardResult | Step::SourceTips | Step::SignalResult | Step::SyncNone | Step::SyncResult => {
-                self.next_stage()
-            }
+            Step::CardResult | Step::SourceTips | Step::SignalResult | Step::SyncNone | Step::SyncResult => self.next_stage(),
             Step::SourcePick => {
                 self.set("SOURCE", if a == "generic" { "" } else { a });
                 self.source_tips(a);
@@ -1649,7 +1638,9 @@ impl Wizard {
             std::fs::OpenOptions::new()
                 .append(true)
                 .open(&self.config_file)
-                .and_then(|mut f| f.write_all(b"# Setup was skipped; run protohdmicapture --setup (or legacy/view.sh --setup) to choose settings.\n"))
+                .and_then(|mut f| {
+                    f.write_all(b"# Setup was skipped; run protohdmicapture --setup (or legacy/view.sh --setup) to choose settings.\n")
+                })
                 .map_err(|e| format!("cannot write {}: {e}", self.config_file.display()))
         });
         match written {
@@ -2322,11 +2313,7 @@ pub(crate) mod tests {
         w.signal(&no_signal(Reason::Undecodable("not a JPEG".into())));
         assert!(w.tick(t0 + SIGNAL_TIMEOUT));
         assert_eq!(w.step, Step::SignalRetry);
-        assert!(
-            w.lines().iter().any(|l| l == "Failed: Frames arrive but none decode as MJPEG (not a JPEG)."),
-            "{:#?}",
-            w.lines()
-        );
+        assert!(w.lines().iter().any(|l| l == "Failed: Frames arrive but none decode as MJPEG (not a JPEG)."), "{:#?}", w.lines());
         // Again, with short buffers: the policy's reason words it.
         press(&mut w, &["Enter"]);
         let t1 = t0 + Duration::from_secs(10);
@@ -2393,14 +2380,14 @@ pub(crate) mod tests {
         // lowest go, the saved one (the lowest of all) stays.
         let file = scratch("fit", Some("SOURCE=ps5\nFMT=yuyv422\nRES=640x480\nFPS=10\n"));
         let mut sys = fake();
-        sys.modes = [(1280, 720), (640, 480)]
-            .into_iter()
-            .flat_map(|(w, h)| [60, 50, 30, 25, 20, 10].map(|f| mode("yuyv422", w, h, f)))
-            .collect();
+        sys.modes =
+            [(1280, 720), (640, 480)].into_iter().flat_map(|(w, h)| [60, 50, 30, 25, 20, 10].map(|f| mode("yuyv422", w, h, f))).collect();
         let mut w = wizard(sys, &file, false);
         press(&mut w, &["Enter", "Enter", "y", "Enter", "Enter", "Enter", "Enter", "Enter"]);
         assert_eq!(w.stage, Stage::Signal);
-        w.feed_failed("capture: /dev/video2: the card gives 1280x720 YUYV at 59.940 fps, not 60 (FPS), and something else went wrong too".into());
+        w.feed_failed(
+            "capture: /dev/video2: the card gives 1280x720 YUYV at 59.940 fps, not 60 (FPS), and something else went wrong too".into(),
+        );
         assert_eq!(w.step, Step::FormatPick);
         let lines = w.lines();
         assert!(lines.len() <= PAGE_LINES, "{} lines: {lines:#?}", lines.len());
@@ -2427,7 +2414,10 @@ pub(crate) mod tests {
         press(&mut w, &["Down", "Enter"]);
         assert_eq!(w.outcome(), Some(Outcome::Play));
         let text = std::fs::read_to_string(&file).unwrap();
-        assert!(text.ends_with("# Setup was skipped; run protohdmicapture --setup (or legacy/view.sh --setup) to choose settings.\n"), "{text}");
+        assert!(
+            text.ends_with("# Setup was skipped; run protohdmicapture --setup (or legacy/view.sh --setup) to choose settings.\n"),
+            "{text}"
+        );
         // q in the tuner: the loopback stops, the wizard ends unsaved.
         let mut w = wizard(fake(), &file, false);
         press(&mut w, &["Enter", "Enter", "y", "Enter", "Enter", "Enter", "Enter", "Enter"]);
@@ -2524,7 +2514,11 @@ pub(crate) mod tests {
         let file = scratch("ignored", Some("IGNORE_CARDS_RE='OBSBOT|UVC Camera'\n"));
         let mut w = wizard(fake(), &file, false);
         press(&mut w, &["Enter"]);
-        assert!(w.lines().iter().any(|l| l.contains("UVC Camera (1e4e:7016)") && l.contains("◂ ignored · capture chip")), "{:#?}", w.lines());
+        assert!(
+            w.lines().iter().any(|l| l.contains("UVC Camera (1e4e:7016)") && l.contains("◂ ignored · capture chip")),
+            "{:#?}",
+            w.lines()
+        );
         press(&mut w, &["Enter"]);
         // The details say it; the camera stays ignored, so nothing is asked
         // about it.

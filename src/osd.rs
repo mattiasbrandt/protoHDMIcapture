@@ -155,9 +155,9 @@ fn char_colors(text: &str, base: Color32, kind: PageKind, index: usize, count: u
         let mut at = 0;
         for part in text.split(" · ") {
             let n = part.chars().count();
-            let count_like = part.split_once('/').is_some_and(|(a, b)| {
-                !a.is_empty() && !b.is_empty() && a.chars().chain(b.chars()).all(|c| c.is_ascii_digit())
-            });
+            let count_like = part
+                .split_once('/')
+                .is_some_and(|(a, b)| !a.is_empty() && !b.is_empty() && a.chars().chain(b.chars()).all(|c| c.is_ascii_digit()));
             if count_like {
                 paint(&mut colors, at, at + n, ACCENT);
             }
@@ -229,9 +229,7 @@ fn page_rows(lines: &[String], cols: usize, kind: PageKind) -> Vec<Row> {
     let mut in_note = false;
     for (i, l) in lines.iter().enumerate() {
         let (symbol, rest, base) = if i == 0 { (None, l.as_str(), TITLE) } else { styled(l) };
-        in_note = kind == PageKind::Wizard
-            && i > 0
-            && (rest.trim_start().starts_with("• ") || (in_note && rest.starts_with(' ')));
+        in_note = kind == PageKind::Wizard && i > 0 && (rest.trim_start().starts_with("• ") || (in_note && rest.starts_with(' ')));
         let colors = if in_note { vec![DIM; rest.chars().count()] } else { char_colors(rest, base, kind, i, lines.len()) };
         let chars: Vec<char> = rest.chars().collect();
         let band = kind == PageKind::Wizard && is_choice(&chars) && chars[0] == '▸';
@@ -349,10 +347,7 @@ impl Osd {
         scene: &Scene,
     ) -> Vec<wgpu::CommandBuffer> {
         let (w, h) = (size.0 as f32, size.1 as f32);
-        let mut input = egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h))),
-            ..Default::default()
-        };
+        let mut input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h))), ..Default::default() };
         if let Some(v) = input.viewports.get_mut(&input.viewport_id) {
             v.native_pixels_per_point = Some(1.0);
         }
@@ -416,7 +411,14 @@ fn paint(p: &egui::Painter, w: f32, h: f32, scene: &Scene) {
         let (x0, y0) = (((w - bw) / 2.0).floor(), ((h - bh) / 2.0).floor());
         p.rect_filled(Rect::from_min_size(Pos2::new(x0, y0), Vec2::new(bw, bh)), 0.0, BOX);
         let cx = (w / 2.0).floor();
-        outlined(p, Pos2::new(cx, y0 + (bh * 0.33).floor()), Align2::CENTER_CENTER, "No signal", FontId::monospace((fs * 1.6).floor()), TITLE);
+        outlined(
+            p,
+            Pos2::new(cx, y0 + (bh * 0.33).floor()),
+            Align2::CENTER_CENTER,
+            "No signal",
+            FontId::monospace((fs * 1.6).floor()),
+            TITLE,
+        );
         outlined(p, Pos2::new(cx, y0 + (bh * 0.72).floor()), Align2::CENTER_CENTER, detail, FontId::monospace(fs), TEXT);
     }
 
@@ -578,7 +580,12 @@ mod tests {
         // The key bar under the feed.
         assert_eq!(
             spans("Tab menu   ·   f display", &key_colors("Tab menu   ·   f display", "·", TEXT)),
-            vec![Span { text: "Tab".into(), color: ACCENT }, Span { text: " menu   ·   ".into(), color: TEXT }, Span { text: "f".into(), color: ACCENT }, Span { text: " display".into(), color: TEXT }]
+            vec![
+                Span { text: "Tab".into(), color: ACCENT },
+                Span { text: " menu   ·   ".into(), color: TEXT },
+                Span { text: "f".into(), color: ACCENT },
+                Span { text: " display".into(), color: TEXT }
+            ]
         );
     }
 
@@ -587,7 +594,10 @@ mod tests {
         assert_eq!(styled("OK: saved."), (Some(("✔", GOOD)), "saved.", TEXT));
         assert_eq!(styled("Warning: node numbers move"), (Some(("⚠", WARN)), "node numbers move", TEXT));
         assert_eq!(styled("Failed: the card is busy"), (Some(("✖", BAD)), "the card is busy", TEXT));
-        assert_eq!(styled("Known about this card (capture-cards/ms2130.md):"), (None, "Known about this card (capture-cards/ms2130.md):", TITLE));
+        assert_eq!(
+            styled("Known about this card (capture-cards/ms2130.md):"),
+            (None, "Known about this card (capture-cards/ms2130.md):", TITLE)
+        );
         assert_eq!(styled("USB id  : 1e4e:7016 · MacroSilicon MS2130"), (None, "USB id  : 1e4e:7016 · MacroSilicon MS2130", TEXT));
         assert_eq!(styled("  • a bullet that ends:"), (None, "  • a bullet that ends:", TEXT));
         assert_eq!(styled("Not OK: kept"), (None, "Not OK: kept", TEXT));
@@ -605,10 +615,7 @@ mod tests {
             levels: "auto",
             scaling: "balanced",
             colour: [0, 0, 0, 0],
-            audio: overlay::Audio::Running {
-                level: Some(Ok(crate::level::Level { volume: 80, mute: false })),
-                delay_ms: 50,
-            },
+            audio: overlay::Audio::Running { level: Some(Ok(crate::level::Level { volume: 80, mute: false })), delay_ms: 50 },
             tips_name: "PlayStation 5".into(),
             changes: &["LEVELS=full".into()],
         });
@@ -665,10 +672,12 @@ mod tests {
                 view_formats: &[],
             });
             // A grey ramp to draw over.
-            let bg: Vec<u8> = (0..w * h).flat_map(|i| {
-                let v = ((i % w) * 200 / w + 30) as u8;
-                [v, v, v, 255]
-            }).collect();
+            let bg: Vec<u8> = (0..w * h)
+                .flat_map(|i| {
+                    let v = ((i % w) * 200 / w + 30) as u8;
+                    [v, v, v, 255]
+                })
+                .collect();
             queue.write_texture(
                 target.as_image_copy(),
                 &bg,

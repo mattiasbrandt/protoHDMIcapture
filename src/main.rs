@@ -287,7 +287,8 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     // The viewer's numbers, from here on: the dashboard serves these. The
     // wizard's feed windows (--setup, or the first run above) had their own.
     let Args { seconds, monitor, stats, test_pattern, debug } = parse_args(args).ok_or(USAGE)?;
-    let mut opts = app::Options { seconds, monitor, stats, ..app::Options::new(live_changes::LiveChanges::DEFAULT, Arc::new(dashboard::Live::new())) };
+    let mut opts =
+        app::Options { seconds, monitor, stats, ..app::Options::new(live_changes::LiveChanges::DEFAULT, Arc::new(dashboard::Live::new())) };
 
     let s = if debug {
         Settings::resolve_with(&|k| if k == "DEBUG" { Some("window".into()) } else { env::var(k).ok() })
@@ -413,7 +414,9 @@ fn hold_console(offer_setup: bool) -> bool {
 /// the feed ran does not answer it.
 #[cfg(windows)]
 fn read_key_answer(offer_setup: bool) -> windows::core::Result<Held> {
-    use windows::Win32::System::Console::{FlushConsoleInputBuffer, GetStdHandle, INPUT_RECORD, KEY_EVENT, ReadConsoleInputW, STD_INPUT_HANDLE};
+    use windows::Win32::System::Console::{
+        FlushConsoleInputBuffer, GetStdHandle, INPUT_RECORD, KEY_EVENT, ReadConsoleInputW, STD_INPUT_HANDLE,
+    };
     // Safety: this process's own console input handle; read, not closed.
     let input = unsafe { GetStdHandle(STD_INPUT_HANDLE) }?;
     unsafe { FlushConsoleInputBuffer(input) }?;
