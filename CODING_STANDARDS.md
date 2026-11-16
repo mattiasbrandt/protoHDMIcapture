@@ -36,3 +36,8 @@ Rules for reviewing a change to this repo. Mechanical ones are enforced by
    before slower follow-up work. A file that undoes something
    (`refresh.restore`) is removed only after the undo succeeded, so a
    failure leaves it for the next run.
+7. **A move updates every place that names the old one.** When code moves
+   to another module or file, every doc, comment and table that says where
+   it lives follows it (`docs/run-dir.md`'s writers column, module docs,
+   "main.rs opens…"). Search for the old module's name, not only its path:
+   the old file usually still exists, so no check fails.
