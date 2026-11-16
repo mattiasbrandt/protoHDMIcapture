@@ -229,7 +229,9 @@ mod tests {
         })
     }
 
+    /// setup.done, once setup.pid is gone (every end removes it).
     fn done(dir: &Path) -> Option<String> {
+        assert!(!dir.join("setup.pid").exists(), "setup.pid left behind");
         std::fs::read_to_string(dir.join("setup.done")).ok()
     }
 
@@ -297,7 +299,8 @@ mod tests {
         assert_eq!(*seen.windows.borrow(), [Phase::Choose, Phase::Choose]);
         assert_eq!(seen.opened.get(), 1);
         // The session it took for the feed is let go.
-        assert!(!d.join("video.pid").exists());
+        assert!(Session::start(&d, Desktop::Generic).unwrap().is_ok());
+        assert_eq!(done(&d).as_deref(), Some("cancelled\n"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -315,6 +318,7 @@ mod tests {
             assert_eq!(run(start(&d, false), parts, &Quit::new()), Ok(false));
             assert_eq!(*seen.windows.borrow(), [Phase::Choose, Phase::Feed, Phase::Choose]);
             assert!(!d.join("video.pid").exists(), "the feed's session ends with its window");
+            assert_eq!(done(&d).as_deref(), Some("cancelled\n"));
             std::fs::remove_dir_all(&d).unwrap();
         }
     }
@@ -327,6 +331,7 @@ mod tests {
         let (parts, seen) = stand_ins(&d, vec![to_the_feed(), back_saying("a feed is running (pid 4242). Close it first.")], None);
         assert_eq!(run(start(&d, false), parts, &Quit::new()), Ok(false));
         assert_eq!(seen.opened.get(), 0);
+        assert_eq!(done(&d).as_deref(), Some("cancelled\n"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -358,6 +363,7 @@ mod tests {
             None,
         );
         assert_eq!(run(start(&d, true), parts, &quit), Ok(false));
+        assert_eq!(done(&d).as_deref(), Some("cancelled\n"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 

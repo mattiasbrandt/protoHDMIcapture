@@ -6,7 +6,7 @@
 //! Two windows, one after the other (`Phase`): the stages up to the
 //! picture format run in a window without a feed (the card is not chosen
 //! yet); from the signal check on, the window shows the chosen card's feed,
-//! the audio sync tunes while it plays, and the review saves. main.rs opens
+//! the audio sync tunes while it plays, and the review saves. setup.rs opens
 //! the window each phase needs.
 //!
 //! Like legacy/lib/setup.sh it decides only the settings flagged `wizard`; every
@@ -295,7 +295,7 @@ pub struct Wizard {
     /// Text above the question.
     body: Vec<String>,
     ask: Ask,
-    /// The window main.rs has open.
+    /// The window setup.rs has open.
     pub running: Phase,
     outcome: Option<Outcome>,
     cancelled: bool,
