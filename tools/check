@@ -46,7 +46,14 @@ if ! command -v cargo >/dev/null; then
     bad "cargo not found: protoHDMIcapture needs a Rust toolchain (rustup)"
 else
     cargo build --quiet || bad "protoHDMIcapture: cargo build"
-    cargo test --quiet >/dev/null || bad "protoHDMIcapture: cargo test (rerun it to see which)"
+    # The output is kept until the end: a test that fails once (a flake)
+    # must name itself here, as a rerun may pass.
+    test_log=$(mktemp)
+    if ! cargo test --quiet >"$test_log" 2>&1; then
+        grep -E '^test .* FAILED$|panicked at|^error' "$test_log"
+        bad "protoHDMIcapture: cargo test"
+    fi
+    rm -f "$test_log"
     cargo clippy --all-targets --quiet -- -D warnings || bad "protoHDMIcapture: cargo clippy"
     # Each fixture: a config file, optional KEY=value lines for the
     # environment, and the expected exit status plus regexes that some output
