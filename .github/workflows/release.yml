@@ -56,6 +56,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # The tag, also when called: the caller's commit predates the release PR.
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Draft release
         env:
@@ -97,6 +100,9 @@ jobs:
             libpipewire-0.3-dev libasound2-dev libdbus-1-dev libwayland-dev
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # The tag, also when called: the caller's commit predates the release PR.
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       # As in check.yml: the container's root over the runner's checkout.
       - name: Git
@@ -187,6 +193,9 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # The tag, also when called: the caller's commit predates the release PR.
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Rust
         run: |

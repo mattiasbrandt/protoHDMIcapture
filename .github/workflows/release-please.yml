@@ -1,19 +1,23 @@
-# On every push to main, release-please reads the Conventional Commits since
-# the last release and keeps one release PR open: the next version in
-# Cargo.toml and Cargo.lock, and its CHANGELOG.md section. Merging that PR
-# tags v<version> and creates the GitHub release as a draft
-# (release-please-config.json: draft, with force-tag-creation so the tag
-# exists at once); release.yml then builds, tests and uploads both packages
-# and publishes it.
+# Releases, with no hand on them (CONTRIBUTING.md, "Releases"). On every
+# push to main:
 #
-# release.yml is called from here rather than started by the tag: a tag
-# pushed with GITHUB_TOKEN starts no workflow. A tag pushed by hand still
-# runs release.yml on its own.
+#   release-please  reads the Conventional Commits since the last release and
+#                   opens or updates the release PR: the next version in
+#                   Cargo.toml and Cargo.lock, and its CHANGELOG.md section.
+#   check           runs check.yml on the release PR's branch;
+#   merge           squash-merges the PR once check passes;
+#   tag             runs release-please again, which sees the merged PR, tags
+#                   v<version> and creates the GitHub release as a draft
+#                   (release-please-config.json: draft, force-tag-creation);
+#   release         runs release.yml with that tag: both packages built,
+#                   tested and uploaded, then the release published.
+#
+# All of it in this one run, because everything done with GITHUB_TOKEN (the
+# PR, the merge, the tag) starts no other workflow. A release PR merged by
+# hand still releases: the next run's first release-please step tags it.
 #
 # Needs the repo setting "Allow GitHub Actions to create and approve pull
-# requests" (Settings > Actions > General). check.yml does not run on the
-# release PR on its own (opened with GITHUB_TOKEN); it only changes the
-# version and CHANGELOG.md.
+# requests" (Settings > Actions > General).
 name: release-please
 
 on:
@@ -37,6 +41,46 @@ jobs:
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
+      pr: ${{ steps.release.outputs.pr }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  check:
+    needs: release-please
+    if: needs.release-please.outputs.pr != ''
+    uses: ./.github/workflows/check.yml
+    with:
+      ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+
+  merge:
+    needs: [release-please, check]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Squash-merge the release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ fromJSON(needs.release-please.outputs.pr).number }}
+        run: gh pr merge "$PR" --squash --delete-branch
+
+  tag:
+    needs: merge
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
@@ -45,10 +89,14 @@ jobs:
           manifest-file: .release-please-manifest.json
 
   release:
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    needs: [release-please, tag]
+    # A release PR merged in this run (tag), or one merged by hand before it
+    # (release-please). The tag job is skipped when no PR was merged here.
+    if: >-
+      !cancelled() &&
+      (needs.release-please.outputs.release_created == 'true' || needs.tag.outputs.release_created == 'true')
     permissions:
       contents: write
     uses: ./.github/workflows/release.yml
     with:
-      tag: ${{ needs.release-please.outputs.tag_name }}
+      tag: ${{ needs.tag.outputs.tag_name || needs.release-please.outputs.tag_name }}
