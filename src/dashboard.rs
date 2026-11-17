@@ -304,7 +304,6 @@ impl Rolling {
         let repeated = live.repeated.load(Ordering::Relaxed);
         let cpu = cpu_ticks();
         let cpu_pct = match (self.cpu_ticks, cpu) {
-            // Safety: sysconf has no preconditions.
             (Some(a), Some(b)) => Some((b.saturating_sub(a)) as f64 / clock_ticks_per_s() / dt * 100.0),
             _ => None,
         };

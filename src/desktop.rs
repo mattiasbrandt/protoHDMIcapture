@@ -767,7 +767,7 @@ mod tests {
         assert_eq!(plan(&none, 60.0, Some("HDMI-A-9")).unwrap_err(), "no monitor HDMI-A-9 reported");
     }
 
-    /// A stand-in hyprctl, as tools/harness/refresh-record.sh has: the
+    /// A stand-in hyprctl, as legacy/tests/refresh-record.sh has: the
     /// monitors it reports, whether eval works, and a log of what it ran.
     fn fake(dir: &Path, rate: Option<f64>, eval_ok: bool) -> Hyprland {
         fs::create_dir_all(dir).unwrap();

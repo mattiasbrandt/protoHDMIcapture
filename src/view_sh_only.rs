@@ -1,8 +1,8 @@
 //! Settings only view.sh's players act on (#26). The settings file is
-//! shared, so the Rust viewer reads them, and says what it does with them
+//! shared, so protoHDMIcapture reads them, and says what it does with them
 //! instead of ignoring them: BACKEND other than mpv and AUDIO=mpv are
 //! refused with the way out; IPC and GST_IO_MODE away from their defaults
-//! get a note. They retire with view.sh (#10).
+//! get a note. Legacy is kept best effort (ADR 0002).
 
 use crate::settings::Settings;
 

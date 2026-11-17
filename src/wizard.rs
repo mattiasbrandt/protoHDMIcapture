@@ -327,7 +327,6 @@ pub struct Wizard {
     /// The tune page's word on a stopped loopback, or on a restart that
     /// failed; None while it plays.
     sync_stop: Option<String>,
-    kept_delay: Option<String>,
     saved: bool,
     changed: usize,
 }
@@ -518,7 +517,6 @@ impl Wizard {
             sync_note: None,
             sync_source: None,
             sync_stop: None,
-            kept_delay: None,
             saved: false,
             changed: 0,
         };
@@ -1444,7 +1442,6 @@ impl Wizard {
         let body = match kept.filter(|_| keep) {
             Some(v) => {
                 self.set("DELAY", &v);
-                self.kept_delay = Some(v.clone());
                 vec![format!("OK: DELAY={v} will be saved.")]
             }
             None => vec![format!("DELAY left at {}.", self.cur("DELAY"))],
@@ -2301,7 +2298,7 @@ pub(crate) mod tests {
         let mut w = wizard(fake(), &file, false);
         assert_eq!(w.new["WINDOW"], "windowed", "FULLSCREEN=no reads as WINDOW=windowed");
         press(&mut w, &["Enter", "Enter"]); // welcome, card
-        press(&mut w, &["n", "Enter", "Enter", "Enter", "Enter", "Enter"]); // keep the camera; usb; source; tips; format
+        press(&mut w, &["n", "Enter", "Enter", "Enter", "Enter", "Enter"]); // keep the camera; then through Format and the source's tips
         w.running = Phase::Feed;
         signal_ok(&mut w);
         press(&mut w, &["Enter", "2"]); // signal; audio: the mic
@@ -2709,7 +2706,7 @@ pub(crate) mod tests {
         let mut w = wizard(sys, &file, false);
         press(&mut w, &["Enter", "Enter"]);
         assert_eq!(w.new["DEV"], "/dev/video4", "no serial, no port: pinned by node");
-        press(&mut w, &["Enter", "Enter", "Enter"]); // details, source, tips
+        press(&mut w, &["Enter", "Enter", "Enter"]); // on to Format
         assert_eq!(w.step, Step::FormatNone);
         press(&mut w, &["n"]);
         assert_eq!(w.step, Step::FormatRes);

@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034  # CC_* are outputs read by the caller
 # Capture card profiles: what the project knows about each chip, one file per
-# chip in capture-cards/<chip>.md. Sourced by lib/setup.sh and
-# tools/capture-cards-table; the file shape is described in
+# chip in capture-cards/<chip>.md. Sourced by lib/setup.sh (tools/capture-cards-table
+# keeps its own copy of the reader); the file shape is described in
 # docs/capture-cards.md.
 #
 #   capture_card_lookup ID   set CC_* for a USB id (vid:pid); returns 0 for a

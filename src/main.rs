@@ -1,5 +1,4 @@
-//! protoHDMIcapture's Rust viewer (#10): one program for capture, display
-//! and audio. Opt-in beside view.sh until it has every feature (#10).
+//! protoHDMIcapture: one program for capture, display and audio.
 // On Windows (#18, #19, #33) the Hyprland adapter, refresh matching and
 // the presentation feedback are not wired up yet: their code is Linux's,
 // compiled but unused there.
