@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/mattiasbrandt/protoHDMIcapture/compare/v0.3.0...v0.4.0) (2026-11-17)
+
+
+### Features
+
+* **viewer:** --version and -V print the version ([e270839](https://github.com/mattiasbrandt/protoHDMIcapture/commit/e2708399b027bd0ca283f0be22c5eae5c95c99e5))
+
 ## [0.3.0](https://github.com/mattiasbrandt/protoHDMIcapture/compare/v0.2.0...v0.3.0) (2026-11-17)
 
 
