@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/mattiasbrandt/protoHDMIcapture/compare/v0.2.0...v0.3.0) (2026-11-17)
+
+
+### Features
+
+* **audio:** say when real-time priority is refused ([51a170c](https://github.com/mattiasbrandt/protoHDMIcapture/commit/51a170cf8aec1f5fa707152411f3c67a40918aca))
+
 ## [0.2.0](https://github.com/mattiasbrandt/protoHDMIcapture/compare/v0.1.2...v0.2.0) (2026-11-17)
 
 
