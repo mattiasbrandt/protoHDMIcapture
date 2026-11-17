@@ -23,6 +23,10 @@ updates:
     # Vendored with our patch (Cargo.toml [patch.crates-io]): moved by hand.
     ignore:
       - dependency-name: linuxvideo
+      # Must be the windows-core the windows crate uses (#[implement] takes
+      # its types): moved by hand, with windows. windows-core 0.100 has no
+      # windows to go with it (PR #58 broke the Windows build).
+      - dependency-name: windows-core
     groups:
       graphics:
         patterns:
