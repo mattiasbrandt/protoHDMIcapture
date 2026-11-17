@@ -67,8 +67,11 @@ impl Feedback for Presentation {
     }
 
     /// Feedback that has arrived since the last call. Reads the socket too
-    /// (never blocking): with EGL, Mesa reads it during swap, so winit is
-    /// not always woken for ours.
+    /// (never blocking): Mesa's Vulkan WSI reads it inside the present
+    /// (`wsi_wl_swapchain_queue_present` and `_ensure_dispatch` dispatch
+    /// its own queue, Mesa 26.2), which queues our events without waking
+    /// winit. That present also commits the surface before it returns, so
+    /// the feedback `request` asks for just before it is this frame's.
     fn drain(&mut self) -> Result<Vec<Outcome>, String> {
         if let Some(guard) = self.queue.prepare_read() {
             match guard.read() {
