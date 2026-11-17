@@ -42,6 +42,10 @@ concurrency:
 
 jobs:
   check:
+    # Not on the release PR's own pull_request event: release-please.yml
+    # checks that branch itself (workflow_call), and its merge deletes the
+    # branch under this run, which then fails with no jobs (#60).
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please--')
     runs-on: ubuntu-latest
     container: archlinux:latest
     # A cold run takes ~5.5 min.
