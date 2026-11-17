@@ -1,8 +1,48 @@
 # The workflows' actions are pinned to commit SHAs; this moves the pins.
-# Cargo stays manual: egui, wgpu and winit move together.
+# Cargo too, weekly: egui, wgpu, winit and their crates move together in
+# one PR (an egui release names the wgpu it needs), everything else in
+# another. The PR titles are Conventional Commits (build(deps): …), so a
+# dependency update alone makes no release.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
+    commit-message:
+      prefix: build
+      include: scope
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+      include: scope
+    # Vendored with our patch (Cargo.toml [patch.crates-io]): moved by hand.
+    ignore:
+      - dependency-name: linuxvideo
+    groups:
+      graphics:
+        patterns:
+          - "egui*"
+          - "epaint*"
+          - "emath"
+          - "ecolor"
+          - "wgpu*"
+          - "naga*"
+          - "winit"
+          - "raw-window-handle"
+      everything-else:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "egui*"
+          - "epaint*"
+          - "emath"
+          - "ecolor"
+          - "wgpu*"
+          - "naga*"
+          - "winit"
+          - "raw-window-handle"
