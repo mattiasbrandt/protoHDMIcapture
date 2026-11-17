@@ -43,8 +43,11 @@ concurrency:
 jobs:
   check:
     # Not on the release PR's own pull_request event: release-please.yml
-    # checks that branch itself (workflow_call), and its merge deletes the
-    # branch under this run, which then fails with no jobs (#60).
+    # checks that branch itself (workflow_call). Today that run never gets
+    # this far: GitHub holds runs for a PR github-actions[bot] opened until
+    # someone approves them, and the release merge closes the PR first, so
+    # it ends red with no jobs (#60, #61). This skips it if GitHub ever
+    # starts such runs.
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please--')
     runs-on: ubuntu-latest
     container: archlinux:latest
