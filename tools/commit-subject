@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Checks commit subjects (and PR titles) against Conventional Commits 1.0.0,
+# the rule CONTRIBUTING.md states and release-please reads.
+# Usage: tools/commit-subject <subject>...   or   ... | tools/commit-subject
+# Exit 1, with each bad subject named, when one does not follow it.
+set -uo pipefail
+types='feat|fix|perf|revert|refactor|docs|test|style|chore|ci|build'
+re="^(${types})(\([a-z0-9][a-z0-9/._-]*\))?!?: [^ ].*[^.]$"
+# What git writes itself, kept as written.
+own='^(Merge |Revert "|fixup! |squash! |amend! )'
+
+check() {
+    if [[ $1 =~ $re || $1 =~ $own ]]; then
+        return 0
+    fi
+    printf 'not a Conventional Commit: %s\n' "$1" >&2
+    return 1
+}
+
+fail=0
+if [ "$#" -gt 0 ]; then
+    for s in "$@"; do check "$s" || fail=1; done
+else
+    while IFS= read -r s; do [ -n "$s" ] && { check "$s" || fail=1; }; done
+fi
+if [ "$fail" != 0 ]; then
+    echo "  <type>(<scope>)?: <subject>, types: ${types//|/ }; see CONTRIBUTING.md" >&2
+fi
+exit "$fail"

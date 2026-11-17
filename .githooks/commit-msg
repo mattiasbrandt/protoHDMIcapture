@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Enabled per clone with: git config core.hooksPath .githooks
+# The subject line (the first line that is not a comment) follows
+# Conventional Commits: tools/commit-subject.
+top=$(git rev-parse --show-toplevel) || exit 1
+subject=$(grep -v '^#' "$1" | sed -n '/[^[:space:]]/{p;q}')
+exec "$top/tools/commit-subject" "$subject"

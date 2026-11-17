@@ -1,0 +1,43 @@
+# Conventional Commits (CONTRIBUTING.md), which release-please reads to pick
+# the next version and write CHANGELOG.md: every commit pushed to main, and
+# a PR's title, which becomes its squash commit. tools/commit-subject holds
+# the rule; .githooks/commit-msg runs it at commit time.
+name: commits
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  subjects:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: PR title
+        if: github.event_name == 'pull_request'
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: tools/commit-subject "$TITLE"
+
+      # A new branch has no "before"; a force push may have lost it.
+      - name: Pushed commits
+        if: github.event_name == 'push'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if [ "${BEFORE//0/}" = "" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            git log -1 --format=%s "$AFTER" | tools/commit-subject
+          else
+            git log --format=%s "$BEFORE..$AFTER" | tools/commit-subject
+          fi
