@@ -501,6 +501,21 @@ mod tests {
     use super::*;
     use crate::overlay;
 
+    /// The fonts the overlay draws with hold its text and its status
+    /// symbols: egui 0.37 bundles no font unless a feature asks for one
+    /// (Cargo.toml: monochrome_emoji_fonts).
+    #[test]
+    fn the_fonts_hold_the_overlays_symbols() {
+        let ctx = egui::Context::default();
+        // The first pass loads the fonts; its texture upload is not needed.
+        ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
+        let font = FontId::monospace(14.0);
+        ctx.fonts_mut(|f| {
+            assert!(f.has_glyphs(&font, "Aa0:|·"), "no text glyphs");
+            assert!(f.has_glyphs(&font, "✔⚠✖"), "no status symbols");
+        });
+    }
+
     /// The overlay drawn over a test frame on the GPU, written to
     /// $TMPDIR/phc-osd-<page>.png to look at:
     /// `cargo test -- --ignored --nocapture osd_drawn_offscreen`.
