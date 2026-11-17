@@ -30,10 +30,11 @@ protoHDMIcapture need not touch it.
   `.cargo/config.toml` (the static C runtime on Windows) only from the
   working directory up, so a build started outside it with
   `--manifest-path` makes an exe that needs the Visual C++ runtime.
-- **Releasing:** release-please keeps a release PR open from the
-  Conventional Commits on `main`; merging it tags `v<version>` and runs
-  `.github/workflows/release.yml` (packaging: #14). Commit subjects
-  need a type (`feat:`, `fix:`, …) to reach `CHANGELOG.md`.
+- **Commits and releases:** [`CONTRIBUTING.md`](CONTRIBUTING.md).
+  Every commit subject is a Conventional Commit (`tools/commit-subject`;
+  the `commit-msg` hook and CI enforce it); its type picks the next
+  semver version. Releases are automatic (release-please); never edit
+  the version, `CHANGELOG.md` or a tag by hand.
 - **Verifying on hardware:** read [`docs/testing.md`](docs/testing.md) before
   a real run; it lists the traps that fake failures.
 - **Session files** (`$XDG_RUNTIME_DIR/protohdmicapture/`): the contract

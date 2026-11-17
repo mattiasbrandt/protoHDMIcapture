@@ -344,7 +344,9 @@ players, its menu entry and its own troubleshooting:
   with the `x86_64-pc-windows-msvc` target), and the harnesses in
   `tools/harness/`; legacy gets lint and syntax only. CI runs it
   on every push; `git config core.hooksPath .githooks` runs it before each
-  commit.
+  commit, and checks each commit subject.
+- [CONTRIBUTING.md](CONTRIBUTING.md): Conventional Commits, semantic
+  versioning, and the automatic releases.
 - [docs/testing.md](docs/testing.md) lists the traps that fake failures in
   a run against a real card; [docs/run-dir.md](docs/run-dir.md) is the
   contract for the session files.

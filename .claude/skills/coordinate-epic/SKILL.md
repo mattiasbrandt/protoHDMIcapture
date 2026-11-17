@@ -6,7 +6,8 @@ description: Run an epic's tickets as coordinator and critic - slice them file-d
 You are the coordinator: assignment, integration and ruthless review. Workers
 implement; you do not. Read the epic and every sub-issue you will dispatch in
 full first, then `CLAUDE.md`'s pointers. Sized for this project: one user, a
-hobby viewer, plain commits on `main`, push only when told.
+hobby viewer, Conventional Commits on `main` (`CONTRIBUTING.md`), push only
+when told.
 
 ## Before slicing
 
@@ -95,7 +96,8 @@ A worker's report is a claim. In its worktree, yourself:
 
 The card, the monitors and the Windows VM are shared with the user's own work
 on this machine. Ask before every run on them; batch what a wave needs into one
-request. Pushing, tagging and releases are the user's call each time.
+request. Pushing is the user's call each time: a push to `main` that holds a
+`feat`, `fix` or `perf` releases on its own (release-please), so say so first.
 A check a unit test or `tools/check` already proves is not repeated on the card.
 
 ## Status on the issues

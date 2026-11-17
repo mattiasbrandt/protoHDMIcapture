@@ -60,7 +60,8 @@ VERIFICATION
   user.
 
 COMMITS
-One commit per slice, `type(scope): summary (#{ISSUE})`, the reason in the
+One commit per slice, a Conventional Commit `type(scope): summary (#{ISSUE})`
+(`CONTRIBUTING.md`: the type picks the release; the `commit-msg` hook checks it), the reason in the
 body, explicit `git add` per file. No `Co-Authored-By` or any attribution
 trailer. Never push. Never leave a green slice uncommitted.
 

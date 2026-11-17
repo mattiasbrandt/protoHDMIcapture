@@ -66,8 +66,8 @@ To build the installer: `packaging\windows\build-msi.ps1 [-OutDir dist]`
 tools, and WiX 7: `dotnet tool install --global wix --version 7.0.0`; WiX 7's
 [Open Source Maintenance Fee](https://docs.firegiant.com/wix/osmf/) EULA is
 accepted for this project in the script). `packaging\windows\test-msi.ps1
--Msi <file>` installs, checks and removes it. A release (release-please's
-release PR merged, or a `v*` tag) builds and tests both packages in CI
+-Msi <file>` installs, checks and removes it. A release (automatic, see
+[CONTRIBUTING.md](../CONTRIBUTING.md), or a `v*` tag) builds and tests both packages in CI
 (`.github/workflows/release.yml`) and publishes them with `SHA256SUMS`.
 
 ## From source
