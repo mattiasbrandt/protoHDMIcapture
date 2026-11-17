@@ -41,11 +41,20 @@ const GAIN: f64 = 0.5;
 const DEAD_BAND: f64 = 0.001;
 /// The largest delay: view.sh's DELAY setting is 0..1 s.
 pub const MAX_DELAY_MS: u32 = 1000;
-/// The ring holds the largest delay plus room for the input running up to
-/// two buffers ahead (LAT_MS goes to 1000 ms) and a margin; a delay it
-/// cannot hold would never prime (silence).
+/// The most the ring keeps: the largest delay plus room for the input
+/// running up to two buffers ahead (LAT_MS goes to 1000 ms) and a margin;
+/// a delay it cannot hold would never prime (silence). The output trims
+/// the oldest frames over it.
 const fn ring_frames(buffer_frames: u32) -> usize {
     frames_for(MAX_DELAY_MS) + 2 * buffer_frames as usize + RATE as usize / 4
+}
+
+/// The ring's capacity: `ring_frames` and two buffers more, so the input
+/// keeps pushing while the output trims back to `ring_frames`. Full (the
+/// output stalled over a second), the input cannot push and marks the
+/// ring overflowed: the output then empties it and primes again.
+const fn ring_capacity(buffer_frames: u32) -> usize {
+    ring_frames(buffer_frames) + 2 * buffer_frames as usize
 }
 
 /// The ring's fill the output steers to: DELAY over one buffer (LAT_MS).
@@ -53,13 +62,6 @@ const fn ring_frames(buffer_frames: u32) -> usize {
 /// between blocks at small delays (DELAY=0: about a third of the output
 /// callbacks found the ring empty); pw-loopback likewise keeps its
 /// graph's latency under `--delay`.
-/// The ring's capacity: `ring_frames` and two buffers more, so the input
-/// keeps pushing while the output trims back to `ring_frames`. Full (the
-/// output stalled), the input drops its newest frames.
-const fn ring_capacity(buffer_frames: u32) -> usize {
-    ring_frames(buffer_frames) + 2 * buffer_frames as usize
-}
-
 const fn target_frames(delay_ms: u32, buffer_frames: u32) -> usize {
     frames_for(delay_ms) + buffer_frames as usize
 }
@@ -89,6 +91,9 @@ pub struct Counters {
     /// The host refused a stream's thread real-time priority (#52):
     /// sound may crackle under load.
     pub realtime_refused: AtomicBool,
+    /// The input found the ring full and dropped frames: what the ring
+    /// holds is no longer continuous with the input (`play_out`).
+    overflowed: AtomicBool,
     /// Frames per callback, smallest and largest seen.
     pub in_min: AtomicU32,
     pub in_max: AtomicU32,
@@ -154,9 +159,10 @@ fn on_error(counters: &Arc<Counters>, notify: &NotifySlot, side: &'static str) -
             ErrorKind::Xrun => {
                 counters.xruns.fetch_add(1, Ordering::Relaxed);
             }
-            // Said once for both streams. On PipeWire this comes from
-            // cpal's promotion thread, on WASAPI from the stream's thread
-            // before its first callback.
+            // Said once for both streams, from cpal's promotion thread.
+            // PipeWire only: cpal 0.18.2's WASAPI host drops the refusal
+            // and reports SetThreadPriority's failure, if any, as another
+            // error (host/wasapi/stream.rs `boost_current_thread_priority`).
             ErrorKind::RealtimeDenied => {
                 if !counters.realtime_refused.swap(true, Ordering::Relaxed) {
                     eprintln!("note: real-time priority refused; sound may crackle under load ({side}: {e})");
@@ -496,6 +502,16 @@ fn play_out(r: &mut Ring, c: &Counters, out: &mut [f32], buffer_frames: u32) {
         out.fill(0.0);
         return;
     }
+    // The input dropped frames on a full ring (the output stalled): the
+    // ring has a gap the steering cannot see, which would leave the sound
+    // that far behind for good. Emptied, and primed again.
+    if c.overflowed.swap(false, Ordering::Relaxed) {
+        if let Ok(chunk) = r.frames.read_chunk(r.frames.slots()) {
+            chunk.commit_all();
+        }
+        r.primed = false;
+        r.pos = 0.0;
+    }
     // A stalled output must not grow the delay without bound: the oldest
     // frames over `ring_frames` go.
     let excess = r.frames.slots().saturating_sub(ring_frames(buffer_frames));
@@ -547,10 +563,14 @@ fn step(fill: usize, target: usize) -> f64 {
 }
 
 /// One input callback: `data` onto the ring, as much as it has room for
-/// (`ring_capacity`).
-fn take_in(ring: &mut rtrb::Producer<Frame>, data: &[f32]) {
+/// (`ring_capacity`); any it had no room for marks it `overflowed`.
+fn take_in(ring: &mut rtrb::Producer<Frame>, data: &[f32], overflowed: &AtomicBool) {
     let frames = data.as_chunks::<2>().0;
-    if let Ok(chunk) = ring.write_chunk_uninit(frames.len().min(ring.slots())) {
+    let room = ring.slots();
+    if frames.len() > room {
+        overflowed.store(true, Ordering::Relaxed);
+    }
+    if let Ok(chunk) = ring.write_chunk_uninit(frames.len().min(room)) {
         chunk.fill_from_iter(frames.iter().copied());
     }
 }
@@ -646,7 +666,7 @@ impl Audio {
                     move |data, _| {
                         let n = data.len() / CHANNELS as usize;
                         seen(&c.in_min, &c.in_max, n as u32);
-                        take_in(&mut tx, data);
+                        take_in(&mut tx, data, &c.overflowed);
                     },
                     on_error(&counters, &notify, "input"),
                     None,
@@ -1315,22 +1335,56 @@ mod tests {
     }
 
     #[test]
-    fn a_stalled_output_keeps_the_newest_frames_at_most() {
+    fn a_short_stall_trims_the_oldest_frames() {
         // #52: the old VecDeque reallocated (60960 -> 121920 frames) on the
-        // input path once a stalled output filled it. Now the input only
-        // pushes what fits, and the output trims the oldest.
+        // input path once a stalled output filled it. Now the ring never
+        // grows, and the output trims the oldest frames over ring_frames.
         let bf = 480;
         let (mut tx, mut ring) = ring(bf);
-        let blocks = ring_capacity(bf) / bf as usize + 4;
-        for b in 0..blocks {
-            take_in(&mut tx, &vec![b as f32; bf as usize * 2]);
+        let c = counters(MAX_DELAY_MS);
+        for b in 0..ring_capacity(bf) / bf as usize {
+            take_in(&mut tx, &vec![b as f32; bf as usize * 2], &c.overflowed);
         }
         assert_eq!(ring.frames.slots(), ring_capacity(bf), "full, not grown");
-        let c = counters(MAX_DELAY_MS);
+        assert!(!c.overflowed.load(Ordering::Relaxed), "nothing dropped yet");
         let mut out = vec![0.0f32; bf as usize * 2];
         play_out(&mut ring, &c, &mut out, bf);
         assert_eq!(c.fill.load(Ordering::Relaxed) as usize, ring_frames(bf), "trimmed to ring_frames");
         assert_eq!(out[0], 2.0, "the two oldest blocks went");
+    }
+
+    #[test]
+    fn a_long_stall_empties_the_ring_and_primes_again() {
+        // The review of #52: a full ring dropping the input's newest frames
+        // left a gap the steering cannot see, the sound behind for good.
+        let bf = 480;
+        let (mut tx, mut ring) = ring(bf);
+        let c = counters(50);
+        let mut out = vec![1.0f32; bf as usize * 2];
+        for b in 0..ring_capacity(bf) / bf as usize + 4 {
+            take_in(&mut tx, &vec![b as f32; bf as usize * 2], &c.overflowed);
+        }
+        assert!(c.overflowed.load(Ordering::Relaxed), "the input dropped frames");
+        play_out(&mut ring, &c, &mut out, bf);
+        assert!(out.iter().all(|&s| s == 0.0), "silence while it primes again");
+        assert_eq!(c.fill.load(Ordering::Relaxed), 0, "emptied");
+        let fresh = 7.0;
+        while ring.frames.slots() < target_frames(50, bf) {
+            take_in(&mut tx, &vec![fresh; bf as usize * 2], &c.overflowed);
+        }
+        play_out(&mut ring, &c, &mut out, bf);
+        assert!(out.iter().all(|&s| s == fresh), "plays the input from after the stall");
+        assert_eq!(c.ring_underruns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_refused_real_time_priority_is_marked_once_and_not_an_error() {
+        let c = Arc::new(counters(50));
+        let mut cb = on_error(&c, &NotifySlot::default(), "input");
+        cb(cpal::Error::new(ErrorKind::RealtimeDenied));
+        cb(cpal::Error::new(ErrorKind::RealtimeDenied));
+        assert!(c.realtime_refused.load(Ordering::Relaxed));
+        assert_eq!(c.other_errors.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -1354,7 +1408,7 @@ mod tests {
         let target = target_frames(50, bf);
         let block = vec![0.25f32; bf as usize * 2];
         while tx.slots() > 0 && ring.frames.slots() < target + frames_for(500) {
-            take_in(&mut tx, &block);
+            take_in(&mut tx, &block, &c.overflowed);
         }
         let before = ring.frames.slots();
         let mut out = vec![0.0f32; bf as usize * 2];
