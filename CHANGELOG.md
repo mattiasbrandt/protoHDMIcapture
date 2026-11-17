@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/mattiasbrandt/protoHDMIcapture/compare/v0.5.0...v0.5.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* **wizard:** the environment warning names only what wins over the file ([739e9ed](https://github.com/mattiasbrandt/protoHDMIcapture/commit/739e9ed63bdd7c118eac789f217fb33b262a8f56))
+
 ## [0.5.0](https://github.com/mattiasbrandt/protoHDMIcapture/compare/v0.4.0...v0.5.0) (2026-11-17)
 
 
