@@ -241,6 +241,13 @@ impl Settings {
         self.from.get(name).copied().unwrap_or(From::Default)
     }
 
+    /// The settings the environment sets, in table order: an empty value
+    /// only where empty means something, as resolving counts it (the
+    /// wizard's warning that they win over the file).
+    pub fn set_by_env(&self) -> Vec<String> {
+        self.rows.iter().filter(|r| self.from(&r.name) == From::Env).map(|r| r.name.clone()).collect()
+    }
+
     /// `settings_validate`: one message per value out of bounds.
     pub fn errors(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -493,6 +500,17 @@ mod tests {
             }
             extra.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
         })
+    }
+
+    #[test]
+    fn set_by_env_lists_what_the_environment_sets_as_resolving_counts_it() {
+        let s = with("DELAY=0.05\nLEVELS=full\n", &[("DELAY", "0.1"), ("LEVELS", ""), ("IPC", ""), ("FULLSCREEN", "no"), ("NOPE", "1")]);
+        // DELAY set; LEVELS= empty is unset (the file's full wins); IPC=
+        // empty means something; FULLSCREEN by its old name, and WINDOW,
+        // which it sets and the wizard writes; NOPE is no setting.
+        assert_eq!(s.set_by_env(), ["DELAY", "WINDOW", "IPC", "FULLSCREEN"]);
+        assert_eq!(s.get("LEVELS"), "full");
+        assert!(with("", &[]).set_by_env().is_empty());
     }
 
     #[test]

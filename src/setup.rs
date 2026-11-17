@@ -76,7 +76,7 @@ pub fn run(start: Start, parts: Parts, quit: &Quit) -> Result<Ended, String> {
         Err(std::fs::TryLockError::WouldBlock) => return Err("another setup wizard is already running".into()),
         Err(std::fs::TryLockError::Error(e)) => return Err(format!("setup.lock: {e}")),
     }
-    let wiz = Rc::new(RefCell::new(Wizard::new(system, config_file, first_run, &|k| std::env::var_os(k).is_some())?));
+    let wiz = Rc::new(RefCell::new(Wizard::new(system, config_file, first_run, crate::settings::Settings::resolve().set_by_env())?));
     // After every early return above, so none leaves it behind.
     std::fs::write(dir.join("setup.pid"), format!("{}\n", std::process::id())).map_err(|e| format!("setup.pid: {e}"))?;
     // Each feed window's numbers are its own, and nobody reads them.

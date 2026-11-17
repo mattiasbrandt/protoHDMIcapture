@@ -460,7 +460,9 @@ impl Wizard {
     /// `first_run`: no settings file yet; the welcome offers to skip.
     /// Err: the settings file is there but cannot be read, so its values
     /// cannot be the starting point (nor saved over at the end).
-    pub fn new(sys: Box<dyn System>, config_file: PathBuf, first_run: bool, env: &dyn Fn(&str) -> bool) -> Result<Self, String> {
+    /// `env_overrides`: the settings the environment sets
+    /// (`Settings::set_by_env`), which win over what the wizard writes.
+    pub fn new(sys: Box<dyn System>, config_file: PathBuf, first_run: bool, env_overrides: Vec<String>) -> Result<Self, String> {
         let rows = settings::rows();
         let managed = settings::with_flag("wizard");
         let defaults = rows.iter().map(|r| (r.name.clone(), r.default.clone())).collect();
@@ -479,7 +481,6 @@ impl Wizard {
             new.insert("FULLSCREEN".into(), String::new());
         }
         // A setting in the environment beats the file at play time.
-        let env_overrides = rows.iter().filter(|r| env(&r.name)).map(|r| r.name.clone()).collect();
         let mut stages = vec![Stage::Welcome, Stage::Card, Stage::Source, Stage::Format, Stage::Signal, Stage::Audio, Stage::Display];
         if sys.can_match_refresh() {
             stages.push(Stage::Refresh);
@@ -2152,7 +2153,7 @@ pub(crate) mod tests {
     }
 
     fn wizard(sys: Fake, file: &std::path::Path, first_run: bool) -> Wizard {
-        Wizard::new(Box::new(sys), file.to_path_buf(), first_run, &|_| false).unwrap()
+        Wizard::new(Box::new(sys), file.to_path_buf(), first_run, Vec::new()).unwrap()
     }
 
     pub(crate) fn press(w: &mut Wizard, keys: &[&str]) {
@@ -2458,6 +2459,16 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_welcome_names_the_settings_the_environment_sets() {
+        let file = scratch("envwarn", Some("SOURCE=ps5\n"));
+        let w = Wizard::new(Box::new(fake()), file.clone(), false, vec!["DELAY".into(), "IPC".into()]).unwrap();
+        let warning = "Warning: set in your environment, and winning over the file: DELAY IPC";
+        assert!(w.lines().iter().any(|l| l == warning), "{:#?}", w.lines());
+        assert!(!wizard(fake(), &file, false).lines().iter().any(|l| l.starts_with("Warning: set in your environment")));
+        std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn a_saved_delay_that_is_not_valid_is_said_so_in_the_tuner() {
         let file = scratch("baddelay", Some("SOURCE=ps5\nDELAY=abc\n"));
         let sys = fake();
@@ -2471,7 +2482,7 @@ pub(crate) mod tests {
         assert_eq!(delay.get(), 50);
         assert!(w.lines().iter().any(|l| l.starts_with("DELAY=abc: ") && l.ends_with(": starting from 0.050")), "{:#?}", w.lines());
         // An unreadable settings file stops the wizard before it starts.
-        assert!(Wizard::new(Box::new(fake()), file.parent().unwrap().to_path_buf(), false, &|_| false).is_err());
+        assert!(Wizard::new(Box::new(fake()), file.parent().unwrap().to_path_buf(), false, Vec::new()).is_err());
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 
