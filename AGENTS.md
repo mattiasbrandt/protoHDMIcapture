@@ -35,8 +35,10 @@ protoHDMIcapture need not touch it.
   the `commit-msg` hook and CI enforce it); its type picks the next
   semver version. Releases are automatic (release-please); never edit
   the version, `CHANGELOG.md` or a tag by hand.
-- **Verifying on hardware:** read [`docs/testing.md`](docs/testing.md) before
-  a real run; it lists the traps that fake failures.
+- **Verifying on hardware:** read [`docs/testing.md`](docs/testing.md) in
+  full before a real run: its traps, and how to drive the window yourself
+  (keys via hyprctl and wtype, screenshots), so the user does only the
+  physical steps.
 - **Session files** (`$XDG_RUNTIME_DIR/protohdmicapture/`): the contract
   between protoHDMIcapture, legacy, the wizard, the dashboard and the mpv
   script is

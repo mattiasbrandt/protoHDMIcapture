@@ -41,3 +41,8 @@ Rules for reviewing a change to this repo. Mechanical ones are enforced by
    it lives follows it (`docs/run-dir.md`'s writers column, module docs,
    "main.rs opens…"). Search for the old module's name, not only its path:
    the old file usually still exists, so no check fails.
+8. **A failure on a page says so in its colour, with its way out.** A
+   wizard or overlay line reporting a failure starts with `Failed: ` or
+   `Warning: `, which the OSD draws red or amber (`src/osd.rs` `styled`);
+   a stopped state names the key that recovers it ("Press r to start the
+   sound again."). A plain line was read past on the card (#51).

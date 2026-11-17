@@ -79,3 +79,10 @@ Nobody edits the version, `CHANGELOG.md` or a tag by hand. A `v*` tag
 pushed by hand still runs `release.yml`; its version must match
 `Cargo.toml`. Run `release.yml` from the Actions tab to build and test
 both packages without releasing anything.
+
+The release PR's own `check` and `commits` runs end red with no jobs:
+GitHub holds runs for a PR `github-actions[bot]` opened until someone
+approves them, and step 2's merge closes the PR first. The gate is step
+2's check. Before changing a workflow over a red run, read the run itself:
+`gh api repos/{owner}/{repo}/actions/runs/<id>/jobs` (its `total_count`),
+and its times against the PR's merge.

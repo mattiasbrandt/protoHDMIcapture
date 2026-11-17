@@ -27,6 +27,16 @@ gst or ffplay are legacy's.
   the PS5 enters rest mode the MS2130 streams its own "No Signal" box for
   about a minute (a picture, by the glossary), then no frames, which can
   flicker back for a few seconds. Check right before each run.
+- **Pulling the card's USB ends the feed first**, before anything that
+  watches the card audio input alone (the audio sync stage's loopback,
+  the feed's dead loopback) sees it. To stop only the card audio input,
+  switch its sound-card profile off and back:
+
+  ```bash
+  pactl list cards short                                  # its alsa_card.usb-… name
+  pactl set-card-profile alsa_card.usb-<id> off            # gone: "defined target not found"
+  pactl set-card-profile alsa_card.usb-<id> input:analog-stereo
+  ```
 - **Bare mpv is not view.sh's mpv for signals.** view.sh passes
   `--input-terminal=no`, which leaves SIGTERM fatal; a bare mpv without it
   catches TERM and quits cleanly, so the two behave differently.
