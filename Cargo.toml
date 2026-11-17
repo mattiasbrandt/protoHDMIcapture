@@ -32,7 +32,7 @@ linuxvideo = "=0.3.5"
 pipewire = "0.10"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-client = "0.31"
-wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
+wayland-protocols = { version = "0.32.13", features = ["client"] }
 
 [target.'cfg(windows)'.dependencies]
 # windows-core for the #[implement] macro's generated paths.
