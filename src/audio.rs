@@ -17,7 +17,6 @@
 //! view.sh's sync keys do.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -54,6 +53,13 @@ const fn ring_frames(buffer_frames: u32) -> usize {
 /// between blocks at small delays (DELAY=0: about a third of the output
 /// callbacks found the ring empty); pw-loopback likewise keeps its
 /// graph's latency under `--delay`.
+/// The ring's capacity: `ring_frames` and two buffers more, so the input
+/// keeps pushing while the output trims back to `ring_frames`. Full (the
+/// output stalled), the input drops its newest frames.
+const fn ring_capacity(buffer_frames: u32) -> usize {
+    ring_frames(buffer_frames) + 2 * buffer_frames as usize
+}
+
 const fn target_frames(delay_ms: u32, buffer_frames: u32) -> usize {
     frames_for(delay_ms) + buffer_frames as usize
 }
@@ -109,8 +115,11 @@ impl Counters {
 /// Where a message for the window goes, once it runs (`Controls::set_notify`).
 type NotifySlot = Arc<Mutex<Option<Notify>>>;
 
+/// The ring's output end: an SPSC ring (rtrb), so neither real-time
+/// callback locks or allocates (#52). The input end only pushes; trimming
+/// a stalled output's excess is done here.
 struct Ring {
-    frames: VecDeque<Frame>,
+    frames: rtrb::Consumer<Frame>,
     /// Fractional read position into `frames`.
     pos: f64,
     /// Output starts once the ring first holds the delay.
@@ -476,23 +485,31 @@ fn play_out(r: &mut Ring, c: &Counters, out: &mut [f32], buffer_frames: u32) {
         out.fill(0.0);
         return;
     }
+    // A stalled output must not grow the delay without bound: the oldest
+    // frames over `ring_frames` go.
+    let excess = r.frames.slots().saturating_sub(ring_frames(buffer_frames));
+    if let Ok(chunk) = r.frames.read_chunk(excess) {
+        chunk.commit_all();
+    }
+    let fill = r.frames.slots();
     let target = target_frames(c.target_ms.load(Ordering::Relaxed), buffer_frames);
-    c.fill.store(r.frames.len() as u32, Ordering::Relaxed);
+    c.fill.store(fill as u32, Ordering::Relaxed);
     if !r.primed {
-        if r.frames.len() < target {
+        if fill < target {
             out.fill(0.0);
             return;
         }
         r.primed = true;
     }
-    // Too much delay: play faster; too little: slower.
-    let error = (r.frames.len() as f64 - target as f64) / RATE as f64;
-    let step = if error.abs() <= DEAD_BAND { 1.0 } else { 1.0 + (error * GAIN).clamp(-CATCH_UP, CATCH_UP) };
+    let step = step(fill, target);
+    let Ok(chunk) = r.frames.read_chunk(fill) else { unreachable!("the consumer reads what it just counted") };
+    let (head, tail) = chunk.as_slices();
+    let get = |k: usize| if k < head.len() { head.get(k) } else { tail.get(k - head.len()) };
     let mut pos = r.pos;
     let mut dry_from = None;
     for (i, o) in out.as_chunks_mut::<2>().0.iter_mut().enumerate() {
         let k = pos as usize;
-        let (Some(a), Some(b)) = (r.frames.get(k), r.frames.get(k + 1)) else {
+        let (Some(a), Some(b)) = (get(k), get(k + 1)) else {
             c.ring_underruns.fetch_add(1, Ordering::Relaxed);
             dry_from = Some(i);
             break;
@@ -505,9 +522,26 @@ fn play_out(r: &mut Ring, c: &Counters, out: &mut [f32], buffer_frames: u32) {
     if let Some(i) = dry_from {
         out[i * 2..].fill(0.0);
     }
-    let used = (pos as usize).min(r.frames.len());
-    r.frames.drain(..used);
+    let used = (pos as usize).min(fill);
+    chunk.commit(used);
     r.pos = pos - used as f64;
+}
+
+/// The output's speed for a fill against its target: too much delay plays
+/// faster, too little slower, in proportion (`GAIN`) and at most
+/// `CATCH_UP` off; within `DEAD_BAND`, exactly 1x.
+fn step(fill: usize, target: usize) -> f64 {
+    let error = (fill as f64 - target as f64) / RATE as f64;
+    if error.abs() <= DEAD_BAND { 1.0 } else { 1.0 + (error * GAIN).clamp(-CATCH_UP, CATCH_UP) }
+}
+
+/// One input callback: `data` onto the ring, as much as it has room for
+/// (`ring_capacity`).
+fn take_in(ring: &mut rtrb::Producer<Frame>, data: &[f32]) {
+    let frames = data.as_chunks::<2>().0;
+    if let Ok(chunk) = ring.write_chunk_uninit(frames.len().min(ring.slots())) {
+        chunk.fill_from_iter(frames.iter().copied());
+    }
 }
 
 /// The `--stats` status line; a loopback stopped mid-feed says so, its
@@ -588,11 +622,11 @@ impl Audio {
             target_ms: AtomicU32::new(delay_ms),
             ..Default::default()
         });
-        let ring = Arc::new(Mutex::new(Ring { frames: VecDeque::with_capacity(ring_frames(buffer_frames)), pos: 0.0, primed: false }));
+        let (mut tx, rx) = rtrb::RingBuffer::new(ring_capacity(buffer_frames));
+        let mut ring = Ring { frames: rx, pos: 0.0, primed: false };
         let notify = NotifySlot::default();
 
         let input = {
-            let ring = ring.clone();
             let c = counters.clone();
             in_dev
                 .build_input_stream::<f32, _, _>(
@@ -600,12 +634,7 @@ impl Audio {
                     move |data, _| {
                         let n = data.len() / CHANNELS as usize;
                         seen(&c.in_min, &c.in_max, n as u32);
-                        let mut r = ring.lock().unwrap();
-                        r.frames.extend(data.as_chunks::<2>().0.iter().copied());
-                        // A stalled output must not grow the delay
-                        // without bound.
-                        let excess = r.frames.len().saturating_sub(ring_frames(buffer_frames));
-                        r.frames.drain(..excess);
+                        take_in(&mut tx, data);
                     },
                     on_error(&counters, &notify, "input"),
                     None,
@@ -613,12 +642,11 @@ impl Audio {
                 .map_err(|e| format!("input stream on {in_name}: {e}"))?
         };
         let output = {
-            let ring = ring.clone();
             let c = counters.clone();
             out_dev
                 .build_output_stream::<f32, _, _>(
                     config,
-                    move |out, _| play_out(&mut ring.lock().unwrap(), &c, out, buffer_frames),
+                    move |out, _| play_out(&mut ring, &c, out, buffer_frames),
                     on_error(&counters, &notify, "output"),
                     None,
                 )
@@ -1240,7 +1268,8 @@ mod tests {
         // The laptop (#40): "ring underruns 6706", counted after the card's
         // input died with the card pulled out.
         let c = Counters { in_min: AtomicU32::new(u32::MAX), out_min: AtomicU32::new(u32::MAX), ..Default::default() };
-        let mut ring = Ring { frames: VecDeque::new(), pos: 0.0, primed: true };
+        let (_tx, mut ring) = ring(480);
+        ring.primed = true;
         let mut out = vec![1.0f32; 480 * 2];
         play_out(&mut ring, &c, &mut out, 480);
         assert_eq!(c.ring_underruns.load(Ordering::Relaxed), 1, "an empty ring while it runs: one");
@@ -1255,6 +1284,71 @@ mod tests {
             status_line(50, Duration::ZERO, &c),
             "delay 50 ms (ring 0.0 ms), ring underruns 1, xruns 0, errors 0, stopped mid-feed (input: the audio device is gone)"
         );
+    }
+
+    fn ring(buffer_frames: u32) -> (rtrb::Producer<Frame>, Ring) {
+        let (tx, rx) = rtrb::RingBuffer::new(ring_capacity(buffer_frames));
+        (tx, Ring { frames: rx, pos: 0.0, primed: false })
+    }
+
+    fn counters(delay_ms: u32) -> Counters {
+        Counters {
+            in_min: AtomicU32::new(u32::MAX),
+            out_min: AtomicU32::new(u32::MAX),
+            target_ms: AtomicU32::new(delay_ms),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_stalled_output_keeps_the_newest_frames_at_most() {
+        // #52: the old VecDeque reallocated (60960 -> 121920 frames) on the
+        // input path once a stalled output filled it. Now the input only
+        // pushes what fits, and the output trims the oldest.
+        let bf = 480;
+        let (mut tx, mut ring) = ring(bf);
+        let blocks = ring_capacity(bf) / bf as usize + 4;
+        for b in 0..blocks {
+            take_in(&mut tx, &vec![b as f32; bf as usize * 2]);
+        }
+        assert_eq!(ring.frames.slots(), ring_capacity(bf), "full, not grown");
+        let c = counters(MAX_DELAY_MS);
+        let mut out = vec![0.0f32; bf as usize * 2];
+        play_out(&mut ring, &c, &mut out, bf);
+        assert_eq!(c.fill.load(Ordering::Relaxed) as usize, ring_frames(bf), "trimmed to ring_frames");
+        assert_eq!(out[0], 2.0, "the two oldest blocks went");
+    }
+
+    #[test]
+    fn the_steering_plays_in_proportion_and_within_bounds() {
+        let t = 48_000;
+        let off = |ms: f64| (t as f64 + ms * RATE as f64 / 1000.0) as usize;
+        assert_eq!(step(t, t), 1.0);
+        assert_eq!(step(off(1.0), t), 1.0, "within DEAD_BAND");
+        assert_eq!(step(off(-1.0), t), 1.0, "within DEAD_BAND");
+        assert!((step(off(10.0), t) - 1.005).abs() < 1e-9, "10 ms over plays 0.5 % faster");
+        assert!((step(off(-10.0), t) - 0.995).abs() < 1e-9, "10 ms under plays 0.5 % slower");
+        assert_eq!(step(off(500.0), t), 1.0 + CATCH_UP);
+        assert_eq!(step(0, t), 1.0 - CATCH_UP);
+    }
+
+    #[test]
+    fn a_fill_over_the_target_drains_faster_than_it_plays() {
+        let bf = 480;
+        let (mut tx, mut ring) = ring(bf);
+        let c = counters(50);
+        let target = target_frames(50, bf);
+        let block = vec![0.25f32; bf as usize * 2];
+        while tx.slots() > 0 && ring.frames.slots() < target + frames_for(500) {
+            take_in(&mut tx, &block);
+        }
+        let before = ring.frames.slots();
+        let mut out = vec![0.0f32; bf as usize * 2];
+        play_out(&mut ring, &c, &mut out, bf);
+        let used = before - ring.frames.slots();
+        assert!((used as f64 - bf as f64 * (1.0 + CATCH_UP)).abs() <= 1.0, "used {used}");
+        assert!(out.iter().all(|&s| s == 0.25), "interpolated from the ring");
+        assert_eq!(c.ring_underruns.load(Ordering::Relaxed), 0);
     }
 
     #[test]
