@@ -29,8 +29,8 @@ use cpal::{BufferSize, ErrorKind, HostId, StreamConfig};
 
 use crate::dashboard::{AudioLive, Live};
 use crate::desktop::Notice;
-use crate::overlay::Notify;
 use crate::level::{Level, LevelChange};
+use crate::overlay::Notify;
 
 pub const RATE: u32 = 48_000;
 pub const CHANNELS: u16 = 2;
@@ -146,7 +146,9 @@ fn on_error(counters: &Arc<Counters>, notify: &NotifySlot, side: &'static str) -
             // going Unconnected or Error this way (host/pipewire/stream.rs
             // `state_changed`), and WASAPI's device removal and invalidated
             // resources.
-            ErrorKind::DeviceNotAvailable | ErrorKind::StreamInvalidated => died(&counters, &notify, format!("{side}: {}", worded(&e.to_string()))),
+            ErrorKind::DeviceNotAvailable | ErrorKind::StreamInvalidated => {
+                died(&counters, &notify, format!("{side}: {}", worded(&e.to_string())))
+            }
             _ => {
                 counters.other_errors.fetch_add(1, Ordering::Relaxed);
                 eprintln!("audio {side}: {e}");
@@ -160,10 +162,7 @@ fn on_error(counters: &Arc<Counters>, notify: &NotifySlot, side: &'static str) -
 /// 317) (os error -2004287484)` (seen with the card pulled out, #40): its
 /// code in hex instead, named where known. Any other text as it is.
 fn worded(e: &str) -> String {
-    let code = e
-        .contains("FormatMessageW")
-        .then(|| e.split("OS Error ").nth(1)?.split(' ').next()?.parse::<i32>().ok())
-        .flatten();
+    let code = e.contains("FormatMessageW").then(|| e.split("OS Error ").nth(1)?.split(' ').next()?.parse::<i32>().ok()).flatten();
     let Some(code) = code else { return e.to_string() };
     let hex = format!("0x{:08X}", code as u32);
     match code as u32 {
@@ -582,11 +581,7 @@ impl Audio {
         };
 
         let buffer_frames = (buffer_ms * RATE / 1000).max(1);
-        let config = StreamConfig {
-            channels: CHANNELS,
-            sample_rate: RATE,
-            buffer_size: BufferSize::Fixed(buffer_frames),
-        };
+        let config = StreamConfig { channels: CHANNELS, sample_rate: RATE, buffer_size: BufferSize::Fixed(buffer_frames) };
         let counters = Arc::new(Counters {
             in_min: AtomicU32::new(u32::MAX),
             out_min: AtomicU32::new(u32::MAX),
@@ -860,7 +855,10 @@ impl Say {
 pub enum Status {
     /// The sync, and the level (None until first read, or why it could not
     /// be read).
-    Running { delay_ms: u32, level: Option<Result<Level, String>> },
+    Running {
+        delay_ms: u32,
+        level: Option<Result<Level, String>>,
+    },
     Stopped(String),
 }
 
@@ -1098,7 +1096,12 @@ impl LoopbackKeys {
                 let r = running.as_ref().expect("a loopback that started runs");
                 (s.say.line)(&r.describe());
                 let (source, sink, buffer_ms) = r.link();
-                s.live.set_audio(AudioLive::Running { source: source.into(), sink: sink.into(), buffer_ms, counters: r.counters().clone() });
+                s.live.set_audio(AudioLive::Running {
+                    source: source.into(),
+                    sink: sink.into(),
+                    buffer_ms,
+                    counters: r.counters().clone(),
+                });
             }
             Err(why) => {
                 (s.say.line)(&format!("warning: no audio: {why}"));
@@ -1198,7 +1201,8 @@ pub mod fake {
             Ok(Box::new(Fake { counters, notify: NotifySlot::default(), level: Arc::new(Mutex::new(Level { volume: 100, mute: false })) }))
         });
         let (lines, notices) = (script.lines.clone(), script.notices.clone());
-        let say = Say { line: Box::new(move |l| lines.borrow_mut().push(l.into())), notice: Box::new(move |n| notices.borrow_mut().push(n)) };
+        let say =
+            Say { line: Box::new(move |l| lines.borrow_mut().push(l.into())), notice: Box::new(move |n| notices.borrow_mut().push(n)) };
         (Loopback::new(start, delay_ms, script.live.clone(), say), script)
     }
 
@@ -1362,7 +1366,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[ignore = "needs a PipeWire session"]
     fn level_on_pipewire() {
-        use crate::pw::{level, LevelChange};
+        use crate::pw::{LevelChange, level};
         let host = cpal::host_from_id(HostId::PipeWire).unwrap();
         let dev = host.default_output_device().unwrap();
         let config = StreamConfig { channels: CHANNELS, sample_rate: RATE, buffer_size: BufferSize::Default };
@@ -1375,7 +1379,8 @@ mod tests {
             let out = std::process::Command::new("pactl").args(["list", "sink-inputs"]).output().unwrap();
             let text = String::from_utf8_lossy(&out.stdout).to_string();
             let pid = format!("media.name = \"cpal-playback-{}\"", std::process::id());
-            let block = text.split("Sink Input #").find(|b| b.contains(&pid)).unwrap_or_else(|| panic!("our stream ({pid}) not in pactl:\n{text}"));
+            let block =
+                text.split("Sink Input #").find(|b| b.contains(&pid)).unwrap_or_else(|| panic!("our stream ({pid}) not in pactl:\n{text}"));
             let field = |k: &str| block.lines().find_map(|l| l.trim().strip_prefix(k)).unwrap().trim().to_string();
             let vol: u32 = field("Volume:").split_whitespace().nth(3).unwrap().trim_end_matches('%').parse().unwrap();
             (vol, field("Mute:") == "yes")

@@ -22,15 +22,6 @@ use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
-use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFAttributes, IMFMediaEvent, IMFMediaType, IMFSample, IMFSourceReader, IMFSourceReaderCallback, IMFSourceReaderCallback_Impl,
-    MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
-    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_E_NO_MORE_TYPES, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
-    MF_MT_SUBTYPE, MF_READWRITE_DISABLE_CONVERTERS, MF_SOURCE_READER_ASYNC_CALLBACK, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-    MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR, MF_VERSION, MFCreateAttributes, MFCreateDeviceSource,
-    MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFSTARTUP_FULL, MFSampleExtension_DeviceTimestamp, MFShutdown, MFStartup,
-    MFVideoFormat_MJPG, MFVideoFormat_YUY2,
-};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     CM_Get_DevNode_PropertyW, CM_Get_Device_Interface_PropertyW, CM_Get_Parent, CM_LOCATE_DEVNODE_NORMAL, CM_Locate_DevNodeW,
     CR_BUFFER_SMALL, CR_NO_SUCH_VALUE, CR_SUCCESS,
@@ -40,6 +31,15 @@ use windows::Win32::Devices::Properties::{
     DEVPROP_TYPE_STRING_LIST, DEVPROPTYPE,
 };
 use windows::Win32::Foundation::DEVPROPKEY;
+use windows::Win32::Media::MediaFoundation::{
+    IMFActivate, IMFAttributes, IMFMediaEvent, IMFMediaType, IMFSample, IMFSourceReader, IMFSourceReaderCallback,
+    IMFSourceReaderCallback_Impl, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_E_NO_MORE_TYPES,
+    MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_SUBTYPE, MF_READWRITE_DISABLE_CONVERTERS,
+    MF_SOURCE_READER_ASYNC_CALLBACK, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR,
+    MF_VERSION, MFCreateAttributes, MFCreateDeviceSource, MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFSTARTUP_FULL,
+    MFSampleExtension_DeviceTimestamp, MFShutdown, MFStartup, MFVideoFormat_MJPG, MFVideoFormat_YUY2,
+};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
 use windows::core::{GUID, HRESULT, HSTRING, PCWSTR, PWSTR, Ref, implement};
 
@@ -119,7 +119,8 @@ pub fn list() -> Vec<Node> {
 fn enumerate() -> Result<Vec<Node>, String> {
     let attrs = attributes(1)?;
     // Safety: plain GUID arguments.
-    unsafe { attrs.SetGUID(&MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID) }.map_err(|e| e.to_string())?;
+    unsafe { attrs.SetGUID(&MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID) }
+        .map_err(|e| e.to_string())?;
     let (mut array, mut count): (*mut Option<IMFActivate>, u32) = (std::ptr::null_mut(), 0);
     // Safety: out-pointers; the array is CoTaskMemAlloc'd and freed below,
     // each entry released as it is taken.
@@ -129,7 +130,10 @@ fn enumerate() -> Result<Vec<Node>, String> {
         let entries = unsafe { std::slice::from_raw_parts_mut(array, count as usize) };
         for entry in entries.iter_mut() {
             let Some(device) = entry.take() else { continue };
-            match (string(&device, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME), string(&device, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK)) {
+            match (
+                string(&device, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME),
+                string(&device, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK),
+            ) {
                 (Ok(name), Ok(link)) => {
                     let (serial, port) = serial_and_port(&link);
                     nodes.push(Node { path: link.into(), serial, port, card_type: name })
@@ -173,9 +177,8 @@ pub fn container(node: &Path) -> Result<GUID, String> {
     let (mut kind, mut guid) = (DEVPROPTYPE::default(), GUID::zeroed());
     let mut size = size_of::<GUID>() as u32;
     // Safety: the buffer is a GUID, and `size` says so.
-    let r = unsafe {
-        CM_Get_DevNode_PropertyW(devnode, &DEVPKEY_Device_ContainerId, &mut kind, Some((&raw mut guid).cast()), &mut size, 0)
-    };
+    let r =
+        unsafe { CM_Get_DevNode_PropertyW(devnode, &DEVPKEY_Device_ContainerId, &mut kind, Some((&raw mut guid).cast()), &mut size, 0) };
     if r != CR_SUCCESS || kind != DEVPROP_TYPE_GUID {
         return Err(format!("the capture device's container id: CONFIGRET {}", r.0));
     }
@@ -431,7 +434,11 @@ fn native_types(reader: &IMFSourceReader, link: &str) -> Result<Vec<NativeType>,
         };
         // Safety: reads of the type's own attributes.
         let (sub, size, rate) = unsafe {
-            (t.GetGUID(&MF_MT_SUBTYPE).map_err(at)?, t.GetUINT64(&MF_MT_FRAME_SIZE).map_err(at)?, t.GetUINT64(&MF_MT_FRAME_RATE).map_err(at)?)
+            (
+                t.GetGUID(&MF_MT_SUBTYPE).map_err(at)?,
+                t.GetUINT64(&MF_MT_FRAME_SIZE).map_err(at)?,
+                t.GetUINT64(&MF_MT_FRAME_RATE).map_err(at)?,
+            )
         };
         let fps = (rate >> 32) as f64 / (rate as u32).max(1) as f64;
         out.push(NativeType { t, subtype: sub, width: (size >> 32) as u32, height: size as u32, fps });
@@ -654,7 +661,8 @@ mod trace {
                 let (mut flags, mut time) = (0u32, 0i64);
                 let mut sample: Option<IMFSample> = None;
                 // Safety: out-pointers on a live reader; synchronous.
-                unsafe { reader.ReadSample(STREAM, 0, None, Some(&mut flags), Some(&mut time), Some(&mut sample)) }.map_err(|e| e.to_string())?;
+                unsafe { reader.ReadSample(STREAM, 0, None, Some(&mut flags), Some(&mut time), Some(&mut sample)) }
+                    .map_err(|e| e.to_string())?;
                 let dequeued = now_monotonic().as_nanos();
                 let Some(s) = sample else {
                     writeln!(csv, "{time},,{dequeued},{flags:#x},").map_err(|e| e.to_string())?;

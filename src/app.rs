@@ -104,6 +104,28 @@ pub struct Options {
     pub refocus: Option<String>,
 }
 
+impl Options {
+    /// A window with these picture settings and dashboard numbers, and
+    /// nothing else: no measurement, no audio, the generic desktop, no
+    /// wizard. Callers set what differs with `..Options::new(..)`.
+    pub fn new(live_changes: LiveChanges, live: Arc<crate::dashboard::Live>) -> Self {
+        Options {
+            live_changes,
+            monitor: None,
+            seconds: None,
+            stats: false,
+            audio: AudioSetup::Off(String::new()),
+            desktop: Desktop::Generic,
+            source: String::new(),
+            settings: None,
+            wizard: None,
+            live,
+            dashboard: None,
+            refocus: None,
+        }
+    }
+}
+
 /// A job for the placement worker: the window's mode, and a dashboard to
 /// move off its monitor first (the windows there before it was started).
 struct Placement {
@@ -342,12 +364,7 @@ pub(crate) fn pipeline(
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &module,
-            entry_point: Some("vs"),
-            compilation_options: Default::default(),
-            buffers: &[],
-        },
+        vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
         primitive: Default::default(),
         depth_stencil: None,
         multisample: Default::default(),
@@ -509,30 +526,28 @@ impl Drop for Winit {
 /// unpaced.
 #[cfg(target_os = "linux")]
 fn feedback(window: &Window) -> Result<Option<Box<dyn Feedback>>, String> {
-    let feedback: Option<Box<dyn Feedback>> = match (
-        window.display_handle().map_err(|e| e.to_string())?.as_raw(),
-        window.window_handle().map_err(|e| e.to_string())?.as_raw(),
-    ) {
-        (RawDisplayHandle::Wayland(dh), RawWindowHandle::Wayland(wh)) => {
-            // Safety: winit's display and the window's surface live until
-            // `exiting`, where `Gfx` (and this) is dropped first.
-            match unsafe { Presentation::new(dh.display.as_ptr(), wh.surface.as_ptr()) } {
-                Ok(p) if p.clock_id() == Some(libc::CLOCK_MONOTONIC as u32) => Some(Box::new(p)),
-                Ok(_) => {
-                    eprintln!("note: the presentation clock is not CLOCK_MONOTONIC; frames go out unpaced");
-                    None
-                }
-                Err(e) => {
-                    eprintln!("note: {e}; frames go out unpaced");
-                    None
+    let feedback: Option<Box<dyn Feedback>> =
+        match (window.display_handle().map_err(|e| e.to_string())?.as_raw(), window.window_handle().map_err(|e| e.to_string())?.as_raw()) {
+            (RawDisplayHandle::Wayland(dh), RawWindowHandle::Wayland(wh)) => {
+                // Safety: winit's display and the window's surface live until
+                // `exiting`, where `Gfx` (and this) is dropped first.
+                match unsafe { Presentation::new(dh.display.as_ptr(), wh.surface.as_ptr()) } {
+                    Ok(p) if p.clock_id() == Some(libc::CLOCK_MONOTONIC as u32) => Some(Box::new(p)),
+                    Ok(_) => {
+                        eprintln!("note: the presentation clock is not CLOCK_MONOTONIC; frames go out unpaced");
+                        None
+                    }
+                    Err(e) => {
+                        eprintln!("note: {e}; frames go out unpaced");
+                        None
+                    }
                 }
             }
-        }
-        _ => {
-            eprintln!("note: not on Wayland; frames go out unpaced");
-            None
-        }
-    };
+            _ => {
+                eprintln!("note: not on Wayland; frames go out unpaced");
+                None
+            }
+        };
     Ok(feedback)
 }
 
@@ -628,11 +643,8 @@ impl App {
         .map_err(|e| format!("graphics adapter: {e}"))?;
         // Pass times only when measuring, and only where the GPU has them.
         let timestamps = wgpu::Features::TIMESTAMP_QUERY;
-        let required_features = if self.opts.stats && adapter.features().contains(timestamps) {
-            timestamps
-        } else {
-            wgpu::Features::empty()
-        };
+        let required_features =
+            if self.opts.stats && adapter.features().contains(timestamps) { timestamps } else { wgpu::Features::empty() };
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features, ..Default::default() }))
                 .map_err(|e| format!("graphics device: {e}"))?;
@@ -661,11 +673,8 @@ impl App {
             .ok_or("no non-sRGB surface format")?;
         // Mailbox: the newest frame replaces one still waiting (paced, the
         // best #5 measured; unpaced, the only way without a queue).
-        config.present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else {
-            wgpu::PresentMode::Fifo
-        };
+        config.present_mode =
+            if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) { wgpu::PresentMode::Mailbox } else { wgpu::PresentMode::Fifo };
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
         // wgpu-hal keeps the swapchain across later configures (it resizes
@@ -707,10 +716,7 @@ impl App {
 
         let convert_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("convert"),
-            entries: &[
-                texture_entry(0, false),
-                uniform_entry(1),
-            ],
+            entries: &[texture_entry(0, false), uniform_entry(1)],
         });
         let picture_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("picture"),
@@ -730,8 +736,7 @@ impl App {
                 wgpu::BindGroupEntry { binding: 1, resource: picture_buffer.as_entire_binding() },
             ],
         });
-        let convert_pipeline =
-            pipeline(&device, "convert", &convert_shader(w), &convert_layout, wgpu::TextureFormat::Rgba8Unorm);
+        let convert_pipeline = pipeline(&device, "convert", &convert_shader(w), &convert_layout, wgpu::TextureFormat::Rgba8Unorm);
 
         let scale_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("scale"),
@@ -763,10 +768,7 @@ impl App {
 
         let filter_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("filter"),
-            entries: &[
-                texture_entry(0, false),
-                uniform_entry(1),
-            ],
+            entries: &[texture_entry(0, false), uniform_entry(1)],
         });
         let uniform = |label| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -1587,18 +1589,10 @@ mod tests {
             pacing: Pacing::new(Duration::ZERO, format.fps, Stats::new(Duration::ZERO, false, Arc::new(crate::dashboard::Live::new()))),
             end: End::new(Arc::new(|_| {})),
             opts: Options {
-                live_changes,
-                monitor: None,
-                seconds: None,
-                stats: false,
                 audio: AudioSetup::Off("none".into()),
-                desktop: Desktop::Generic,
                 source: "ps5".into(),
                 settings: Some(s),
-                wizard: None,
-                live: Arc::new(crate::dashboard::Live::new()),
-                dashboard: None,
-                refocus: None,
+                ..Options::new(live_changes, Arc::new(crate::dashboard::Live::new()))
             },
         };
         app.opts.live_changes.mark_baseline(None);
@@ -1669,7 +1663,10 @@ mod tests {
         crate::audio::fake::kill(&keys(&app));
         assert_eq!(app.loopback(), None, "stopped before its wake is handled");
         app.notice();
-        assert_eq!(app.overlay.current_message(Instant::now()), Some("Audio stopped (output: Device disconnected): ctrl -/+, m, 9 or 0 start it again"));
+        assert_eq!(
+            app.overlay.current_message(Instant::now()),
+            Some("Audio stopped (output: Device disconnected): ctrl -/+, m, 9 or 0 start it again")
+        );
         assert_eq!(audio_line(&mut app), "m 9 0 Audio        not running, see the log: output: Device disconnected");
         assert!(!app.apply(Action::Sync(10)));
         app.notice();
@@ -1751,10 +1748,7 @@ mod tests {
     #[test]
     fn window_modes_from_the_settings() {
         assert_eq!(WindowMode::from_settings("fullscreen", "1280x720"), Ok(WindowMode::Fullscreen));
-        assert_eq!(
-            WindowMode::from_settings("windowed", "1280x720"),
-            Ok(WindowMode::Windowed { width: 1280, height: 720 })
-        );
+        assert_eq!(WindowMode::from_settings("windowed", "1280x720"), Ok(WindowMode::Windowed { width: 1280, height: 720 }));
         assert!(WindowMode::from_settings("windowed", "big").is_err());
     }
 

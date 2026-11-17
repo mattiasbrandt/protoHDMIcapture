@@ -11,8 +11,9 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
 };
 use windows::Win32::Devices::Properties::{DEVPKEY_Device_Address, DEVPKEY_Device_InstanceId, DEVPROP_TYPE_UINT32, DEVPROPTYPE};
 use windows::Win32::Devices::Usb::{
-    GUID_DEVINTERFACE_USB_HUB, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2, USB_NODE_CONNECTION_INFORMATION_EX,
-    USB_NODE_CONNECTION_INFORMATION_EX_V2, USB_PIPE_INFO, UsbFullSpeed, UsbHighSpeed, UsbLowSpeed, UsbSuperSpeed,
+    GUID_DEVINTERFACE_USB_HUB, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX, IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2,
+    USB_NODE_CONNECTION_INFORMATION_EX, USB_NODE_CONNECTION_INFORMATION_EX_V2, USB_PIPE_INFO, UsbFullSpeed, UsbHighSpeed, UsbLowSpeed,
+    UsbSuperSpeed,
 };
 use windows::Win32::Foundation::{GENERIC_WRITE, HANDLE};
 use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_WRITE, OPEN_EXISTING};
@@ -96,13 +97,17 @@ fn hub_path(instance: &str) -> Result<Vec<u16>, String> {
     let id: Vec<u16> = instance.encode_utf16().chain([0]).collect();
     let mut len = 0u32;
     // Safety: an out-pointer and a NUL-terminated instance id.
-    let r = unsafe { CM_Get_Device_Interface_List_SizeW(&mut len, &GUID_DEVINTERFACE_USB_HUB, PCWSTR(id.as_ptr()), CM_GET_DEVICE_INTERFACE_LIST_PRESENT) };
+    let r = unsafe {
+        CM_Get_Device_Interface_List_SizeW(&mut len, &GUID_DEVINTERFACE_USB_HUB, PCWSTR(id.as_ptr()), CM_GET_DEVICE_INTERFACE_LIST_PRESENT)
+    };
     if r != CR_SUCCESS {
         return Err(format!("its hub's interface: CONFIGRET {}", r.0));
     }
     let mut list = vec![0u16; len as usize];
     // Safety: as above; `list` holds `len` characters.
-    let r = unsafe { CM_Get_Device_Interface_ListW(&GUID_DEVINTERFACE_USB_HUB, PCWSTR(id.as_ptr()), &mut list, CM_GET_DEVICE_INTERFACE_LIST_PRESENT) };
+    let r = unsafe {
+        CM_Get_Device_Interface_ListW(&GUID_DEVINTERFACE_USB_HUB, PCWSTR(id.as_ptr()), &mut list, CM_GET_DEVICE_INTERFACE_LIST_PRESENT)
+    };
     if r != CR_SUCCESS {
         return Err(format!("its hub's interface: CONFIGRET {}", r.0));
     }
@@ -119,8 +124,10 @@ fn first(list: &[u16]) -> Option<Vec<u16>> {
 /// The hub, opened for its IOCTLs (no read or write of its own).
 fn open(path: &[u16]) -> Result<OwnedHandle, String> {
     // Safety: a NUL-terminated path; the handle is owned and closed below.
-    let h = unsafe { CreateFileW(PCWSTR(path.as_ptr()), GENERIC_WRITE.0, FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) }
-        .map_err(|e| format!("opening its hub: {e}"))?;
+    let h = unsafe {
+        CreateFileW(PCWSTR(path.as_ptr()), GENERIC_WRITE.0, FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None)
+    }
+    .map_err(|e| format!("opening its hub: {e}"))?;
     // Safety: a handle this function opened and nothing else holds.
     Ok(unsafe { OwnedHandle::from_raw_handle(h.0) })
 }
@@ -168,8 +175,19 @@ fn connection_v2(hub: &OwnedHandle, port: u32) -> Result<u32, String> {
     let size = size_of::<USB_NODE_CONNECTION_INFORMATION_EX_V2>() as u32;
     let p = (&raw mut info).cast();
     // Safety: the struct in and out, its size given; a live handle.
-    unsafe { DeviceIoControl(HANDLE(hub.as_raw_handle()), IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2, Some(p), size, Some(p), size, None, None) }
-        .map_err(|e| format!("asking its hub about port {port} (V2): {e}"))?;
+    unsafe {
+        DeviceIoControl(
+            HANDLE(hub.as_raw_handle()),
+            IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2,
+            Some(p),
+            size,
+            Some(p),
+            size,
+            None,
+            None,
+        )
+    }
+    .map_err(|e| format!("asking its hub about port {port} (V2): {e}"))?;
     // Safety: a u32 union; packed, so read by value.
     Ok(unsafe { info.Flags.ul })
 }

@@ -9,8 +9,9 @@ kept best effort, Linux only, and is not retired
 protoHDMIcapture depends on it, no check holds it to parity, and a change to
 protoHDMIcapture need not touch it.
 
-- **State:** epic #10 and its sub-issues hold what is done, open and
-  decided; read its status comment before planning.
+- **State:** the open issues hold what is open; #50 holds the deferred
+  Windows work. Epic #10 (closed) and its sub-issues hold what was done and
+  decided; its closing comment links the decisions.
 - **Generic:** code and docs serve any user's setup. One machine's values
   (its card serial, monitor, paths) live in that user's settings file, and
   examples use placeholders (`/dev/videoN`, `DP-1`). The repo is public.
@@ -20,7 +21,7 @@ protoHDMIcapture need not touch it.
   `--settings` over `tools/fixtures/settings/` and checks the README's
   settings table and `config.example` against the rows.
 - **Checks:** `tools/check` (lint and syntax, legacy's included,
-  consistency between code and docs, protoHDMIcapture's build, tests and
+  consistency between code and docs, protoHDMIcapture's formatting, build, tests and
   clippy, and the hardware-free harnesses in `tools/harness/`; each check
   prints its name); enable the hook per clone with
   `git config core.hooksPath .githooks`. Legacy's own harnesses

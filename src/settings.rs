@@ -100,9 +100,7 @@ pub fn config_file(env: &dyn Fn(&str) -> Option<String>) -> PathBuf {
     if let Some(d) = env("APPDATA").filter(|d| !d.is_empty()) {
         return PathBuf::from(d).join("protohdmicapture").join("config");
     }
-    let base = env("XDG_CONFIG_HOME")
-        .filter(|d| !d.is_empty())
-        .unwrap_or_else(|| format!("{}/.config", env("HOME").unwrap_or_default()));
+    let base = env("XDG_CONFIG_HOME").filter(|d| !d.is_empty()).unwrap_or_else(|| format!("{}/.config", env("HOME").unwrap_or_default()));
     PathBuf::from(base).join("protohdmicapture/config")
 }
 
@@ -286,11 +284,7 @@ impl Settings {
 
 /// `_config_quote`: plain when it is safe, else in single quotes.
 fn quote(v: &str) -> String {
-    if v.bytes().all(|b| b.is_ascii_alphanumeric() || b"._/:@+-".contains(&b)) {
-        v.to_string()
-    } else {
-        format!("'{v}'")
-    }
+    if v.bytes().all(|b| b.is_ascii_alphanumeric() || b"._/:@+-".contains(&b)) { v.to_string() } else { format!("'{v}'") }
 }
 
 /// The file's lines as `read -r` sees them: split on newlines only (a
@@ -374,11 +368,7 @@ fn rewrite(config_file: &Path, pairs: &[(&str, &str)], unset: bool) -> Result<()
         }
     }
 
-    let tmp = dir.join(format!(
-        ".{}.{}.tmp",
-        config_file.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
-        std::process::id()
-    ));
+    let tmp = dir.join(format!(".{}.{}.tmp", config_file.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(), std::process::id()));
     let written = (|| {
         use std::io::Write as _;
         let mut open = fs::OpenOptions::new();
@@ -576,13 +566,15 @@ mod tests {
         // The bytes protoHDMIcapture legacy's `config_write` (legacy/lib/card.sh)
         // wrote for each case on 2026-10-19 (#47): legacy reads this file.
         let start = "# my settings\n  DELAY=0.05\nNOPE=1\n\nLEVELS=auto\nLEVELS=full\nWINDOW=fullscreen\r\nSOURCE='ps5'";
-        let header = "# protoHDMIcapture settings, written by the setup wizard.\n# One KEY=value per line; see config.example in the repo.\n";
+        let header =
+            "# protoHDMIcapture settings, written by the setup wizard.\n# One KEY=value per line; see config.example in the repo.\n";
         let cases: &[(Option<&str>, &[&str], String, bool)] = &[
             (None, &["DELAY=0.08"], format!("{header}DELAY=0.08\n"), true),
             (
                 Some(start),
                 &["LEVELS=limited", "DELAY=0.07", "BRIGHTNESS=-5", "SINK=a b"],
-                "# my settings\nDELAY=0.07\nNOPE=1\n\nLEVELS=limited\nWINDOW=fullscreen\r\nSOURCE='ps5'\nBRIGHTNESS=-5\nSINK='a b'\n".into(),
+                "# my settings\nDELAY=0.07\nNOPE=1\n\nLEVELS=limited\nWINDOW=fullscreen\r\nSOURCE='ps5'\nBRIGHTNESS=-5\nSINK='a b'\n"
+                    .into(),
                 true,
             ),
             (
@@ -605,7 +597,8 @@ mod tests {
         // The bytes legacy's `config_unset` (legacy/lib/card.sh) left on
         // 2026-10-19 (#47).
         let start = "# my settings\n  DELAY=0.05\nNOPE=1\n\nFULLSCREEN=yes\nLEVELS=full\nFULLSCREEN=no\r\nSOURCE='ps5'";
-        let header = "# protoHDMIcapture settings, written by the setup wizard.\n# One KEY=value per line; see config.example in the repo.\n";
+        let header =
+            "# protoHDMIcapture settings, written by the setup wizard.\n# One KEY=value per line; see config.example in the repo.\n";
         let cases: &[(Option<&str>, &[&str], &str)] = &[
             (None, &["DEV"], header),
             (Some(start), &["FULLSCREEN", "SOURCE"], "# my settings\n  DELAY=0.05\nNOPE=1\n\nLEVELS=full\n"),

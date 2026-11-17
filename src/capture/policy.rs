@@ -54,7 +54,10 @@ pub enum Event<'a> {
 pub enum Signal {
     /// Pictures arrive (or the feed opened under `NEVER_AFTER` ago).
     Picture,
-    NoSignal { since: Since, reason: Reason },
+    NoSignal {
+        since: Since,
+        reason: Reason,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -756,7 +759,13 @@ mod tests {
         Gap(u32, u32, u32),
     }
 
-    fn run_script(format: Format, stride: usize, steps: Vec<Step>, end: Duration, gone: bool) -> (Vec<(Duration, Said)>, Dropped, io::Result<()>) {
+    fn run_script(
+        format: Format,
+        stride: usize,
+        steps: Vec<Step>,
+        end: Duration,
+        gone: bool,
+    ) -> (Vec<(Duration, Said)>, Dropped, io::Result<()>) {
         let time = Time::default();
         let quit = Arc::new(AtomicBool::new(false));
         let mut source = Scripted { format, stride, time: time.clone(), steps: steps.into(), end, gone, quit: quit.clone() };
@@ -863,7 +872,12 @@ mod tests {
     #[test]
     fn gaps_from_sample_times() {
         let p = 166_667; // 60 fps in 100 ns units
-        let step = |i: u64, t: i64| Step { at: Duration::from_nanos(i * P), data: vec![16; FORMAT.frame_size()], mark: Mark::Time(t), flagged: false };
+        let step = |i: u64, t: i64| Step {
+            at: Duration::from_nanos(i * P),
+            data: vec![16; FORMAT.frame_size()],
+            mark: Mark::Time(t),
+            flagged: false,
+        };
         let steps = vec![step(0, 0), step(1, p * 14 / 10), step(2, 2 * p), step(3, 5 * p), step(4, 6 * p)];
         let (said, _, result) = run_script(FORMAT, 8, steps, ms(200), false);
         result.unwrap();
@@ -882,7 +896,12 @@ mod tests {
         // #20: the HDMI pulled for 26 s, then back. Sample times (Windows):
         // the times go on 26 s later, on a grid of their own.
         let p: i64 = 166_667;
-        let timed = |i: u64, at_ms: u64, t: i64| Step { at: ms(at_ms) + Duration::from_nanos(i * P), data: vec![16; FORMAT.frame_size()], mark: Mark::Time(t), flagged: false };
+        let timed = |i: u64, at_ms: u64, t: i64| Step {
+            at: ms(at_ms) + Duration::from_nanos(i * P),
+            data: vec![16; FORMAT.frame_size()],
+            mark: Mark::Time(t),
+            flagged: false,
+        };
         let mut steps: Vec<Step> = (0..60).map(|i| timed(i, 0, i as i64 * p)).collect();
         let back = 27_000_u64;
         steps.extend((0..60).map(|i| timed(i, back, (back as i64 * 10_000) + 12_345 + i as i64 * p)));
@@ -1260,10 +1279,7 @@ mod tests {
         let s = signals(&said);
         assert_eq!(
             s.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>(),
-            [
-                no_signal(Since::Never, Reason::Unusable("10 bytes, not a 4x2 YUYV frame".into())),
-                no_signal(Since::Never, Reason::Nothing),
-            ]
+            [no_signal(Since::Never, Reason::Unusable("10 bytes, not a 4x2 YUYV frame".into())), no_signal(Since::Never, Reason::Nothing),]
         );
         let last = Duration::from_nanos(359 * P);
         assert!(s[1].0 >= last + STOPPED_AFTER && s[1].0 < last + STOPPED_AFTER + POLL_SLICE, "{:?}", s[1].0);

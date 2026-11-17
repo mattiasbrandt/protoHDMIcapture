@@ -105,7 +105,14 @@ impl DebugLog {
         let file = Arc::new(Mutex::new(Some(File::create(path)?)));
         // Rust's stdout is buffered: what it holds belongs before the tee.
         io::stdout().flush()?;
-        let mut log = Self { path: path.to_path_buf(), file: file.clone(), teed: Vec::new(), out: *streams.last().expect("a stream to tee"), copies: Vec::new(), perf: None };
+        let mut log = Self {
+            path: path.to_path_buf(),
+            file: file.clone(),
+            teed: Vec::new(),
+            out: *streams.last().expect("a stream to tee"),
+            copies: Vec::new(),
+            perf: None,
+        };
         for &stream in streams {
             // A failure here drops `log`, which puts back those teed so far.
             let sys::Teed { from, to, restore } = sys::tee(stream)?;
@@ -166,13 +173,7 @@ impl DebugLog {
     /// and refuses anything else, so what it asked for is what runs.
     pub fn format(&self, format: Format, test_pattern: bool) {
         let what = if test_pattern { "the test pattern" } else { "the card" };
-        self.dbg(&format!(
-            "negotiated: {}x{} {} @ {} fps ({what})",
-            format.width,
-            format.height,
-            format.pixels.setting(),
-            format.fps
-        ));
+        self.dbg(&format!("negotiated: {}x{} {} @ {} fps ({what})", format.width, format.height, format.pixels.setting(), format.fps));
     }
 
     /// A perf line every `every`, until the log ends.
@@ -186,10 +187,16 @@ impl DebugLog {
                 let now = live.counts();
                 let cpu_now = crate::dashboard::cpu_ticks();
                 let cpu_pct = match (cpu, cpu_now) {
-                    (Some(a), Some(b)) => Some(b.saturating_sub(a) as f64 / crate::dashboard::clock_ticks_per_s() / every.as_secs_f64() * 100.0),
+                    (Some(a), Some(b)) => {
+                        Some(b.saturating_sub(a) as f64 / crate::dashboard::clock_ticks_per_s() / every.as_secs_f64() * 100.0)
+                    }
                     _ => None,
                 };
-                let line = format!("\x1b[2m{} [dbg] perf: {}\x1b[0m\n", sys::clock(), perf_line(prev, now, every, cpu_pct, crate::dashboard::rss_mb()));
+                let line = format!(
+                    "\x1b[2m{} [dbg] perf: {}\x1b[0m\n",
+                    sys::clock(),
+                    perf_line(prev, now, every, cpu_pct, crate::dashboard::rss_mb())
+                );
                 // `out` stays teed until this thread is stopped and joined.
                 if let Err(e) = sys::write(out, line.as_bytes()) {
                     eprintln!("warning: debug.log: the perf line: {e}");
@@ -456,8 +463,14 @@ mod sys {
         // Safety (all four): the process's standard handle slots; none is
         // closed here. No handle (a process without a console) reads as null.
         [
-            Stream { get: || unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }.unwrap_or_default(), set: |h| unsafe { SetStdHandle(STD_OUTPUT_HANDLE, h) } },
-            Stream { get: || unsafe { GetStdHandle(STD_ERROR_HANDLE) }.unwrap_or_default(), set: |h| unsafe { SetStdHandle(STD_ERROR_HANDLE, h) } },
+            Stream {
+                get: || unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }.unwrap_or_default(),
+                set: |h| unsafe { SetStdHandle(STD_OUTPUT_HANDLE, h) },
+            },
+            Stream {
+                get: || unsafe { GetStdHandle(STD_ERROR_HANDLE) }.unwrap_or_default(),
+                set: |h| unsafe { SetStdHandle(STD_ERROR_HANDLE, h) },
+            },
         ]
     }
 
@@ -531,7 +544,11 @@ mod sys {
             let handle = unsafe { File::from_raw_handle(dup.0) };
             let mut mode = CONSOLE_MODE::default();
             // Safety: an out-pointer and a live handle.
-            Ok(if unsafe { GetConsoleMode(dup, &mut mode) }.is_ok() { Self::Console { handle, pending: Vec::new() } } else { Self::Bytes(handle) })
+            Ok(if unsafe { GetConsoleMode(dup, &mut mode) }.is_ok() {
+                Self::Console { handle, pending: Vec::new() }
+            } else {
+                Self::Bytes(handle)
+            })
         }
     }
 

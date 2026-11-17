@@ -35,12 +35,7 @@ fn colour(name: &str, v: &str) -> Result<i32, String> {
 
 /// settings.rows' `save` rows, in its order.
 const ENTRIES: [Entry; 8] = [
-    Entry {
-        name: "DELAY",
-        picture: false,
-        read: |_, v| delay_ms(v).map(drop),
-        spell: |_, delay_ms| delay_ms.map(seconds),
-    },
+    Entry { name: "DELAY", picture: false, read: |_, v| delay_ms(v).map(drop), spell: |_, delay_ms| delay_ms.map(seconds) },
     Entry {
         name: "WINDOW",
         picture: false,
@@ -314,7 +309,11 @@ mod tests {
         assert_eq!(l.adjust_colour(Colour::Gamma, -3), -3);
         assert_eq!(l.adjust_colour(Colour::Saturation, 1), 8);
         assert_eq!(l.cycle_window(), WindowMode::Borderless);
-        assert_eq!(l.changes(Some(50)), ["WINDOW=borderless", "SCALING=fast", "LEVELS=limited", "SATURATION=8", "GAMMA=-3"], "settings.rows' order");
+        assert_eq!(
+            l.changes(Some(50)),
+            ["WINDOW=borderless", "SCALING=fast", "LEVELS=limited", "SATURATION=8", "GAMMA=-3"],
+            "settings.rows' order"
+        );
         assert_eq!(l.save(&s, Some(50)).unwrap().len(), 5);
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
@@ -366,7 +365,8 @@ mod tests {
     #[test]
     fn a_strict_read_refuses_and_a_lenient_one_falls_back() {
         // Unvalidated values, as the wizard can find them.
-        let (s, file) = settings("LEVELS=tv\nSCALING=sharp\nCONTRAST=5\nBRIGHTNESS=-9\nSATURATION=lots\nWINDOW=tiled\nWINDOW_SIZE=big\nDELAY=soon\n");
+        let (s, file) =
+            settings("LEVELS=tv\nSCALING=sharp\nCONTRAST=5\nBRIGHTNESS=-9\nSATURATION=lots\nWINDOW=tiled\nWINDOW_SIZE=big\nDELAY=soon\n");
         assert_eq!(LiveChanges::read(&s), Err("WINDOW_SIZE=big is not WIDTHxHEIGHT".into()));
         let (l, warnings) = LiveChanges::read_picture_lenient(&s);
         assert_eq!(l.picture().levels, Levels::Auto);

@@ -26,8 +26,7 @@ pub fn detect() -> Result<Desktop, String> {
         Some(other) => Err(format!("unknown DESKTOP={other} (hyprland | generic)")),
         None => {
             let session = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some_and(|v| !v.is_empty());
-            let on_path = std::env::var_os("PATH")
-                .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("hyprctl").is_file()));
+            let on_path = std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("hyprctl").is_file()));
             Ok(if session && on_path { Desktop::Hyprland(Hyprland::new("hyprctl")) } else { Desktop::Generic })
         }
     }
@@ -141,9 +140,7 @@ impl Desktop {
     pub fn refresh_recover(&self, record: &Path) -> Report {
         match self {
             Self::Hyprland(h) => h.refresh_recover(record),
-            Self::Generic => {
-                Err(format!("a killed session's refresh record is left for the hyprland adapter: {}", record.display()))
-            }
+            Self::Generic => Err(format!("a killed session's refresh record is left for the hyprland adapter: {}", record.display())),
         }
     }
 
@@ -285,10 +282,9 @@ impl Hyprland {
         let prop = |p: &str, v: &str| format!("hl.dsp.window.set_prop({{ prop = \"{p}\", value = \"{v}\", window = \"{sel}\" }})");
         let full = |m: &str, a: &str| format!("hl.dsp.window.fullscreen({{ mode = \"{m}\", action = \"{a}\", window = \"{sel}\" }})");
         let (steps, said) = match mode {
-            "fullscreen" => (
-                vec![prop("border_size", "unset"), prop("rounding", "unset"), full("fullscreen", "set")],
-                "window: fullscreen".to_string(),
-            ),
+            "fullscreen" => {
+                (vec![prop("border_size", "unset"), prop("rounding", "unset"), full("fullscreen", "set")], "window: fullscreen".to_string())
+            }
             "windowed" => (
                 vec![
                     full("fullscreen", "unset"),
@@ -374,9 +370,9 @@ impl Hyprland {
                 gone if gone.is_empty() => Ok("display: refresh rate restored".into()),
                 kept => Err(format!("display: refresh rate restored{kept}")),
             },
-            Err(why) => Err(format!(
-                "could not restore the display's refresh rate ({why}; the next run retries); now: hyprctl eval '{restore}'"
-            )),
+            Err(why) => {
+                Err(format!("could not restore the display's refresh rate ({why}; the next run retries); now: hyprctl eval '{restore}'"))
+            }
         }
     }
 
@@ -394,13 +390,10 @@ impl Hyprland {
             return Err(format!("unreadable refresh record {}; dropped{}", record.display(), removed(record)));
         }
         let keep = format!("(or: hyprctl eval '{restore}'; rm {})", record.display());
-        let now = self
-            .json("monitors")
-            .and_then(|m| m.as_array()?.iter().find(|m| m["name"].as_str() == Some(name))?["refreshRate"].as_f64());
+        let now =
+            self.json("monitors").and_then(|m| m.as_array()?.iter().find(|m| m["name"].as_str() == Some(name))?["refreshRate"].as_f64());
         let Some(now) = now else {
-            return Err(format!(
-                "a killed session left {name} at {set}Hz, but its rate cannot be read now; kept for the next run {keep}"
-            ));
+            return Err(format!("a killed session left {name} at {set}Hz, but its rate cannot be read now; kept for the next run {keep}"));
         };
         let set_rate: f64 = set.parse().unwrap_or(f64::NAN);
         // As the awk test: within 0.01 Hz.
@@ -409,9 +402,7 @@ impl Hyprland {
             return settled(said, record);
         }
         if let Err(why) = self.eval(restore) {
-            return Err(format!(
-                "could not restore {name} to {was}Hz after a killed session ({why}); kept for the next run {keep}"
-            ));
+            return Err(format!("could not restore {name} to {was}Hz after a killed session ({why}); kept for the next run {keep}"));
         }
         settled(format!("display: {name} {set}Hz -> {was}Hz, restored after a killed session"), record)
     }
@@ -557,7 +548,13 @@ pub fn fmt_g(x: f64) -> String {
         return "0".into();
     }
     if !x.is_finite() {
-        return if x.is_nan() { "nan".into() } else if x > 0.0 { "inf".into() } else { "-inf".into() };
+        return if x.is_nan() {
+            "nan".into()
+        } else if x > 0.0 {
+            "inf".into()
+        } else {
+            "-inf".into()
+        };
     }
     // The exponent after rounding to six digits (9.999995 -> 10).
     let sci = format!("{:.5e}", x);
@@ -632,7 +629,13 @@ mod windows_focus {
             if SetForegroundWindow(hwnd).as_bool() {
                 return true;
             }
-            let flash = FLASHWINFO { cbSize: size_of::<FLASHWINFO>() as u32, hwnd, dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG, uCount: 0, dwTimeout: 0 };
+            let flash = FLASHWINFO {
+                cbSize: size_of::<FLASHWINFO>() as u32,
+                hwnd,
+                dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG,
+                uCount: 0,
+                dwTimeout: 0,
+            };
             // FlashWindowEx returns the window's state before, not an error.
             let _ = FlashWindowEx(&flash);
         }
@@ -664,11 +667,11 @@ mod tests {
     fn the_viewers_window_is_its_first_visible_unowned_one() {
         let w = |pid, visible, owned| TopWindow { pid, visible, owned };
         let windows = [
-            w(10, true, false), // another program, in front
+            w(10, true, false),  // another program, in front
             w(42, false, false), // the viewer's hidden helper window
-            w(42, true, true),  // a window the viewer's owns (IME)
-            w(42, true, false), // the video window
-            w(42, true, false), // a later one of the same pid
+            w(42, true, true),   // a window the viewer's owns (IME)
+            w(42, true, false),  // the video window
+            w(42, true, false),  // a later one of the same pid
         ];
         assert_eq!(viewer_window(&windows, 42), Some(3));
         assert_eq!(viewer_window(&windows, 10), Some(0));
@@ -739,7 +742,9 @@ mod tests {
     /// gave on 2026-10-19 (#47): the refresh record both read.
     #[test]
     fn the_plan_is_pick_refresh_mode_pys() {
-        let at = |mode: &str, rest: &str| format!(r#"hl.monitor({{ output = "DP-2", mode = "1920x1200@{mode}", position = "3440x120", {rest} }})"#);
+        let at = |mode: &str, rest: &str| {
+            format!(r#"hl.monitor({{ output = "DP-2", mode = "1920x1200@{mode}", position = "3440x120", {rest} }})"#)
+        };
         let turned = "scale = 1.25, transform = 1";
         let line = |set: &str, rest: &str, fps: &str| format!("DP-2|{}|{}|59.95|{fps}", at(set, rest), at("59.95", rest));
         let mut plain = monitors();
@@ -866,10 +871,7 @@ mod tests {
         assert_eq!(failed.for_desktop(true), None, "stderr has it");
         assert_eq!(no_sound.for_desktop(true), None);
         assert_eq!(failed.for_desktop(false), Some(("critical", "protoHDMIcapture failed", "no capture card found")));
-        assert_eq!(
-            no_sound.for_desktop(false),
-            Some(("normal", "protoHDMIcapture: no sound", "the card's audio input is not there"))
-        );
+        assert_eq!(no_sound.for_desktop(false), Some(("normal", "protoHDMIcapture: no sound", "the card's audio input is not there")));
     }
 
     #[test]

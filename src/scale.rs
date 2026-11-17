@@ -68,7 +68,10 @@ impl Scaling {
 enum Function {
     Spline36,
     /// The B,C cubic family.
-    Cubic { b: f64, c: f64 },
+    Cubic {
+        b: f64,
+        c: f64,
+    },
     Jinc,
 }
 
@@ -128,8 +131,9 @@ fn j1(x: f64) -> f64 {
     let ax = x.abs();
     if ax < 8.0 {
         let y = x * x;
-        let n = x * (72_362_614_232.0
-            + y * (-7_895_059_235.0 + y * (242_396_853.1 + y * (-2_972_611.439 + y * (15_704.482_60 + y * -30.160_366_06)))));
+        let n = x
+            * (72_362_614_232.0
+                + y * (-7_895_059_235.0 + y * (242_396_853.1 + y * (-2_972_611.439 + y * (15_704.482_60 + y * -30.160_366_06)))));
         let d = 144_725_228_442.0 + y * (2_300_535_178.0 + y * (18_583_304.74 + y * (99_447.433_94 + y * (376.999_139_7 + y))));
         n / d
     } else {
@@ -157,13 +161,8 @@ struct Config {
 const SPLINE36: Config = Config { kernel: Function::Spline36, window: None, radius: None, blur: 1.0, polar: false };
 const MITCHELL: Config =
     Config { kernel: Function::Cubic { b: 1.0 / 3.0, c: 1.0 / 3.0 }, window: None, radius: None, blur: 1.0, polar: false };
-const EWA_LANCZOSSHARP: Config = Config {
-    kernel: Function::Jinc,
-    window: Some(Function::Jinc),
-    radius: Some(JINC_ZERO3),
-    blur: 0.981_250_583_722_370_7,
-    polar: true,
-};
+const EWA_LANCZOSSHARP: Config =
+    Config { kernel: Function::Jinc, window: Some(Function::Jinc), radius: Some(JINC_ZERO3), blur: 0.981_250_583_722_370_7, polar: true };
 
 impl Config {
     /// `pl_filter_radius_bound`.
@@ -264,13 +263,7 @@ pub fn filter(scaling: Scaling, src: (u32, u32), dst: (u32, u32)) -> Option<Filt
         let lut = std::array::from_fn(|i| cx.sample(cx.bound() * i as f64 / (LUT_SIZE - 1) as f64) as f32);
         // The row size: twice the radius to the last zero (cutoff 0).
         let taps = |c: Config| c.cutoff_radius(0.0).ceil() as i32;
-        Some(Filter {
-            name,
-            polar: false,
-            radius: [cx.bound() as f32, cy.bound() as f32],
-            taps: [taps(cx), taps(cy)],
-            lut,
-        })
+        Some(Filter { name, polar: false, radius: [cx.bound() as f32, cy.bound() as f32], taps: [taps(cx), taps(cy)], lut })
     }
 }
 
@@ -525,8 +518,7 @@ mod tests {
         .expect("a GPU");
         let required_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
         let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features, ..Default::default() }))
-                .unwrap();
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features, ..Default::default() })).unwrap();
         eprintln!("GPU: {}", adapter.get_info().name);
 
         // Noise in red, sharp-edged blocks in green (ringing), a ramp in blue.
@@ -739,8 +731,7 @@ mod tests {
                 let t = read(&times);
                 let ticks: Vec<u64> = t.as_chunks::<8>().0.iter().map(|c| u64::from_ne_bytes(*c)).collect();
                 let period = f64::from(queue.get_timestamp_period());
-                let mut ms: Vec<f64> =
-                    (0..RUNS as usize).map(|r| (ticks[r * 2 + 1] - ticks[r * 2]) as f64 * period / 1e6).collect();
+                let mut ms: Vec<f64> = (0..RUNS as usize).map(|r| (ticks[r * 2 + 1] - ticks[r * 2]) as f64 * period / 1e6).collect();
                 ms.sort_by(f64::total_cmp);
                 format!("GPU median {:.3} ms, max {:.3} ms", ms[ms.len() / 2], ms[ms.len() - 1])
             } else {
