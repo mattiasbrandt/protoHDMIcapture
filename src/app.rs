@@ -1436,7 +1436,6 @@ impl App {
         if let Some(feedback) = gfx.feedback.as_mut() {
             feedback.request(tag)?;
         }
-        gfx.window.pre_present_notify();
         gfx.queue.present(frame);
         self.pacing.presented(now_monotonic(), new_frame);
         if convert {
