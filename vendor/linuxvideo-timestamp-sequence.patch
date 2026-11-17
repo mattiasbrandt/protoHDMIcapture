@@ -1,6 +1,27 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -405,11 +405,17 @@ impl VideoCaptureDevice {
+ 
+     /// Initializes streaming I/O mode.
+     pub fn into_stream(self) -> io::Result<ReadStream> {
++        self.into_stream_with_buffers(DEFAULT_BUFFER_COUNT)
++    }
++
++    /// Initializes streaming I/O mode with `count` buffers requested from
++    /// the driver, which may allocate fewer.
++    pub fn into_stream_with_buffers(self, count: u32) -> io::Result<ReadStream> {
+         Ok(ReadStream::new(
+             self.file,
+             BufType::VIDEO_CAPTURE,
+             Memory::MMAP,
+-            DEFAULT_BUFFER_COUNT,
++            count,
+         )?)
+     }
+ }
 --- a/src/stream.rs
 +++ b/src/stream.rs
-@@ -6,6 +6,7 @@
+@@ -6,6 +6,7 @@ use std::ops::{Deref, DerefMut};
  use std::os::fd::AsFd;
  use std::os::raw::c_int;
  use std::os::unix::prelude::*;
@@ -8,7 +29,7 @@
  use std::{io, slice};
  use std::{mem, ptr};
  
-@@ -231,6 +232,11 @@
+@@ -231,6 +232,11 @@ impl ReadStream {
              flags: buf.flags,
              data,
              bytesused: buf.bytesused as usize,
@@ -20,7 +41,7 @@
          };
  
          let res = cb(view);
-@@ -297,6 +303,8 @@
+@@ -297,6 +303,8 @@ pub struct ReadBufferView<'a> {
      flags: BufFlag,
      data: &'a [u8],
      bytesused: usize,
@@ -29,7 +50,7 @@
  }
  
  impl<'a> ReadBufferView<'a> {
-@@ -321,6 +329,30 @@
+@@ -321,6 +329,30 @@ impl<'a> ReadBufferView<'a> {
      pub fn raw_buffer(&self) -> &'a [u8] {
          self.data
      }
