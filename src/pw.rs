@@ -247,15 +247,6 @@ impl Snapshot {
     }
 }
 
-/// Percent on the cubic scale from a linear channel volume, and back.
-pub fn percent(linear: f32) -> u32 {
-    (f64::from(linear.max(0.0)).cbrt() * 100.0).round() as u32
-}
-
-pub fn linear(percent: u32) -> f32 {
-    (f64::from(percent) / 100.0).powi(3) as f32
-}
-
 /// Reads the output stream's level and, with a change, sets it on the
 /// stream (Props: channelVolumes and mute), where WirePlumber remembers it
 /// for the next session. Blocks for a few PipeWire round trips.
@@ -347,7 +338,7 @@ pub fn level(change: Option<LevelChange>) -> Result<Level, String> {
         let (Some(volume), mute) = read.borrow_mut().take().ok_or("the audio output stream reported no volume")? else {
             return Err("the audio output stream reported no volume".into());
         };
-        Ok(Level { volume: percent(volume), mute: mute.unwrap_or(false) })
+        Ok(Level { volume: crate::audio::percent(volume), mute: mute.unwrap_or(false) })
     };
     let now = read_level()?;
     let Some(change) = change else { return Ok(now) };
@@ -362,7 +353,7 @@ pub fn level(change: Option<LevelChange>) -> Result<Level, String> {
                 key: SPA_PROP_channelVolumes,
                 flags: PropertyFlags::empty(),
                 // Every channel the same, as pactl sets a plain percentage.
-                value: Value::ValueArray(ValueArray::Float(vec![linear(want.volume); crate::audio::CHANNELS as usize])),
+                value: Value::ValueArray(ValueArray::Float(vec![crate::audio::linear(want.volume); crate::audio::CHANNELS as usize])),
             },
         ],
     });
@@ -382,11 +373,6 @@ mod tests {
 
     #[test]
     fn volume_on_pulseaudios_cubic_scale() {
-        assert_eq!(linear(100), 1.0);
-        assert!((linear(50) - 0.125).abs() < 1e-7);
-        for p in 0..=100 {
-            assert_eq!(percent(linear(p)), p);
-        }
         let l = Level { volume: 97, mute: false };
         assert_eq!(l.changed(LevelChange::Volume(5)).volume, 100);
         assert_eq!(Level { volume: 3, ..l }.changed(LevelChange::Volume(-5)).volume, 0);

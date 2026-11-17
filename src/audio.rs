@@ -376,12 +376,22 @@ fn output_level(change: Option<LevelChange>) -> Result<Level, String> {
 /// mixer shows the scalar itself: our 80 % is its 51.
 #[cfg(any(windows, test))]
 fn session_percent(scalar: f32) -> u32 {
-    (f64::from(scalar.clamp(0.0, 1.0)).cbrt() * 100.0).round() as u32
+    percent(scalar.min(1.0))
 }
 
 #[cfg(any(windows, test))]
 fn session_scalar(percent: u32) -> f32 {
-    (f64::from(percent.min(100)) / 100.0).powi(3) as f32
+    linear(percent.min(100))
+}
+
+/// Percent on the cubic scale from a linear amplitude, and back: the one
+/// curve PipeWire's stream volume (pw.rs) and the Windows session share.
+pub fn percent(linear: f32) -> u32 {
+    (f64::from(linear.max(0.0)).cbrt() * 100.0).round() as u32
+}
+
+pub fn linear(percent: u32) -> f32 {
+    (f64::from(percent) / 100.0).powi(3) as f32
 }
 
 /// Reads, and with a change sets, the level of `our_session`.
@@ -1443,6 +1453,8 @@ mod tests {
             assert_eq!(session_percent(session_scalar(p)), p, "{p} % round trips");
         }
         assert_eq!(session_scalar(250), 1.0);
+        // PipeWire's stream volume goes over 100 %; only the session clamps.
+        assert_eq!((percent(1.5), linear(150)), (114, 3.375));
     }
 
     /// #40, a smoke test: two starts with no SINK on a thread where OLE is

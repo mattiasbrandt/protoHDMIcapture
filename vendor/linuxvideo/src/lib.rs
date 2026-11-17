@@ -405,17 +405,11 @@ impl VideoCaptureDevice {
 
     /// Initializes streaming I/O mode.
     pub fn into_stream(self) -> io::Result<ReadStream> {
-        self.into_stream_with_buffers(DEFAULT_BUFFER_COUNT)
-    }
-
-    /// Initializes streaming I/O mode with `count` buffers requested from
-    /// the driver, which may allocate fewer.
-    pub fn into_stream_with_buffers(self, count: u32) -> io::Result<ReadStream> {
         Ok(ReadStream::new(
             self.file,
             BufType::VIDEO_CAPTURE,
             Memory::MMAP,
-            count,
+            DEFAULT_BUFFER_COUNT,
         )?)
     }
 }

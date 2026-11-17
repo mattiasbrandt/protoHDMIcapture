@@ -68,9 +68,8 @@ windows = { version = "0.62.2", features = [
 [profile.release]
 debug = 1
 
-# linuxvideo 0.3.5 with each buffer's timestamp and sequence number exposed,
-# and a buffer-count setter (into_stream_with_buffers; 2 kept, #54); the diff
-# is vendor/linuxvideo-timestamp-sequence.patch (to offer upstream).
+# linuxvideo 0.3.5 with each buffer's timestamp and sequence number exposed;
+# the diff is vendor/linuxvideo-timestamp-sequence.patch (to offer upstream).
 [patch.crates-io]
 linuxvideo = { path = "vendor/linuxvideo" }
 
