@@ -16,6 +16,8 @@ commits and issues use them.
    on every push to `main` and every PR.
 4. Before a run against a real card, read [docs/testing.md](docs/testing.md);
    [CODING_STANDARDS.md](CODING_STANDARDS.md) is the review checklist.
+5. Before closing issue #N, run `git grep -n '#N\b'` and update each
+   comment or doc that still treats it as open ("until #N", "kept for #N").
 
 ## Conventional Commits
 

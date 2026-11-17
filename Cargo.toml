@@ -70,6 +70,10 @@ debug = 1
 
 # linuxvideo 0.3.5 with each buffer's timestamp and sequence number exposed;
 # the diff is vendor/linuxvideo-timestamp-sequence.patch (to offer upstream).
+# To regenerate it, in an empty directory:
+#   curl -sL https://static.crates.io/crates/linuxvideo/linuxvideo-0.3.5.crate | tar xz
+#   ln -s linuxvideo-0.3.5 a; ln -s <checkout>/vendor/linuxvideo b
+#   diff -ru a/src b/src | sed '/^diff -ru/d; s/^\(---\|+++\) \([ab]\/[^\t]*\)\t.*/\1 \2/'
 [patch.crates-io]
 linuxvideo = { path = "vendor/linuxvideo" }
 
