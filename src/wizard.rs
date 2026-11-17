@@ -141,7 +141,13 @@ pub trait Tuner {
     fn delay_ms(&self) -> u32;
     /// The delay moved by `by_ms` within DELAY's range; the new delay.
     fn nudge(&self, by_ms: i32) -> u32;
+    /// Why the loopback stopped mid-feed (the card's audio gone), if it
+    /// did; a stopped loopback is started again by the next nudge.
+    fn stopped(&self) -> Option<String>;
 }
+
+/// How often the tune page looks whether its loopback stopped.
+const TUNE_LOOK: Duration = Duration::from_millis(250);
 
 /// What the wizard asks of the machine.
 pub trait System {
@@ -316,6 +322,11 @@ pub struct Wizard {
     tuner: Option<Box<dyn Tuner>>,
     /// The tuner started from 0.050 because DELAY was not valid: why.
     sync_note: Option<String>,
+    /// The source the tuner plays, to start it again after it stopped.
+    sync_source: Option<String>,
+    /// The tune page's word on a stopped loopback, or on a restart that
+    /// failed; None while it plays.
+    sync_stop: Option<String>,
     kept_delay: Option<String>,
     saved: bool,
     changed: usize,
@@ -504,6 +515,8 @@ impl Wizard {
             audio_inputs: AudioInputs::default(),
             tuner: None,
             sync_note: None,
+            sync_source: None,
+            sync_stop: None,
             kept_delay: None,
             saved: false,
             changed: 0,
@@ -1078,6 +1091,9 @@ impl Wizard {
     /// `SIGNAL_TIMEOUT`, counted from the feed's window, not from the
     /// choice that closed the one before. True when the page changed.
     pub fn tick(&mut self, now: Instant) -> bool {
+        if self.step == Step::SyncTune {
+            return self.tune_look();
+        }
         if self.step != Step::SignalWait || self.running != Phase::Feed {
             return false;
         }
@@ -1090,8 +1106,12 @@ impl Wizard {
         true
     }
 
-    /// When the page next changes on its own (the signal check's timeout).
+    /// When the page next changes on its own: the signal check's timeout,
+    /// or the tune page's next look at its loopback.
     pub fn next_change(&self, now: Instant) -> Option<Instant> {
+        if self.step == Step::SyncTune {
+            return Some(now + TUNE_LOOK);
+        }
         (self.step == Step::SignalWait && self.running == Phase::Feed).then(|| self.measure.started.map_or(now, |s| s + SIGNAL_TIMEOUT))
     }
 
@@ -1329,8 +1349,12 @@ impl Wizard {
         let started = match source {
             None if self.sys.has_view_sh() => Err("the card has no PipeWire source; pick one in the audio stage".to_string()),
             None => Err("the card has no audio input of its own; pick one in the audio stage".to_string()),
-            Some(s) => self.sys.start_audio(&s, delay_ms),
+            Some(s) => {
+                self.sync_source = Some(s.clone());
+                self.sys.start_audio(&s, delay_ms)
+            }
         };
+        self.sync_stop = None;
         match started {
             Ok(t) => {
                 self.tuner = Some(t);
@@ -1344,9 +1368,52 @@ impl Wizard {
         }
     }
 
+    /// A stopped loopback, newly seen: said on the page and the terminal.
+    /// True when the page changed.
+    fn tune_look(&mut self) -> bool {
+        if self.sync_stop.is_some() {
+            return false;
+        }
+        let Some(why) = self.tuner.as_ref().and_then(|t| t.stopped()) else { return false };
+        let said = format!("Failed: No sound: the card's audio input stopped.\n({why})");
+        eprintln!("warning: the audio sync stage's sound stopped ({why})");
+        self.sync_stop = Some(said);
+        true
+    }
+
+    /// A nudge (`by` 0: r, the same delay): the delay moves, and a
+    /// stopped loopback starts again at it, as the feed's sync keys do (#29).
+    fn tune_nudge(&mut self, by: i32) {
+        let Some(t) = &self.tuner else { return };
+        let ms = if by == 0 { t.delay_ms() } else { t.nudge(by) };
+        if self.sync_stop.is_none() && t.stopped().is_none() {
+            return;
+        }
+        let Some(source) = self.sync_source.clone() else { return };
+        match self.sys.start_audio(&source, ms) {
+            Ok(new) => {
+                self.tuner = Some(new);
+                self.sync_stop = None;
+            }
+            Err(e) => {
+                let said = format!("Failed: No sound: it did not start again.\n({e})");
+                eprintln!("warning: the audio sync stage's sound did not start again: {e}");
+                self.sync_stop = Some(said);
+            }
+        }
+    }
+
     fn tune_lines(&self) -> Vec<String> {
         let ms = self.tuner.as_ref().map_or(0, |t| t.delay_ms());
-        vec![
+        // A stopped loopback first, in red, with the key that restarts it.
+        let stop = self.sync_stop.iter().flat_map(|said| {
+            let (head, why) = said.split_once('\n').unwrap_or((said, ""));
+            let mut lines = vec![head.to_string(), "    Press r to start the sound again.".to_string()];
+            lines.extend(wrap(why, WIDTH - 4).into_iter().map(|l| format!("    {l}")));
+            lines.push(String::new());
+            lines
+        });
+        stop.chain([
             "Watch something with sharp transients (console menu clicks are ideal):".into(),
             String::new(),
             "    j / k  or  ← / →          audio 10 ms earlier / later".into(),
@@ -1356,8 +1423,7 @@ impl Wizard {
             "    Esc                       leave DELAY as it was".into(),
             String::new(),
             format!("DELAY = {}", live_changes::seconds(ms)),
-        ]
-        .into_iter()
+        ])
         .chain(self.sync_note.clone())
         .collect()
     }
@@ -1745,6 +1811,7 @@ impl Wizard {
                     Key::Char(c) if c == "h" => Some(-50),
                     Key::Char(c) if c == "l" => Some(50),
                     Key::Char(c) if c == "0" => Some(-i32::try_from(now).unwrap_or(i32::MAX)),
+                    Key::Char(c) if c == "r" && self.sync_stop.is_some() => Some(0),
                     Key::Left => Some(-10),
                     Key::Right => Some(10),
                     Key::ShiftLeft => Some(-50),
@@ -1753,9 +1820,7 @@ impl Wizard {
                 };
                 match (by, key) {
                     (Some(by), _) => {
-                        if let Some(t) = &self.tuner {
-                            t.nudge(by);
-                        }
+                        self.tune_nudge(by);
                         Some(Ask::Tune)
                     }
                     (None, Key::Enter) => {
@@ -1925,6 +1990,10 @@ impl Tuner for Loopback {
     fn nudge(&self, by_ms: i32) -> u32 {
         self.controls.nudge_delay(by_ms)
     }
+
+    fn stopped(&self) -> Option<String> {
+        self.controls.dead()
+    }
 }
 
 impl System for Machine {
@@ -1968,10 +2037,10 @@ impl System for Machine {
 /// The stand-in machine and the key and signal helpers: setup.rs's tests drive the wizard with them too.
 pub(crate) mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
-    struct FakeTuner(Rc<Cell<u32>>);
+    struct FakeTuner(Rc<Cell<u32>>, Rc<RefCell<Option<String>>>);
 
     impl Tuner for FakeTuner {
         fn delay_ms(&self) -> u32 {
@@ -1981,6 +2050,9 @@ pub(crate) mod tests {
             self.0.set((i64::from(self.0.get()) + i64::from(by)).clamp(0, 1000) as u32);
             self.0.get()
         }
+        fn stopped(&self) -> Option<String> {
+            self.1.borrow().clone()
+        }
     }
 
     pub(crate) struct Fake {
@@ -1988,6 +2060,11 @@ pub(crate) mod tests {
         modes: Vec<Mode>,
         refresh: bool,
         delay: Rc<Cell<u32>>,
+        /// The latest loopback's death: set it to stop that loopback.
+        died: Rc<RefCell<Option<String>>>,
+        /// Starts fail with this while set.
+        start_fails: Rc<RefCell<Option<String>>>,
+        starts: Rc<Cell<u32>>,
         /// Why the card's link is not known; empty: a 5000 Mbit/s USB 3.20 link.
         link_unknown: &'static str,
     }
@@ -2026,8 +2103,13 @@ pub(crate) mod tests {
             self.refresh
         }
         fn start_audio(&self, _: &str, delay_ms: u32) -> Result<Box<dyn Tuner>, String> {
+            if let Some(e) = self.start_fails.borrow().clone() {
+                return Err(e);
+            }
+            self.starts.set(self.starts.get() + 1);
             self.delay.set(delay_ms);
-            Ok(Box::new(FakeTuner(self.delay.clone())))
+            *self.died.borrow_mut() = None;
+            Ok(Box::new(FakeTuner(self.delay.clone(), self.died.clone())))
         }
     }
 
@@ -2040,6 +2122,9 @@ pub(crate) mod tests {
             modes: vec![mode("yuyv422", 1920, 1080, 60), mode("mjpeg", 1920, 1080, 60), mode("yuyv422", 1280, 720, 30)],
             refresh: true,
             delay: Rc::new(Cell::new(0)),
+            died: Rc::default(),
+            start_fails: Rc::default(),
+            starts: Rc::default(),
             link_unknown: "",
         }
     }
@@ -2371,6 +2456,63 @@ pub(crate) mod tests {
         assert!(w.lines().iter().any(|l| l.starts_with("DELAY=abc: ") && l.ends_with(": starting from 0.050")), "{:#?}", w.lines());
         // An unreadable settings file stops the wizard before it starts.
         assert!(Wizard::new(Box::new(fake()), file.parent().unwrap().to_path_buf(), false, &|_| false).is_err());
+        std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_loopback_that_stops_while_tuning_is_said_and_a_nudge_restarts_it() {
+        let file = scratch("tunestop", Some("SOURCE=ps5\nDELAY=0.050\n"));
+        let sys = fake();
+        let (died, fails, starts, delay) = (sys.died.clone(), sys.start_fails.clone(), sys.starts.clone(), sys.delay.clone());
+        let mut w = wizard(sys, &file, false);
+        press(&mut w, &["Enter", "Enter", "y", "Enter", "Enter", "Enter", "Enter", "Enter"]);
+        w.running = Phase::Feed;
+        signal_ok(&mut w);
+        press(&mut w, &["Enter", "Enter", "Enter", "Enter", "Enter", "Enter"]);
+        assert_eq!(w.step, Step::SyncTune);
+        let t0 = Instant::now();
+        let next = w.next_change(t0).expect("the tune page looks again on its own");
+        assert!(next - t0 <= Duration::from_millis(250));
+        assert!(!w.tick(t0), "running: nothing to redraw");
+
+        *died.borrow_mut() = Some("input: Device disconnected".into());
+        assert!(w.tick(t0), "the stop redraws the page");
+        let lines = w.lines();
+        let at = lines.iter().position(|l| l == "Failed: No sound: the card's audio input stopped.");
+        let at = at.unwrap_or_else(|| panic!("{lines:#?}"));
+        assert_eq!(lines[at + 1], "    Press r to start the sound again.");
+        assert_eq!(lines[at + 2], "    (input: Device disconnected)");
+        assert!(at < lines.iter().position(|l| l.starts_with("Watch")).unwrap(), "above the keys: {lines:#?}");
+        assert!(!w.tick(t0), "said once");
+
+        // A restart that fails is said, and the page stays stopped.
+        *fails.borrow_mut() = Some("no PipeWire source alsa_input.usb-card (SRC)".into());
+        press(&mut w, &["k"]);
+        assert!(
+            w.lines().iter().any(|l| l == "Failed: No sound: it did not start again.")
+                && w.lines().iter().any(|l| l.contains("(no PipeWire source alsa_input.usb-card (SRC))")),
+            "{:#?}",
+            w.lines()
+        );
+        assert!(w.lines().iter().any(|l| l == "DELAY = 0.060"), "the nudge counts: {:#?}", w.lines());
+
+        // The card back: r starts it at the same delay, a sync key at the
+        // nudged one.
+        *fails.borrow_mut() = None;
+        let before = starts.get();
+        press(&mut w, &["r"]);
+        assert_eq!(starts.get(), before + 1);
+        assert_eq!(delay.get(), 60);
+        assert!(!w.lines().iter().any(|l| l.starts_with("Failed") || l.contains("start the sound again")), "{:#?}", w.lines());
+        press(&mut w, &["r"]);
+        assert_eq!(starts.get(), before + 1, "r does nothing while it plays");
+        *died.borrow_mut() = Some("input: Device disconnected".into());
+        assert!(w.tick(t0));
+        press(&mut w, &["k"]);
+        assert_eq!((starts.get(), delay.get()), (before + 2, 70));
+        assert!(!w.tick(t0));
+        press(&mut w, &["Enter"]);
+        assert!(w.lines().iter().any(|l| l == "OK: DELAY=0.070 will be saved."), "{:#?}", w.lines());
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
 

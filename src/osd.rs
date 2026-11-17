@@ -34,13 +34,14 @@ pub enum PageKind {
 }
 
 /// A page line as drawn: the wizard's status prefixes ("OK: ",
-/// "Warning: ", "Failed: ") become a coloured symbol before the rest, and a
+/// "Warning: ", "Failed: ") become a coloured symbol before the rest (a
+/// failure's text red too, so it is not read past), and a
 /// heading (unindented, ending in ":") takes the title colour. egui's
 /// default fonts have these symbols; colour emoji they do not (#31).
 fn styled(line: &str) -> (Option<(&'static str, Color32)>, &str, Color32) {
     for (prefix, symbol, color) in [("OK: ", "✔", GOOD), ("Warning: ", "⚠", WARN), ("Failed: ", "✖", BAD)] {
         if let Some(rest) = line.strip_prefix(prefix) {
-            return (Some((symbol, color)), rest, TEXT);
+            return (Some((symbol, color)), rest, if color == BAD { BAD } else { TEXT });
         }
     }
     let heading = line.ends_with(':') && !line.starts_with(char::is_whitespace);
@@ -608,7 +609,7 @@ mod tests {
     fn status_lines_become_symbols_and_headings_take_the_title_colour() {
         assert_eq!(styled("OK: saved."), (Some(("✔", GOOD)), "saved.", TEXT));
         assert_eq!(styled("Warning: node numbers move"), (Some(("⚠", WARN)), "node numbers move", TEXT));
-        assert_eq!(styled("Failed: the card is busy"), (Some(("✖", BAD)), "the card is busy", TEXT));
+        assert_eq!(styled("Failed: the card is busy"), (Some(("✖", BAD)), "the card is busy", BAD));
         assert_eq!(
             styled("Known about this card (capture-cards/ms2130.md):"),
             (None, "Known about this card (capture-cards/ms2130.md):", TITLE)
