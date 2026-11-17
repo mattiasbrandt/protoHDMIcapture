@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/mattiasbrandt/protoHDMIcapture/compare/v0.4.0...v0.5.0) (2026-11-17)
+
+
+### Features
+
+* **wizard:** the source's setup tips show over its live picture ([871dfbe](https://github.com/mattiasbrandt/protoHDMIcapture/commit/871dfbe56316562265d253d1f3ae61bcc98a44f1))
+
+
+### Bug Fixes
+
+* **wizard:** the audio sync stage says when its sound stops, and r restarts it ([eb1f14e](https://github.com/mattiasbrandt/protoHDMIcapture/commit/eb1f14ee93a570936111a488e48b1933a4fa32dd))
+
 ## [0.4.0](https://github.com/mattiasbrandt/protoHDMIcapture/compare/v0.3.0...v0.4.0) (2026-11-17)
 
 
