@@ -893,10 +893,16 @@ impl Wizard {
         self.show(Step::SourcePick, body, choose("Source", &def, items));
     }
 
-    fn source_tips(&mut self, pick: &str) {
-        let p = sources::get(pick).or_else(|| sources::get("generic"));
-        let name = p.as_ref().map_or(pick.to_string(), |p| p.name.clone());
-        let mut body = vec![format!("Set these on the {name} now; the signal check comes next:")];
+    /// The source's setup tips, over its live picture: the first page with
+    /// the feed, so a setting changed on the source shows at once.
+    fn source_tips(&mut self) {
+        let pick = match self.cur("SOURCE") {
+            s if s.is_empty() => "generic".to_string(),
+            s => s,
+        };
+        let p = sources::get(&pick).or_else(|| sources::get("generic"));
+        let name = p.as_ref().map_or(pick.clone(), |p| p.name.clone());
+        let mut body = vec![format!("Set these on the {name} now, watching the picture; the signal check comes next:")];
         body.extend(bullets(&p.map(|p| p.tips).unwrap_or_default()));
         self.show(Step::SourceTips, body, Ask::Continue);
     }
@@ -1010,6 +1016,10 @@ impl Wizard {
     }
 
     fn signal_stage(&mut self) {
+        self.source_tips();
+    }
+
+    fn signal_check(&mut self) {
         self.measure = Measure::default();
         self.signal_result.clear();
         self.show(Step::SignalWait, Vec::new(), Ask::Wait);
@@ -1578,10 +1588,11 @@ impl Wizard {
                 self.ignore_next(i + 1);
             }
             Step::CardDetails => self.ignore_next(0),
-            Step::CardResult | Step::SourceTips | Step::SignalResult | Step::SyncNone | Step::SyncResult => self.next_stage(),
+            Step::SourceTips => self.signal_check(),
+            Step::CardResult | Step::SignalResult | Step::SyncNone | Step::SyncResult => self.next_stage(),
             Step::SourcePick => {
                 self.set("SOURCE", if a == "generic" { "" } else { a });
-                self.source_tips(a);
+                self.next_stage();
             }
             Step::FormatPick => {
                 let mut f = a.split(' ');
@@ -1611,7 +1622,7 @@ impl Wizard {
             }
             Step::SignalWait => {}
             Step::SignalRetry => match a {
-                "yes" => self.signal_stage(),
+                "yes" => self.signal_check(),
                 _ => self.next_stage(),
             },
             Step::AudioPick => {
@@ -2207,13 +2218,11 @@ pub(crate) mod tests {
         // Then the camera: ignore it (yes by default).
         assert_eq!(w.step, Step::CardIgnore(0));
         press(&mut w, &["Enter"]);
-        // Source: the PS5, then its tips.
+        // Source: the PS5; its tips come with the feed.
         assert_eq!(w.stage, Stage::Source);
         assert_eq!(selected(&w), "generic");
         let ps5 = sources::ids().iter().position(|i| *i == "ps5").unwrap();
         press(&mut w, &[&(ps5 + 1).to_string()]);
-        assert_eq!(w.step, Step::SourceTips);
-        press(&mut w, &["Enter"]);
         // Format: the PS5's suggestion is the best mode.
         assert_eq!(w.stage, Stage::Format);
         assert_eq!(selected(&w), "yuyv422 1920x1080 60");
@@ -2227,6 +2236,11 @@ pub(crate) mod tests {
         assert_eq!(f.unwrap().width, 1920);
         w.running = Phase::Feed;
         assert!(!w.wants_exit());
+        // The PS5's tips first, over the live picture; then the check.
+        assert_eq!(w.step, Step::SourceTips);
+        assert!(w.lines().iter().any(|l| l.starts_with("Set these on the PlayStation 5 now, watching the picture")), "{:#?}", w.lines());
+        press(&mut w, &["Enter"]);
+        assert_eq!(w.step, Step::SignalWait);
         signal_ok(&mut w);
         assert_eq!(w.step, Step::SignalResult, "{:#?}", w.lines());
         assert!(w.lines().iter().any(|l| l == "OK: 60.0 fps measured (1920x1080)"), "{:#?}", w.lines());
@@ -2331,6 +2345,8 @@ pub(crate) mod tests {
         assert!(w.lines().iter().any(|l| l.starts_with("Failed: the card is busy")), "{:#?}", w.lines());
         press(&mut w, &["Enter"]);
         w.running = Phase::Feed;
+        assert_eq!(w.step, Step::SourceTips, "the tips again, with the feed");
+        press(&mut w, &["Enter"]);
         // No frames for 6 s.
         let t0 = Instant::now();
         assert!(!w.tick(t0));

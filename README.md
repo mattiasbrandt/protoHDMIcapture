@@ -174,10 +174,12 @@ written before the review.
    USB link speed, with a warning at 480 Mbit/s (USB 2) for a chip that
    needs USB 3. Every other device can be marked an ignored device.
 2. **Source:** what is plugged into the card (a source profile, or any HDMI
-   source) and its setup tips.
+   source).
 3. **Picture format:** the card's own modes, best first, starting on the
    mode the source profile suggests or the closest one the card has.
-4. **Signal check:** 2 seconds of capture at that mode, measuring the real
+4. **Signal check:** first the source's setup tips over its live picture,
+   so a setting changed on the source shows at once; then 2 seconds of
+   capture at that mode, measuring the real
    frame rate, and checking a few frames for an all-black picture (the
    MS2109 streams black at full rate with nothing plugged in).
 5. **Audio:** the card audio input, another input, or none.
