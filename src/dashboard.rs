@@ -398,6 +398,7 @@ fn audio_json(a: &AudioLive) -> Value {
                 "underruns": c.ring_underruns.load(Ordering::Relaxed),
                 "xruns": c.xruns.load(Ordering::Relaxed),
                 "errors": c.other_errors.load(Ordering::Relaxed),
+                "realtime_refused": c.realtime_refused.load(Ordering::Relaxed),
             })
         }
     }
@@ -952,6 +953,9 @@ fn render(s: &Value, p: &Paint) -> String {
             row(&mut out, "sync", format!("delay {} ms · ring {} ms", int(&a["delay_ms"]), n1(&a["ring_ms"])));
             let bad = |k: &str| p.good_bad(&int(&a[k]), a[k].as_u64() == Some(0));
             row(&mut out, "underruns", format!("{} · xruns {} · errors {}", bad("underruns"), bad("xruns"), bad("errors")));
+            if a["realtime_refused"].as_bool() == Some(true) {
+                row(&mut out, "priority", p.red("real-time refused; sound may crackle under load"));
+            }
         }
         Some("failed") => row(&mut out, "loopback", p.red(&format!("failed: {}", a["why"].as_str().unwrap_or("?")))),
         _ => row(&mut out, "loopback", format!("not running ({})", a["why"].as_str().unwrap_or("?"))),
@@ -1361,6 +1365,7 @@ mod tests {
         // As Audio::start leaves it: no output callback yet.
         counters.out_min.store(u32::MAX, Ordering::Relaxed);
         counters.xruns.store(3, Ordering::Relaxed);
+        counters.realtime_refused.store(true, Ordering::Relaxed);
         counters.target_ms.store(80, Ordering::Relaxed);
         live.set_audio(AudioLive::Running { source: "card-in".into(), sink: "speakers".into(), buffer_ms: 10, counters });
         // The next snapshot after the changes.
@@ -1381,6 +1386,7 @@ mod tests {
         assert_eq!(a["granted_in_ms"], json!([10.0, 10.0]));
         assert!(a["granted_out_ms"].is_null(), "no output callback yet");
         assert_eq!((a["xruns"].as_u64(), a["delay_ms"].as_u64()), (Some(3), Some(80)));
+        assert_eq!(a["realtime_refused"].as_bool(), Some(true));
         let events: Vec<&str> = s["events"].as_array().unwrap().iter().map(|e| e.as_str().unwrap()).collect();
         assert!(events[0].ends_with("capture gap: sequence 10 -> 13, 2 lost"), "{events:?}");
         assert!(events[1].ends_with("no signal (stopped): MJPEG frames do not decode: not a JPEG"), "{events:?}");
@@ -1469,7 +1475,7 @@ mod tests {
             "cpu_pct": 7.25, "rss_mb": 180.0,
             "audio": { "state": "running", "source": "alsa_input.usb-MACROSILICON", "sink": "alsa_output.pci",
                        "buffer_ms": 10, "granted_in_ms": [10.0, 10.0], "granted_out_ms": [10.0, 21.3],
-                       "delay_ms": 80, "ring_ms": 80.2, "underruns": 0, "xruns": 1, "errors": 0 },
+                       "delay_ms": 80, "ring_ms": 80.2, "underruns": 0, "xruns": 1, "errors": 0, "realtime_refused": true },
             "events": ["    3.0 s  capture gap: sequence 179 -> 181, 1 lost"],
         })
     }
@@ -1491,6 +1497,7 @@ mod tests {
             "  buffer            asked 10 ms · got in 10.0 ms · out 10.0..21.3 ms",
             "  sync              delay 80 ms · ring 80.2 ms",
             "  underruns         0 · xruns 1 · errors 0",
+            "  priority          real-time refused; sound may crackle under load",
             "        3.0 s  capture gap: sequence 179 -> 181, 1 lost",
             "  Ctrl-C closes this window; the feed keeps running.",
         ];

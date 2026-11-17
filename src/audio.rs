@@ -86,6 +86,9 @@ pub struct Counters {
     /// PipeWire reported an xrun on either stream.
     pub xruns: AtomicU64,
     pub other_errors: AtomicU64,
+    /// The host refused a stream's thread real-time priority (#52):
+    /// sound may crackle under load.
+    pub realtime_refused: AtomicBool,
     /// Frames per callback, smallest and largest seen.
     pub in_min: AtomicU32,
     pub in_max: AtomicU32,
@@ -150,6 +153,14 @@ fn on_error(counters: &Arc<Counters>, notify: &NotifySlot, side: &'static str) -
         match e.kind() {
             ErrorKind::Xrun => {
                 counters.xruns.fetch_add(1, Ordering::Relaxed);
+            }
+            // Said once for both streams. On PipeWire this comes from
+            // cpal's promotion thread, on WASAPI from the stream's thread
+            // before its first callback.
+            ErrorKind::RealtimeDenied => {
+                if !counters.realtime_refused.swap(true, Ordering::Relaxed) {
+                    eprintln!("note: real-time priority refused; sound may crackle under load ({side}: {e})");
+                }
             }
             // The stream is gone: cpal reports PipeWire's stream state
             // going Unconnected or Error this way (host/pipewire/stream.rs
@@ -548,8 +559,9 @@ fn take_in(ring: &mut rtrb::Producer<Frame>, data: &[f32]) {
 /// counts being from before it stopped (#40).
 fn status_line(delay_ms: u32, fill: Duration, c: &Counters) -> String {
     let stopped = c.dead().map_or(String::new(), |why| format!(", stopped mid-feed ({why})"));
+    let refused = if c.realtime_refused.load(Ordering::Relaxed) { ", real-time priority refused" } else { "" };
     format!(
-        "delay {delay_ms} ms (ring {:.1} ms), ring underruns {}, xruns {}, errors {}{stopped}",
+        "delay {delay_ms} ms (ring {:.1} ms), ring underruns {}, xruns {}, errors {}{refused}{stopped}",
         fill.as_secs_f64() * 1000.0,
         c.ring_underruns.load(Ordering::Relaxed),
         c.xruns.load(Ordering::Relaxed),
@@ -1284,6 +1296,8 @@ mod tests {
             status_line(50, Duration::ZERO, &c),
             "delay 50 ms (ring 0.0 ms), ring underruns 1, xruns 0, errors 0, stopped mid-feed (input: the audio device is gone)"
         );
+        c.realtime_refused.store(true, Ordering::Relaxed);
+        assert!(status_line(50, Duration::ZERO, &c).contains("errors 0, real-time priority refused, stopped mid-feed"));
     }
 
     fn ring(buffer_frames: u32) -> (rtrb::Producer<Frame>, Ring) {
