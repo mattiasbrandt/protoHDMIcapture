@@ -87,6 +87,14 @@ fi
 # State shared by every window run in the process carries its reason (#25):
 # the dashboard's numbers were one global that the wizard's windows wrote
 # into (#21).
+# Temporary measurements (MEASURE lines on stderr, env overrides for an
+# A/B) are taken out before a commit; a launcher built from the tree
+# would print them.
+step "no temporary measurements"
+if git grep -n 'eprintln!("MEASURE' -- src; then
+    bad "a temporary MEASURE line is left in src/"
+fi
+
 step "no unmarked process-global state"
 tools/process-globals || bad "process-global state without \`// process-global: <reason>\`"
 
