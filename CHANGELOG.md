@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.0](https://github.com/mattiasbrandt/protoHDMIcapture/compare/v0.1.2...v0.2.0) (2026-11-17)
+
+
+### Features
+
+* **viewer:** --stats reports the overlay's CPU time per frame drawn ([3328adf](https://github.com/mattiasbrandt/protoHDMIcapture/commit/3328adfd373c4d3668fefc033e84429bbd83e69d))
+* **viewer:** u in the overlay opens the setup wizard ([9498289](https://github.com/mattiasbrandt/protoHDMIcapture/commit/949828985a21c20e438986a23880babf2b03be28))
+
 ## [0.1.2](https://github.com/mattiasbrandt/protoHDMIcapture/compare/v0.1.1...v0.1.2) (2026-11-17)
 
 
