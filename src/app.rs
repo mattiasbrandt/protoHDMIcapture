@@ -1390,7 +1390,9 @@ impl App {
                 message: text.message.as_deref(),
             };
             let size = (gfx.config.width, gfx.config.height);
+            let drawing = Instant::now();
             extra = gfx.osd.draw(&gfx.device, &gfx.queue, &mut encoder, &view, size, &s);
+            self.pacing.stats().overlay(drawing.elapsed());
         }
         if let Some(t) = &gfx.timer {
             t.resolve(&mut encoder);

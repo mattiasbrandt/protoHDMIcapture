@@ -59,6 +59,9 @@ pub struct Stats {
     /// GPU time of the convert and the scale pass, where measured.
     gpu_convert: Vec<Duration>,
     gpu_scale: Vec<Duration>,
+    /// CPU time of drawing the overlay (layout, tessellation, upload), in
+    /// the frames that drew one (#53: cache it if this is costly).
+    overlay: Vec<Duration>,
     submitted: u64,
     presented: u64,
     discarded: u64,
@@ -87,6 +90,7 @@ impl Stats {
             acquire: Vec::with_capacity(64 * 1024),
             gpu_convert: Vec::with_capacity(64 * 1024),
             gpu_scale: Vec::with_capacity(64 * 1024),
+            overlay: Vec::with_capacity(64 * 1024),
             submitted: 0,
             presented: 0,
             discarded: 0,
@@ -116,6 +120,12 @@ impl Stats {
         if self.verbose {
             self.gpu_convert.push(convert);
             self.gpu_scale.push(scale);
+        }
+    }
+
+    pub fn overlay(&mut self, cpu: Duration) {
+        if self.verbose {
+            self.overlay.push(cpu);
         }
     }
 
@@ -218,6 +228,9 @@ impl Stats {
                 fmt(&mut self.gpu_scale)
             );
         }
+        if !self.overlay.is_empty() {
+            eprintln!("summary: overlay CPU ({} frames)  {}", self.overlay.len(), fmt(&mut self.overlay));
+        }
         eprintln!(
             "summary: refresh {}, repeated refreshes {}",
             self.refresh.map_or("unknown".into(), |r| format!("{:.3} Hz", 1.0 / r.as_secs_f64())),
@@ -236,6 +249,17 @@ mod tests {
     use crate::dashboard::Live;
 
     const REFRESH: Duration = Duration::from_micros(16_681);
+
+    #[test]
+    fn the_overlays_cpu_time_is_kept_only_for_stats() {
+        let mut quiet = Stats::new(Duration::ZERO, false, Arc::new(Live::new()));
+        quiet.overlay(Duration::from_micros(800));
+        assert!(quiet.overlay.is_empty());
+        let mut verbose = Stats::new(Duration::ZERO, true, Arc::new(Live::new()));
+        verbose.overlay(Duration::from_micros(800));
+        verbose.overlay(Duration::from_micros(1200));
+        assert_eq!(verbose.overlay.len(), 2);
+    }
 
     fn present(s: &mut Stats, at: Duration) {
         let tag = Tag { captured: at - Duration::from_millis(30), dequeued: at - Duration::from_millis(20), repaint: false };
