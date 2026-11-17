@@ -71,20 +71,39 @@ fn sync(core: &pw::core::CoreRc, mainloop: &pw::main_loop::MainLoopRc) -> Result
     Ok(())
 }
 
-/// The graph as it is now.
-pub fn snapshot() -> Result<Snapshot, String> {
+/// Devices bound for their info, and their listeners: kept until the
+/// second sync.
+type Bound = Rc<RefCell<Vec<(pw::device::Device, pw::device::DeviceListener)>>>;
+
+/// A connection to PipeWire: its loop, core and registry.
+struct Connection {
+    mainloop: pw::main_loop::MainLoopRc,
+    core: pw::core::CoreRc,
+    registry: pw::registry::RegistryRc,
+    _context: pw::context::ContextRc,
+}
+
+fn connect() -> Result<Connection, String> {
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| format!("PipeWire main loop: {e}"))?;
     let context = pw::context::ContextRc::new(&mainloop, None).map_err(|e| format!("PipeWire context: {e}"))?;
     let core = context.connect_rc(None).map_err(|e| format!("PipeWire connect: {e}"))?;
     let registry = core.get_registry_rc().map_err(|e| format!("PipeWire registry: {e}"))?;
+    Ok(Connection { mainloop, core, registry, _context: context })
+}
 
-    let seen = Rc::new(RefCell::new(Seen::default()));
-    // Bound devices and their info listeners live until the second sync.
-    let bound: Rc<RefCell<Vec<(pw::device::Device, pw::device::DeviceListener)>>> = Rc::default();
+/// Records each global the registry announces into `seen`. With `bound`,
+/// audio devices are bound for their sysfs path (`card_source`); every
+/// new link calls `on_link`.
+fn listen(
+    registry: &pw::registry::RegistryRc,
+    seen: &Rc<RefCell<Seen>>,
+    bound: Option<Bound>,
+    on_link: impl Fn() + 'static,
+) -> pw::registry::Listener {
     let pid = std::process::id().to_string();
-    let (s, b, reg) = (seen.clone(), bound.clone(), registry.clone());
-    let _registry_listener = registry
+    let (s, reg) = (seen.clone(), registry.clone());
+    registry
         .add_listener_local()
         .global(move |g| {
             let Some(props) = g.props else { return };
@@ -109,10 +128,12 @@ pub fn snapshot() -> Result<Snapshot, String> {
                     let num = |k| props.get(k).and_then(|v: &str| v.parse().ok());
                     if let (Some(o), Some(i)) = (num("link.output.node"), num("link.input.node")) {
                         s.borrow_mut().links.push((o, i));
+                        on_link();
                     }
                 }
                 // The sysfs path is only in the device's own info.
                 ObjectType::Device if props.get("media.class") == Some("Audio/Device") => {
+                    let Some(b) = &bound else { return };
                     let Ok(device) = reg.bind::<pw::device::Device, _>(g) else { return };
                     let (s2, id) = (s.clone(), g.id);
                     let listener = device
@@ -128,16 +149,50 @@ pub fn snapshot() -> Result<Snapshot, String> {
                 _ => {}
             }
         })
-        .register();
+        .register()
+}
 
+fn into_snapshot(seen: Rc<RefCell<Seen>>) -> Result<Snapshot, String> {
+    Ok(Snapshot(Rc::try_unwrap(seen).map_err(|_| "PipeWire snapshot still borrowed".to_string())?.into_inner()))
+}
+
+/// The graph as it is now.
+pub fn snapshot() -> Result<Snapshot, String> {
+    let c = connect()?;
+    let seen = Rc::new(RefCell::new(Seen::default()));
+    let bound: Bound = Rc::default();
+    let listener = listen(&c.registry, &seen, Some(bound.clone()), || {});
     // Every global comes before the first reply; the bound devices' info
     // before the second.
-    sync(&core, &mainloop)?;
-    sync(&core, &mainloop)?;
+    sync(&c.core, &c.mainloop)?;
+    sync(&c.core, &c.mainloop)?;
     drop(bound);
-    drop(_registry_listener);
-    let seen = Rc::try_unwrap(seen).map_err(|_| "PipeWire snapshot still borrowed".to_string())?.into_inner();
-    Ok(Snapshot(seen))
+    drop(listener);
+    into_snapshot(seen)
+}
+
+/// The graph once something is linked into this process's capture
+/// streams, or as it is after `within`: one connection, woken by each new
+/// link (#54), where polling `snapshot` opened one every few ms.
+pub fn once_linked(within: std::time::Duration) -> Result<Snapshot, String> {
+    let c = connect()?;
+    let seen = Rc::new(RefCell::new(Seen::default()));
+    let l = c.mainloop.clone();
+    let listener = listen(&c.registry, &seen, None, move || l.quit());
+    sync(&c.core, &c.mainloop)?;
+    let timed_out = Rc::new(Cell::new(false));
+    let (t, l) = (timed_out.clone(), c.mainloop.clone());
+    let timer = c.mainloop.loop_().add_timer(move |_| {
+        t.set(true);
+        l.quit();
+    });
+    timer.update_timer(Some(within), None).into_sync_result().map_err(|e| format!("PipeWire timer: {e}"))?;
+    while !timed_out.get() && Snapshot::linked_to_us(&seen.borrow()).is_empty() {
+        c.mainloop.run();
+    }
+    drop(timer);
+    drop(listener);
+    into_snapshot(seen)
 }
 
 impl Snapshot {
@@ -170,7 +225,10 @@ impl Snapshot {
 
     /// The node names linked into this process's capture streams.
     pub fn sources_linked_to_us(&self) -> Vec<String> {
-        let s = &self.0;
+        Self::linked_to_us(&self.0)
+    }
+
+    fn linked_to_us(s: &Seen) -> Vec<String> {
         let capture: HashSet<u32> = s
             .nodes
             .iter()
