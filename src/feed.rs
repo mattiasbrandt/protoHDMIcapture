@@ -128,6 +128,9 @@ pub enum Ran {
     Ended,
     /// Another feed holds the lock: nothing was started (main says so).
     AlreadyRunning(AlreadyRunning),
+    /// u in the overlay: the feed ended, everything above let go, and the
+    /// setup wizard is to open (main.rs).
+    Setup,
 }
 
 /// The viewer's feed: started in the order above, its window run, ended in
@@ -163,7 +166,7 @@ pub fn run(start: Start, parts: Parts, quit: &Quit) -> Result<Ran, Fatal> {
     if let Some(log) = log {
         log.ended(&result.as_ref().map(drop).map_err(Fatal::to_string));
     }
-    result.map(|()| Ran::Ended)
+    result.map(|setup| if setup { Ran::Setup } else { Ran::Ended })
 }
 
 pub type OpenCard = Box<dyn FnOnce(&Settings, Format) -> Result<(Box<dyn FrameSource>, Node), Fatal>>;
@@ -172,7 +175,8 @@ pub type OpenLog = Box<dyn FnOnce(&Path) -> io::Result<DebugLog>>;
 pub type Window = Box<dyn FnOnce(Box<dyn FrameSource>, app::Options, &Quit) -> Outcome>;
 
 impl Feed {
-    /// The steps after the session and the log, through the window.
+    /// The steps after the session and the log, through the window. True
+    /// when the window asked for the setup wizard (u).
     fn run(
         &mut self,
         start: Start,
@@ -181,7 +185,7 @@ impl Feed {
         window: Window,
         log: Option<&mut DebugLog>,
         quit: &Quit,
-    ) -> Result<(), Fatal> {
+    ) -> Result<bool, Fatal> {
         let Start { run_dir, settings: s, mut opts, format, test_pattern } = start;
         let live = opts.live.clone();
         let (source, node): (Box<dyn FrameSource>, _) = if test_pattern {
@@ -243,7 +247,7 @@ impl Feed {
         opts.settings = Some(s);
         let stats = opts.stats;
         if quit.requested() {
-            return Ok(());
+            return Ok(false);
         }
         // As view.sh writes it once its player is started.
         if let Some(session) = self.session() {
@@ -276,9 +280,11 @@ impl Feed {
                 eprintln!("summary: audio {line}");
             }
         }
-        // Every way the viewer's window ends is the end of the viewer.
+        // Every way the viewer's window ends is the end of the viewer, but
+        // u, which goes on to the setup wizard: true.
         match outcome {
-            Outcome::Closed | Outcome::Signal | Outcome::TimeUp => Ok(()),
+            Outcome::Setup => Ok(true),
+            Outcome::Closed | Outcome::Signal | Outcome::TimeUp => Ok(false),
             Outcome::CaptureEnded(e) => Err(capture_ended(&e).into()),
             Outcome::Failed(e) => Err(e.into()),
         }
@@ -609,6 +615,21 @@ mod tests {
             assert!(matches!(ran, Ok(Ran::Ended)), "{ran:?}");
             assert_eq!(*seen.steps.borrow(), ["log", "card", "loopback"]);
             assert!(lock_is_free(&dir));
+            drop(seen);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+
+        #[test]
+        fn u_ends_the_feed_for_the_setup_with_everything_let_go() {
+            let dir = run_dir("setup");
+            let seen = Seen::default();
+            let p = parts(&seen, || panic!("the test pattern opens no card"), |_| Outcome::Setup);
+            let ran = feed::run(start(&dir, "DEBUG=log\n", true), p, &Quit::new());
+            assert!(matches!(ran, Ok(Ran::Setup)), "{ran:?}");
+            // The wizard takes the lock and the card next.
+            assert!(lock_is_free(&dir));
+            assert!(!dir.join("video.pid").exists());
+            assert!(last_line(&dir.join("debug.log")).ends_with("[dbg] ended"));
             drop(seen);
             std::fs::remove_dir_all(&dir).unwrap();
         }

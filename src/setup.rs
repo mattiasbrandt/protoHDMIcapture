@@ -52,11 +52,20 @@ pub struct Parts {
     pub open_card: OpenCard,
 }
 
-/// The wizard, from its first window to its end. True when the feed
-/// should start: saved and asked for, or the first run skipped, and no
-/// signal. Err for what ends the wizard itself: another wizard running,
+/// How the wizard ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ended {
+    /// The feed should start: play asked for (saved, or the first run
+    /// skipped), and no signal.
+    pub play: bool,
+    /// The review wrote the settings file.
+    pub saved: bool,
+}
+
+/// The wizard, from its first window to its end. Err for what ends the
+/// wizard itself: another wizard running,
 /// the run dir's files, or the choosing window failing.
-pub fn run(start: Start, parts: Parts, quit: &Quit) -> Result<bool, String> {
+pub fn run(start: Start, parts: Parts, quit: &Quit) -> Result<Ended, String> {
     let Start { run_dir: dir, system, config_file, first_run, live_changes, desktop } = start;
     let Parts { mut window, mut open_card } = parts;
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
@@ -123,7 +132,9 @@ pub fn run(start: Start, parts: Parts, quit: &Quit) -> Result<bool, String> {
             match outcome {
                 // The wizard moved on, or ended (its window's close button
                 // ends it unsaved): its state says what comes next.
-                Outcome::Closed | Outcome::TimeUp => {}
+                // Setup: the viewer's u, which the wizard's windows do not
+                // take (every key is the wizard's there).
+                Outcome::Closed | Outcome::TimeUp | Outcome::Setup => {}
                 Outcome::Signal => wiz.borrow_mut().abandon(),
                 // The card gone mid-check, or the feed's window failing,
                 // is the wizard's to say, not the end.
@@ -141,7 +152,7 @@ pub fn run(start: Start, parts: Parts, quit: &Quit) -> Result<bool, String> {
     }
     let _ = std::fs::remove_file(dir.join("setup.pid"));
     result?;
-    Ok(wiz.borrow().outcome() == Some(wizard::Outcome::Play) && !quit.requested())
+    Ok(Ended { play: wiz.borrow().outcome() == Some(wizard::Outcome::Play) && !quit.requested(), saved })
 }
 
 #[cfg(test)]
@@ -261,7 +272,7 @@ mod tests {
             })],
             None,
         );
-        assert_eq!(run(start(&d, false), parts, &Quit::new()), Ok(false));
+        assert_eq!(run(start(&d, false), parts, &Quit::new()), Ok(Ended { play: false, saved: false }));
         assert_eq!(*seen.windows.borrow(), [Phase::Choose]);
         assert_eq!(done(&d).as_deref(), Some("cancelled\n"));
         assert!(!d.join("setup.pid").exists());
@@ -272,7 +283,7 @@ mod tests {
     fn a_signal_ends_the_wizard_unsaved() {
         let d = dir("signal");
         let (parts, seen) = stand_ins(&d, vec![Box::new(|_, _, _| Outcome::Signal)], None);
-        assert_eq!(run(start(&d, false), parts, &Quit::new()), Ok(false));
+        assert_eq!(run(start(&d, false), parts, &Quit::new()).map(|e| e.play), Ok(false));
         assert_eq!(seen.windows.borrow().len(), 1);
         assert_eq!(done(&d).as_deref(), Some("cancelled\n"));
         std::fs::remove_dir_all(&d).unwrap();
@@ -285,7 +296,7 @@ mod tests {
         {
             let d = dir("choose-failed");
             let (parts, _) = stand_ins(&d, vec![Box::new(move |_, _, _| outcome)], None);
-            assert_eq!(run(start(&d, false), parts, &Quit::new()), Err(error.to_string()));
+            assert_eq!(run(start(&d, false), parts, &Quit::new()).map(|e| e.play), Err(error.to_string()));
             // The files are said and cleaned all the same.
             assert_eq!(done(&d).as_deref(), Some("cancelled\n"));
             assert!(!d.join("setup.pid").exists());
@@ -297,7 +308,7 @@ mod tests {
     fn the_card_refused_goes_back_to_the_format_stage() {
         let d = dir("card-refused");
         let (parts, seen) = stand_ins(&d, vec![to_the_feed(), back_saying("the card is busy")], Some("the card is busy"));
-        assert_eq!(run(start(&d, false), parts, &Quit::new()), Ok(false));
+        assert_eq!(run(start(&d, false), parts, &Quit::new()).map(|e| e.play), Ok(false));
         assert_eq!(*seen.windows.borrow(), [Phase::Choose, Phase::Choose]);
         assert_eq!(seen.opened.get(), 1);
         // The session it took for the feed is let go.
@@ -320,7 +331,7 @@ mod tests {
                 outcome
             });
             let (parts, seen) = stand_ins(&d, vec![to_the_feed(), feed, back_saying(why)], None);
-            assert_eq!(run(start(&d, false), parts, &Quit::new()), Ok(false));
+            assert_eq!(run(start(&d, false), parts, &Quit::new()).map(|e| e.play), Ok(false));
             assert_eq!(*seen.windows.borrow(), [Phase::Choose, Phase::Feed, Phase::Choose]);
             assert!(!d.join("video.pid").exists(), "the feed's session ends with its window");
             assert_eq!(done(&d).as_deref(), Some("cancelled\n"));
@@ -334,7 +345,7 @@ mod tests {
         let _running = Session::start(&d, Desktop::Generic).unwrap().ok().unwrap();
         std::fs::write(d.join("video.pid"), "4242\n").unwrap();
         let (parts, seen) = stand_ins(&d, vec![to_the_feed(), back_saying("a feed is running (pid 4242). Close it first.")], None);
-        assert_eq!(run(start(&d, false), parts, &Quit::new()), Ok(false));
+        assert_eq!(run(start(&d, false), parts, &Quit::new()).map(|e| e.play), Ok(false));
         assert_eq!(seen.opened.get(), 0);
         assert_eq!(done(&d).as_deref(), Some("cancelled\n"));
         std::fs::remove_dir_all(&d).unwrap();
@@ -350,7 +361,7 @@ mod tests {
         };
         let d = dir("skip");
         let (parts, _) = stand_ins(&d, vec![skip()], None);
-        assert_eq!(run(start(&d, true), parts, &Quit::new()), Ok(true));
+        assert_eq!(run(start(&d, true), parts, &Quit::new()).map(|e| e.play), Ok(true));
         // Skipped is not saved.
         assert_eq!(done(&d).as_deref(), Some("cancelled\n"));
         std::fs::remove_dir_all(&d).unwrap();
@@ -367,7 +378,7 @@ mod tests {
             })],
             None,
         );
-        assert_eq!(run(start(&d, true), parts, &quit), Ok(false));
+        assert_eq!(run(start(&d, true), parts, &quit).map(|e| e.play), Ok(false));
         assert_eq!(done(&d).as_deref(), Some("cancelled\n"));
         std::fs::remove_dir_all(&d).unwrap();
     }
@@ -390,7 +401,7 @@ mod tests {
             Outcome::Closed
         });
         let (parts, seen) = stand_ins(&d, vec![to_the_feed(), feed], None);
-        assert_eq!(run(start(&d, false), parts, &Quit::new()), Ok(true));
+        assert_eq!(run(start(&d, false), parts, &Quit::new()), Ok(Ended { play: true, saved: true }));
         assert_eq!(*seen.windows.borrow(), [Phase::Choose, Phase::Feed]);
         assert_eq!(done(&d).as_deref(), Some("saved\n"));
         assert!(std::fs::read_to_string(d.join("config")).unwrap().contains("CARD_SERIAL=20000130041415\n"));

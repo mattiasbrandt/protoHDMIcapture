@@ -196,6 +196,7 @@ pub fn panel_lines(p: &Panel) -> Vec<String> {
         "r     Reset colour".to_string(),
         format!("t     Setup tips   {}", p.tips_name),
         format!("w     Save         {}", if p.changes.is_empty() { "nothing changed".to_string() } else { p.changes.join(" ") }),
+        "u     Setup wizard (the feed stops)".to_string(),
         String::new(),
         "s screenshot   d dashboard   Tab/Esc close   q quit".to_string(),
     ]);
@@ -278,6 +279,7 @@ mod tests {
                 "r     Reset colour",
                 "t     Setup tips   PlayStation 5",
                 "w     Save         LEVELS=full DELAY=0.060",
+                "u     Setup wizard (the feed stops)",
                 "",
                 "s screenshot   d dashboard   Tab/Esc close   q quit",
             ]

@@ -143,6 +143,7 @@ its current value, and these keys:
 | **r** | reset the colour |
 | **t** | the setup tips for the source; **←** / **→** browse the other source profiles |
 | **w** | save what changed since the feed started |
+| **u** | the setup wizard: the feed stops, and starts again with what the wizard saves. With changes not saved by **w**, a second **u** goes ahead without them |
 | **Esc**, **Tab** | close |
 
 Every change is a live change: it lasts until the viewer closes, unless
@@ -160,8 +161,9 @@ streams black with nothing plugged in.
 
 ## The setup wizard
 
-`protohdmicapture --setup` runs in the viewer's window. Each question starts
-on the current value, and nothing is written before the review.
+The wizard runs in the viewer's window: `protohdmicapture --setup`, or **u**
+in the overlay. Each question starts on the current value, and nothing is
+written before the review.
 
 1. **Capture card:** every video device, the one with a known chip's USB id
    recommended. It is pinned by USB serial (`CARD_SERIAL`), by USB port

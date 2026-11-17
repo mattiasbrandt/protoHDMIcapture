@@ -246,6 +246,9 @@ impl Drop for Gfx {
     }
 }
 
+/// How long a second u has to confirm the setup over unsaved changes.
+const SETUP_CONFIRM: Duration = Duration::from_secs(5);
+
 struct App {
     /// This window's number (`WINDOWS`).
     window_no: u64,
@@ -261,6 +264,8 @@ struct App {
     notify: Notify,
     /// When d last started a dashboard (`DASHBOARD_MAPS`).
     dashboard_opened: Option<Instant>,
+    /// When u last asked to confirm the setup over unsaved changes.
+    setup_armed: Option<Instant>,
     /// LEVELS or a colour value changed: convert the last frame again on a
     /// repaint, so a frozen feed shows it too.
     reconvert: bool,
@@ -489,6 +494,7 @@ impl Host for Winit {
             notices,
             notify,
             dashboard_opened: None,
+            setup_armed: None,
             reconvert: false,
             placer: None,
             modifiers: ModifiersState::empty(),
@@ -941,6 +947,12 @@ impl App {
                 self.picture_changed();
             }
             Action::Save => self.save(),
+            Action::Setup => {
+                if self.setup_asked() {
+                    self.end.set(Outcome::Setup);
+                    return true;
+                }
+            }
             Action::ToggleTips => self.overlay.toggle_tips(),
             Action::CycleDisplay => self.cycle_display(),
             Action::Dashboard => self.open_dashboard(),
@@ -1136,6 +1148,22 @@ impl App {
     /// The loopback's delay while it runs: DELAY's live value.
     fn delay_ms(&self) -> Option<u32> {
         self.loopback()
+    }
+
+    /// u: whether the feed may end for the setup wizard now. Live changes
+    /// not saved with w are lost to it (it starts from the saved settings),
+    /// so with some, the first u says so and a second u within
+    /// `SETUP_CONFIRM` goes ahead.
+    fn setup_asked(&mut self) -> bool {
+        let now = Instant::now();
+        let changes = self.opts.live_changes.changes(self.delay_ms());
+        if changes.is_empty() || self.setup_armed.is_some_and(|at| now.duration_since(at) < SETUP_CONFIRM) {
+            return true;
+        }
+        self.setup_armed = Some(now);
+        let text = format!("Not saved: {}. w saves them; u again opens the setup without them", changes.join(" "));
+        self.overlay.message(text, SETUP_CONFIRM, now);
+        false
     }
 
     /// w: what changed since the start (or the last save), as `view.sh
@@ -1585,6 +1613,7 @@ mod tests {
             notices: Arc::default(),
             notify: Arc::new(|_| {}),
             dashboard_opened: None,
+            setup_armed: None,
             reconvert: false,
             placer: None,
             modifiers: ModifiersState::empty(),
@@ -1654,6 +1683,35 @@ mod tests {
         // --monitor's focus to give back is kept too, until placed.
         let first = Placement { refocus: Some("DP-2".into()), ..job("fullscreen", None) };
         assert_eq!(first.then(job("windowed", None)).refocus.as_deref(), Some("DP-2"));
+    }
+
+    /// u, as the window takes it: an action that ends the window.
+    fn u(app: &mut App) -> bool {
+        let action = keys::action(&Key::Character("u".into()), ModifiersState::empty(), false, app.key_mode()).expect("u in the overlay");
+        app.apply(action)
+    }
+
+    #[test]
+    fn u_ends_the_feed_for_the_setup_and_asks_first_over_unsaved_changes() {
+        let (mut app, _file) = app_with("# setup key\n");
+        assert!(press(&mut app, "Tab"));
+        // Nothing unsaved: u ends the window, for the setup.
+        assert!(u(&mut app));
+        assert!(app.end.is_set());
+
+        let (mut app, _file) = app_with("# setup key, unsaved\n");
+        assert!(press(&mut app, "Tab"));
+        assert!(press(&mut app, "l"));
+        // Unsaved: the first u says so and the feed goes on.
+        assert!(!u(&mut app));
+        assert!(!app.end.is_set());
+        assert_eq!(
+            app.overlay.current_message(Instant::now()),
+            Some("Not saved: LEVELS=limited. w saves them; u again opens the setup without them")
+        );
+        // The second, within SETUP_CONFIRM, goes ahead.
+        assert!(u(&mut app));
+        assert!(app.end.is_set());
     }
 
     #[test]

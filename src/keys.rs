@@ -33,6 +33,8 @@ pub enum Action {
     ResetColour,
     Save,
     ToggleTips,
+    /// u: the feed ends and the setup wizard opens.
+    Setup,
     CycleDisplay,
     Dashboard,
     Screenshot,
@@ -100,6 +102,7 @@ fn overlay(key: &Key, page: Option<Page>) -> Option<Action> {
             "r" => Action::ResetColour,
             "w" => Action::Save,
             "t" => Action::ToggleTips,
+            "u" => Action::Setup,
             _ => return None,
         },
         _ => return None,
@@ -244,6 +247,15 @@ mod tests {
         assert_eq!(press("s", CTRL, VIEWER), None);
         assert_eq!(press("f", NONE, VIEWER), Some(Action::CycleDisplay));
         assert_eq!(press("d", NONE, PANEL), Some(Action::Dashboard));
+    }
+
+    #[test]
+    fn u_opens_the_setup_only_from_the_overlay() {
+        assert_eq!(press("u", NONE, PANEL), Some(Action::Setup));
+        assert_eq!(press("u", NONE, TIPS), Some(Action::Setup));
+        // A stray u while playing does nothing.
+        assert_eq!(press("u", NONE, VIEWER), None);
+        assert_eq!(press("u", CTRL, PANEL), None);
     }
 
     #[test]

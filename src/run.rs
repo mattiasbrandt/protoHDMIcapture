@@ -34,6 +34,9 @@ pub enum Outcome {
     Signal,
     /// `--seconds` ran out.
     TimeUp,
+    /// u in the overlay: the viewer's feed ends and the setup wizard opens
+    /// (main.rs).
+    Setup,
     /// The capture ended on its own (the card gone): its error.
     CaptureEnded(String),
     /// The window could not go on: why.

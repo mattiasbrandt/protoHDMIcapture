@@ -119,7 +119,7 @@ fn card_audio_input(card: Option<&card::Node>) -> Result<String, String> {
 
 /// The setup wizard (#13), in the viewer window: `--setup`, or a first run
 /// (setup.rs). True when the feed should start.
-fn setup(first_run: bool, quit: &run::Quit) -> Result<bool, String> {
+fn setup(first_run: bool, quit: &run::Quit) -> Result<setup::Ended, String> {
     let s = Settings::resolve();
     let desktop = desktop::detect()?;
     // The wizard's feed and loopback start from the saved values; one that
@@ -279,7 +279,7 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
         && !settings::config_file(&|k| env::var(k).ok()).exists()
         && unset("PROTOHDMI_SETUP_CHILD")
         && unset("NO_SETUP")
-        && !setup(true, quit)?
+        && !setup(true, quit)?.play
     {
         return Ok(());
     }
@@ -321,6 +321,14 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     };
     let running = match feed::run(start, parts, quit)? {
         feed::Ran::Ended => return Ok(()),
+        // u in the overlay: the feed has let go of the card, so the
+        // wizard can open it. The feed comes back with what it saved, or,
+        // closed unsaved, with the settings it had; a save then "close",
+        // or a quit, ends the viewer. The viewer's flags do not carry over.
+        feed::Ran::Setup => {
+            let ended = setup(false, quit)?;
+            return if ended.play || (!ended.saved && !quit.requested()) { view(&[], quit, menu) } else { Ok(()) };
+        }
         feed::Ran::AlreadyRunning(running) => running,
     };
     let pid = running.pid.map_or("unknown".to_string(), |p| p.to_string());
@@ -449,7 +457,7 @@ fn hold_console(_offer_setup: bool) -> bool {
 
 /// `--setup`: the wizard, then the feed if it was saved and asked for.
 fn setup_then_view(quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
-    if setup(false, quit)? { view(&[], quit, menu) } else { Ok(()) }
+    if setup(false, quit)?.play { view(&[], quit, menu) } else { Ok(()) }
 }
 
 fn main() -> ExitCode {
