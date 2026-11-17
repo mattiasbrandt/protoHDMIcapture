@@ -30,8 +30,10 @@ protoHDMIcapture need not touch it.
   `.cargo/config.toml` (the static C runtime on Windows) only from the
   working directory up, so a build started outside it with
   `--manifest-path` makes an exe that needs the Visual C++ runtime.
-- **Releasing:** a `v<version>` tag, matching `Cargo.toml`, runs
-  `.github/workflows/release.yml` (packaging: #14).
+- **Releasing:** release-please keeps a release PR open from the
+  Conventional Commits on `main`; merging it tags `v<version>` and runs
+  `.github/workflows/release.yml` (packaging: #14). Commit subjects
+  need a type (`feat:`, `fix:`, …) to reach `CHANGELOG.md`.
 - **Verifying on hardware:** read [`docs/testing.md`](docs/testing.md) before
   a real run; it lists the traps that fake failures.
 - **Session files** (`$XDG_RUNTIME_DIR/protohdmicapture/`): the contract

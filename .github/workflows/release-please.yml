@@ -1,0 +1,54 @@
+# On every push to main, release-please reads the Conventional Commits since
+# the last release and keeps one release PR open: the next version in
+# Cargo.toml and Cargo.lock, and its CHANGELOG.md section. Merging that PR
+# tags v<version> and creates the GitHub release as a draft
+# (release-please-config.json: draft, with force-tag-creation so the tag
+# exists at once); release.yml then builds, tests and uploads both packages
+# and publishes it.
+#
+# release.yml is called from here rather than started by the tag: a tag
+# pushed with GITHUB_TOKEN starts no workflow. A tag pushed by hand still
+# runs release.yml on its own.
+#
+# Needs the repo setting "Allow GitHub Actions to create and approve pull
+# requests" (Settings > Actions > General). check.yml does not run on the
+# release PR on its own (opened with GITHUB_TOKEN); it only changes the
+# version and CHANGELOG.md.
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  release:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}

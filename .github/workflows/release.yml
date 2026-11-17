@@ -1,4 +1,5 @@
-# The release packages (#14). A v* tag:
+# The release packages (#14). A v* tag, or release-please.yml once its
+# release PR is merged:
 #   draft         checks the tag is v<Cargo.toml's version> (the
 #                 assets are named by it), then creates the GitHub release as
 #                 a draft, or finds the draft on a re-run; a published
@@ -30,13 +31,20 @@ name: release
 on:
   push:
     tags: ['v*']
+  # From release-please.yml, with the tag it created (its draft is found
+  # below and published at the end).
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
   workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
-  TAG: ${{ github.ref_name }}
+  TAG: ${{ inputs.tag || github.ref_name }}
   GH_REPO: ${{ github.repository }}
 
 jobs:
