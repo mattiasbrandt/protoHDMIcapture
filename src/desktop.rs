@@ -120,6 +120,7 @@ impl Desktop {
     /// REFRESH=match: the monitor named `on` (--monitor), else the focused
     /// one, to its mode nearest `fps`, the way back recorded in `record`
     /// first. Some(restore command) when a switch was made.
+    #[cfg(target_os = "linux")]
     pub fn refresh_match(&self, fps: f64, on: Option<&str>, record: &Path) -> (Option<String>, Report) {
         match self {
             Self::Hyprland(h) => h.refresh_match(fps, on, record),
@@ -342,6 +343,7 @@ impl Hyprland {
         Ok((address, said))
     }
 
+    #[cfg(target_os = "linux")]
     fn refresh_match(&self, fps: f64, on: Option<&str>, record: &Path) -> (Option<String>, Report) {
         let plan = match self.json("monitors").ok_or("could not read hyprctl monitors".to_string()).and_then(|m| plan(&m, fps, on)) {
             Ok(p) => p,
@@ -476,6 +478,7 @@ impl Notice {
 }
 
 /// pick-refresh-mode.py's answer.
+#[cfg(target_os = "linux")]
 #[derive(Debug, PartialEq)]
 pub struct Plan {
     pub name: String,
@@ -487,6 +490,7 @@ pub struct Plan {
     pub chosen: String,
 }
 
+#[cfg(target_os = "linux")]
 impl Plan {
     /// The script's output line.
     #[cfg(test)]
@@ -499,6 +503,7 @@ impl Plan {
 /// a measurement run's --monitor), among its modes at the same resolution
 /// (never a resolution change: it would rearrange the layout), the rate
 /// nearest `fps`; position, scale and transform kept.
+#[cfg(target_os = "linux")]
 pub fn plan(monitors: &Value, fps: f64, on: Option<&str>) -> Result<Plan, String> {
     let all = monitors.as_array();
     let m = match on {

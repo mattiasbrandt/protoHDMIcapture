@@ -58,5 +58,7 @@ pub enum Outcome {
     Discarded,
     /// The frame callback: the compositor took the frame for a refresh and
     /// is ready for the next one (before that refresh is scanned out).
+    // Never sent by DXGI, but Windows still compiles pacing's arm for it.
+    #[cfg_attr(windows, allow(dead_code))]
     FrameDone,
 }

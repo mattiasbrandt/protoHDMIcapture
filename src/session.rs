@@ -122,6 +122,7 @@ impl Session {
     /// REFRESH=match, just before the window opens: the focused monitor (or
     /// `on`, --monitor's) to its mode nearest `fps`, switched back when the
     /// session ends.
+    #[cfg(target_os = "linux")]
     pub fn match_refresh(&mut self, fps: f64, on: Option<&str>) {
         let record = self.dir.join("refresh.restore");
         if record.exists() {

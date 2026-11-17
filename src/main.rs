@@ -1,8 +1,4 @@
 //! protoHDMIcapture: one program for capture, display and audio.
-// On Windows (#18, #19, #33) the Hyprland adapter, refresh matching and
-// the presentation feedback are not wired up yet: their code is Linux's,
-// compiled but unused there.
-#![cfg_attr(windows, allow(dead_code))]
 
 mod app;
 mod audio;
