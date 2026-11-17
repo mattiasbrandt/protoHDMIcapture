@@ -103,6 +103,7 @@ protohdmicapture --setup      # the setup wizard, then the feed
 protohdmicapture --settings   # each setting, its value and where it came from
 protohdmicapture --debug      # the feed, with the dashboard
 protohdmicapture --help       # every flag
+protohdmicapture --version    # the version
 ```
 
 The menu entry runs `protohdmicapture --menu`: `REFRESH=match` unless the

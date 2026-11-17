@@ -44,7 +44,7 @@ use std::sync::Arc;
 
 use settings::Settings;
 
-const USAGE: &str = "usage: protohdmicapture [--setup | --settings | --dashboard | -h | --help] [--debug] [--menu]
+const USAGE: &str = "usage: protohdmicapture [--setup | --settings | --dashboard | -h | --help | -V | --version] [--debug] [--menu]
        measurements: [--seconds N] [--monitor NAME] [--stats] [--test-pattern]
 
   (none)          the card's feed, with the settings file (--settings shows it)
@@ -52,6 +52,7 @@ const USAGE: &str = "usage: protohdmicapture [--setup | --settings | --dashboard
   --settings      each setting, its value and where it came from
   --dashboard     the running viewer's numbers in this terminal
   -h, --help      this text
+  -V, --version   the version
   --debug         DEBUG=window: the dashboard opens with the feed
   --menu          as started from the desktop entry: REFRESH=match
                   unless the environment or the settings file sets it
@@ -460,6 +461,12 @@ fn setup_then_view(quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     if setup(false, quit)?.play { view(&[], quit, menu) } else { Ok(()) }
 }
 
+/// `--version`: the release's version, which release-please sets in
+/// Cargo.toml.
+fn version() -> String {
+    format!("protohdmicapture {}", env!("CARGO_PKG_VERSION"))
+}
+
 fn main() -> ExitCode {
     environment();
     let mut args: Vec<String> = env::args().skip(1).collect();
@@ -471,6 +478,12 @@ fn main() -> ExitCode {
         && (a == "-h" || a == "--help")
     {
         println!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
+    if let [a] = args.as_slice()
+        && (a == "-V" || a == "--version")
+    {
+        println!("{}", version());
         return ExitCode::SUCCESS;
     }
     if args.first().map(String::as_str) == Some("--settings") {
@@ -537,7 +550,14 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, Fatal, Held, card, hold_prompt, holds_console, on_key, parse_args};
+    use super::{Args, Fatal, Held, card, hold_prompt, holds_console, on_key, parse_args, version};
+
+    #[test]
+    fn the_version_is_the_crates() {
+        let v = version();
+        let number = v.strip_prefix("protohdmicapture ").expect("named");
+        assert!(number.split('.').count() == 3 && number.split('.').all(|n| n.parse::<u32>().is_ok()), "{v}");
+    }
 
     fn parse(args: &[&str]) -> Option<Args> {
         parse_args(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
