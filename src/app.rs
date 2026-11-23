@@ -955,8 +955,6 @@ impl App {
         })
     }
 
-    /// The viewport and the scaler for the surface's size and SCALING; after
-    /// a resize and on c.
     /// GPU use sampled and shown, and GameMode asked for, while a GPU
     /// enhancement is on (frame generation, an enhancement SCALING preset),
     /// not otherwise (#72, #77): called where either can change.
@@ -973,6 +971,8 @@ impl App {
         }
     }
 
+    /// The viewport and the scaler for the surface's size and SCALING; after
+    /// a resize and on c.
     fn relayout(&mut self) {
         let Some(gfx) = self.gfx.as_mut() else { return };
         let frame = (self.format.width, self.format.height);
