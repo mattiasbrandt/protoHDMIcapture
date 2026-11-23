@@ -169,10 +169,10 @@ impl DebugLog {
         self.dbg(&format!("settings:{}", settings_line(s)));
     }
 
-    /// What the card was opened at: the viewer asks for RES, FPS and FMT
-    /// and refuses anything else, so what it asked for is what runs.
-    pub fn format(&self, format: Format, test_pattern: bool) {
-        let what = if test_pattern { "the test pattern" } else { "the card" };
+    /// What the source was opened at: the viewer asks the card for RES, FPS
+    /// and FMT and refuses anything else, so what it asked for is what runs.
+    /// `what`: the card, the test pattern, or a replayed clip (#64).
+    pub fn format(&self, format: Format, what: &str) {
         self.dbg(&format!("negotiated: {}x{} {} @ {} fps ({what})", format.width, format.height, format.pixels.setting(), format.fps));
     }
 
@@ -697,7 +697,7 @@ mod tests {
             let mut log = DebugLog::start_on(&path, &[out]).unwrap();
             log.header(&Desktop::Generic);
             log.settings(&s);
-            log.format(Format { width: 1920, height: 1080, fps: 60.0, pixels: Pixels::Yuyv }, false);
+            log.format(Format { width: 1920, height: 1080, fps: 60.0, pixels: Pixels::Yuyv }, "the card");
             write_to(out, "warning: something the viewer said\n");
             log.perf(live.clone(), Duration::from_millis(20));
             for _ in 0..30 {

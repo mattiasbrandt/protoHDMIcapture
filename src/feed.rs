@@ -207,17 +207,17 @@ impl Feed {
         });
         #[cfg(not(feature = "dev"))]
         let replayed: Option<Box<dyn FrameSource>> = None;
-        let (source, node): (Box<dyn FrameSource>, _) = if let Some(r) = replayed {
-            (r, None)
+        let (source, node, what): (Box<dyn FrameSource>, _, _) = if let Some(r) = replayed {
+            (r, None, "a replayed clip")
         } else if test_pattern {
             eprintln!("video: the test pattern at {}x{} {} fps", format.width, format.height, format.fps);
-            (Box::new(Pattern::new(format)), None)
+            (Box::new(Pattern::new(format)), None, "the test pattern")
         } else {
             let (source, node) = open_card(&s, format)?;
-            (source, Some(node))
+            (source, Some(node), "the card")
         };
         if let Some(log) = log {
-            log.format(format, test_pattern);
+            log.format(format, what);
             match debuglog::perf_every(std::env::var("DEBUG_PERF_INTERVAL").ok().as_deref()) {
                 Ok(every) => log.perf(live.clone(), every),
                 Err(e) => {
