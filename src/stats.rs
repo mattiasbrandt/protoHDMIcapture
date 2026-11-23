@@ -321,6 +321,9 @@ impl Stats {
         if !self.gpu_generate.is_empty() {
             eprintln!("summary: GPU time ({} frames)  frame generation {}", self.gpu_generate.len(), fmt(&mut self.gpu_generate));
         }
+        if let Some(line) = framegen_line(&self.live) {
+            eprintln!("{line}");
+        }
         if let Some(line) = gpu_share(&mut self.gpu_convert, &mut self.gpu_scale, &mut self.gpu_generate, self.refresh) {
             eprintln!("{line}");
         }
@@ -358,6 +361,13 @@ fn gpu_share(convert: &mut [Duration], scale: &mut [Duration], generate: &mut [D
         ms / (r.as_secs_f64() * 1e3) * 100.0,
         r.as_secs_f64() * 1e3
     ))
+}
+
+/// The summary's frame-generation counts (#78): every new frame is
+/// generated, missed or shown real; none while it does not run.
+fn framegen_line(live: &Live) -> Option<String> {
+    let (mode, [generated, missed, real, withheld]) = live.framegen_counts()?;
+    Some(format!("summary: frame generation {mode}: {generated} generated, {missed} missed, {real} shown real, {withheld} withheld"))
 }
 
 #[cfg(test)]
@@ -503,6 +513,20 @@ mod tests {
         assert!(line.contains("4.0 %"), "{line}");
         assert!(gpu_share(&mut [], &mut [], &mut [], Some(REFRESH)).is_none());
         assert!(gpu_share(&mut [ms(1.0)], &mut [ms(1.0)], &mut [], None).is_none());
+    }
+
+    #[test]
+    fn the_summary_counts_frame_generation_only_when_it_runs() {
+        use crate::duplicate::Kind;
+        use crate::framegen::Show;
+        let live = Live::new();
+        assert_eq!(framegen_line(&live), None);
+        live.framegen("ffx");
+        live.framegen_step(Show::Generated, false, Kind::New);
+        live.framegen_step(Show::Held, true, Kind::New);
+        live.framegen_step(Show::Real, false, Kind::New);
+        live.framegen_step(Show::Held, false, Kind::Duplicate);
+        assert_eq!(framegen_line(&live).as_deref(), Some("summary: frame generation ffx: 1 generated, 1 missed, 1 shown real, 0 withheld"));
     }
 
     #[test]

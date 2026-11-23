@@ -116,12 +116,14 @@ pub struct Live {
     signal_hz: AtomicU64,
     source_fps: AtomicU64,
     /// Frame generation (framegen.rs), when the window runs it: its mode,
-    /// the generated frames, the ones missed (shown real because the
-    /// window was a refresh behind), and the duplicates withheld
+    /// the generated frames, the ones missed (not generated because the
+    /// window was a refresh behind), the new frames shown real for any
+    /// other reason (no steady 2:2, a scene cut), and the duplicates withheld
     /// (new-frames-only).
     framegen: Mutex<Option<&'static str>>,
     generated: AtomicU64,
     missed: AtomicU64,
+    shown_real: AtomicU64,
     withheld: AtomicU64,
     /// GPU use (gpustat.rs, #72), while a GPU enhancement is on; None: no
     /// GPU section.
@@ -180,6 +182,7 @@ impl Live {
             framegen: Mutex::new(None),
             generated: AtomicU64::new(0),
             missed: AtomicU64::new(0),
+            shown_real: AtomicU64::new(0),
             withheld: AtomicU64::new(0),
             gpu: Mutex::new(None),
             gamemode: Mutex::new(None),
@@ -222,17 +225,32 @@ impl Live {
         *self.framegen.lock().expect("the frame generation's lock is never poisoned") = Some(mode);
     }
 
-    /// What frame generation did with one card frame.
-    pub fn framegen_step(&self, show: crate::framegen::Show, missed: bool) {
+    /// What frame generation did with one card frame: every new frame is
+    /// generated, missed, or shown real (#78).
+    pub fn framegen_step(&self, show: crate::framegen::Show, missed: bool, kind: Kind) {
         use crate::framegen::Show;
-        match show {
-            Show::Generated => self.generated.fetch_add(1, Ordering::Relaxed),
-            Show::Withheld => self.withheld.fetch_add(1, Ordering::Relaxed),
-            Show::Real | Show::Held => 0,
+        let counter = match (show, missed, kind) {
+            (_, true, _) => &self.missed,
+            (Show::Generated, false, _) => &self.generated,
+            (Show::Withheld, false, _) => &self.withheld,
+            (Show::Real, false, Kind::New) => &self.shown_real,
+            (Show::Real | Show::Held, false, _) => return,
         };
-        if missed {
-            self.missed.fetch_add(1, Ordering::Relaxed);
-        }
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Frame generation's mode and counts (generated, missed, shown real,
+    /// withheld), while the window runs it.
+    pub fn framegen_counts(&self) -> Option<(&'static str, [u64; 4])> {
+        let mode = (*self.framegen.lock().expect("the frame generation's lock is never poisoned"))?;
+        let n = |c: &AtomicU64| c.load(Ordering::Relaxed);
+        Some((mode, [n(&self.generated), n(&self.missed), n(&self.shown_real), n(&self.withheld)]))
+    }
+
+    /// The source's cadence, from the capture thread's tracker, which sees
+    /// every card frame (`source`): frame generation's schedule reads it.
+    pub fn cadence(&self) -> Cadence {
+        cadence_of(self.cadence.load(Ordering::Relaxed))
     }
 
     /// A card frame's kind, and the source's cadence and rates after it.
@@ -485,6 +503,7 @@ impl Rolling {
                     "mode": mode,
                     "generated": live.generated.load(Ordering::Relaxed),
                     "missed": live.missed.load(Ordering::Relaxed),
+                    "shown_real": live.shown_real.load(Ordering::Relaxed),
                     "withheld": live.withheld.load(Ordering::Relaxed),
                 }),
                 None => Value::Null,
@@ -1214,9 +1233,10 @@ fn render(s: &Value, p: &Paint) -> String {
             &mut out,
             "frame generation",
             format!(
-                "{mode} · {} generated · {} missed · {} withheld",
+                "{mode} · {} generated · {} missed · {} shown real · {} withheld",
                 int(&fg["generated"]),
                 p.good_warn(&missed.to_string(), missed == 0),
+                int(&fg["shown_real"]),
                 int(&fg["withheld"])
             ),
         );
@@ -1867,13 +1887,24 @@ mod tests {
         let text = render(&Rolling::new(&live).snapshot(&live), &Paint { on: false });
         assert!(!text.contains("frame generation"), "{text}");
         live.framegen("copy");
-        for (show, missed) in [(Show::Generated, false), (Show::Held, false), (Show::Real, true), (Show::Withheld, false)] {
-            live.framegen_step(show, missed);
+        // Each new frame lands in one count (#78): generated, missed (also
+        // when the late window shows a held frame), or shown real; a
+        // duplicate shown real or held counts nowhere.
+        for (show, missed, kind) in [
+            (Show::Generated, false, Kind::New),
+            (Show::Held, false, Kind::Duplicate),
+            (Show::Real, true, Kind::New),
+            (Show::Held, true, Kind::New),
+            (Show::Real, false, Kind::New),
+            (Show::Real, false, Kind::Duplicate),
+            (Show::Withheld, false, Kind::Duplicate),
+        ] {
+            live.framegen_step(show, missed, kind);
         }
         let s = Rolling::new(&live).snapshot(&live);
-        assert_eq!(s["framegen"], json!({ "mode": "copy", "generated": 1, "missed": 1, "withheld": 1 }));
+        assert_eq!(s["framegen"], json!({ "mode": "copy", "generated": 1, "missed": 2, "shown_real": 1, "withheld": 1 }));
         let text = render(&s, &Paint { on: false });
-        assert!(text.lines().any(|l| l == "  frame generation  copy · 1 generated · 1 missed · 1 withheld"), "{text}");
+        assert!(text.lines().any(|l| l == "  frame generation  copy · 1 generated · 2 missed · 1 shown real · 1 withheld"), "{text}");
     }
 
     #[test]

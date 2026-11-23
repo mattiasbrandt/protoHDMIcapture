@@ -3,16 +3,22 @@
 //! the pictures between new frames.
 //!
 //! - **The schedule** is pure: each card frame's kind (duplicate.rs) and
-//!   the source's cadence in, what to show out. A generated frame only
-//!   ever takes the place of a duplicate frame, and only in a steady 2:2
+//!   the source's cadence in, what to show out. The cadence is the capture
+//!   thread's (run.rs), which sees every card frame, including those the
+//!   window never takes, so a late window does not read as a cadence break
+//!   (#78). A generated frame only ever takes the place of a duplicate
+//!   frame, and only in a steady 2:2
 //!   cadence (a 30 fps source in a 60 Hz signal): when a new frame comes,
 //!   the picture halfway between the last new frame and it is shown, and
 //!   the new frame itself on the duplicate that follows. Anything else (a
 //!   source that matches the signal, a cadence break, the first frames, a
-//!   scene cut the generator reports, the window a refresh behind) shows
-//!   the real frame, as without frame generation. So it never adds more
-//!   than one refresh of delay. The window still presents once per card
-//!   frame (pacing.rs); only what it presents changes.
+//!   scene cut the generator reports) shows the real frame, as without
+//!   frame generation. The window a refresh behind misses one generated
+//!   frame: if a generated frame was holding its new frame, that new frame
+//!   shows now and the late one on the next duplicate, so every new frame
+//!   is shown. So it never adds more than one refresh of delay. The
+//!   window still presents once per card frame (pacing.rs); only what it
+//!   presents changes.
 //! - **New-frames-only mode** shows each new frame once and presents no
 //!   duplicate: an external Vulkan frame-generation layer then sees the
 //!   source's own frame rate (#69).
@@ -27,9 +33,7 @@
 //! seam is compiled and tested there, but nothing reaches it.
 #![cfg_attr(not(feature = "dev"), allow(dead_code))]
 
-use std::time::Duration;
-
-use crate::duplicate::{Cadence, Kind, Tracker};
+use crate::duplicate::{Cadence, Kind};
 use crate::gputime::PassTimes;
 
 /// How the window uses frame generation.
@@ -86,8 +90,9 @@ pub enum Show {
     /// The generated frame between the last new frame and this one; this
     /// one is held for the next card frame.
     Generated,
-    /// The new frame the last `Generated` held, shown on the duplicate
-    /// that followed it.
+    /// The new frame the last `Generated` held, shown on the card frame
+    /// after it: the duplicate that follows, or, the window a refresh
+    /// behind, a new frame, which is then held in its turn.
     Held,
     /// Not presented (new-frames-only: a duplicate frame).
     Withheld,
@@ -97,15 +102,14 @@ pub enum Show {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Step {
     pub show: Show,
-    /// A generated frame was due, but the window was a refresh behind
-    /// (the new frame had been superseded in the slot): shown real.
+    /// A generated frame was due, but the window was a refresh behind (a
+    /// card frame had been superseded in the slot): not generated.
     pub missed: bool,
 }
 
 /// What to show, card frame by card frame.
 pub struct Schedule {
     mode: Mode,
-    tracker: Tracker,
     /// A new frame came before this one: there is a pair to generate from.
     have_new: bool,
     /// The last step showed a generated frame and holds its new frame.
@@ -114,7 +118,7 @@ pub struct Schedule {
 
 impl Schedule {
     pub fn new(mode: Mode) -> Self {
-        Self { mode, tracker: Tracker::new(), have_new: false, holding: false }
+        Self { mode, have_new: false, holding: false }
     }
 
     pub fn mode(&self) -> Mode {
@@ -122,21 +126,27 @@ impl Schedule {
     }
 
     /// A card frame the window took: its kind against the last frame the
-    /// window took (run.rs `Slot::put`), its capture time, and whether it
-    /// replaced a frame the window never took (`late`: the window is a
-    /// refresh behind, and a generated frame now would push the real one
-    /// later still).
-    pub fn next(&mut self, kind: Kind, captured: Duration, late: bool) -> Step {
-        self.tracker.push(kind, captured);
+    /// window took (run.rs `Slot::put`), the source's cadence (the capture
+    /// thread's, which saw every card frame), and whether it replaced a
+    /// frame the window never took (`late`: the window is a refresh
+    /// behind, and a generated frame now would push the real one later
+    /// still).
+    pub fn next(&mut self, kind: Kind, cadence: Cadence, late: bool) -> Step {
         let real = Step { show: Show::Real, missed: false };
         match (self.mode, kind) {
             (Mode::NewOnly, Kind::New) => real,
             (Mode::NewOnly, Kind::Duplicate) => Step { show: Show::Withheld, missed: false },
             (Mode::Copy, Kind::New) => {
                 let pair = std::mem::replace(&mut self.have_new, true);
-                self.holding = false;
-                if !pair || self.tracker.cadence() != Cadence::TwoTwo {
+                let holding = std::mem::take(&mut self.holding);
+                if !pair || cadence != Cadence::TwoTwo {
                     real
+                } else if late && holding {
+                    // The held new frame was never shown (its duplicate was
+                    // superseded): it shows now, this one on the next card
+                    // frame.
+                    self.holding = true;
+                    Step { show: Show::Held, missed: true }
                 } else if late {
                     Step { show: Show::Real, missed: true }
                 } else {
@@ -260,12 +270,29 @@ pub fn generator(mode: Mode, device: &wgpu::Device) -> Option<Box<dyn Generator>
 mod tests {
     use super::*;
 
+    use std::time::Duration;
+
+    use crate::duplicate::Tracker;
     use Kind::{Duplicate as D, New as N};
+
+    /// The capture thread's cadence (run.rs): every card frame, at 60 Hz.
+    struct Capture(Tracker, u64);
+
+    impl Capture {
+        fn new() -> Self {
+            Self(Tracker::new(), 0)
+        }
+        fn push(&mut self, kind: Kind) -> Cadence {
+            self.1 += 16_667;
+            self.0.push(kind, Duration::from_micros(self.1));
+            self.0.cadence()
+        }
+    }
 
     /// Kinds in at 60 Hz, never late: what the schedule shows.
     fn run(mode: Mode, kinds: &[Kind]) -> Vec<Show> {
-        let mut s = Schedule::new(mode);
-        kinds.iter().enumerate().map(|(i, &k)| s.next(k, Duration::from_micros(i as u64 * 16_667), false).show).collect()
+        let (mut s, mut c) = (Schedule::new(mode), Capture::new());
+        kinds.iter().map(|&k| s.next(k, c.push(k), false).show).collect()
     }
 
     /// `n` new frames in 2:2.
@@ -314,11 +341,8 @@ mod tests {
     #[test]
     fn a_cut_shows_the_new_frame_real_and_holds_nothing() {
         let mut s = Schedule::new(Mode::Copy);
-        let mut t = 0u64;
-        let mut next = |s: &mut Schedule, k| {
-            t += 16_667;
-            s.next(k, Duration::from_micros(t), false).show
-        };
+        let mut c = Capture::new();
+        let mut next = |s: &mut Schedule, k| s.next(k, c.push(k), false).show;
         for _ in 0..8 {
             next(&mut s, N);
             next(&mut s, D);
@@ -331,13 +355,65 @@ mod tests {
 
     #[test]
     fn a_late_window_misses_the_generated_frame_and_shows_real() {
-        let mut s = Schedule::new(Mode::Copy);
-        for i in 0..16u64 {
-            s.next(if i % 2 == 0 { N } else { D }, Duration::from_micros(i * 16_667), false);
+        let (mut s, mut c) = (Schedule::new(Mode::Copy), Capture::new());
+        for k in two_two(8) {
+            s.next(k, c.push(k), false);
         }
-        let step = s.next(N, Duration::from_micros(16 * 16_667), true);
+        let step = s.next(N, c.push(N), true);
         assert_eq!(step, Step { show: Show::Real, missed: true });
-        assert_eq!(s.next(D, Duration::from_micros(17 * 16_667), false).show, Show::Real, "nothing held");
+        assert_eq!(s.next(D, c.push(D), false).show, Show::Real, "nothing held");
+    }
+
+    /// Card frames in, the capture thread seeing every one, the window
+    /// taking all but the one at `skip` (the slot superseded it: run.rs
+    /// `Slot::put`, which keeps a superseded new frame's kind on the frame
+    /// that replaced it): what the window shows for each frame it took.
+    fn window(kinds: &[Kind], skip: Option<usize>) -> Vec<Step> {
+        let (mut s, mut c) = (Schedule::new(Mode::Copy), Capture::new());
+        let mut waiting: Option<Kind> = None;
+        let mut steps = Vec::new();
+        for (i, &k) in kinds.iter().enumerate() {
+            let cadence = c.push(k);
+            if Some(i) == skip {
+                waiting = Some(k);
+                continue;
+            }
+            let taken = if waiting == Some(N) { N } else { k };
+            let late = waiting.take().is_some();
+            steps.push(s.next(taken, cadence, late));
+        }
+        steps
+    }
+
+    fn generated_and_missed(steps: &[Step]) -> usize {
+        steps.iter().filter(|s| s.show == Show::Generated || s.missed).count()
+    }
+
+    #[test]
+    fn a_superseded_duplicate_costs_one_generated_frame_and_is_counted() {
+        let kinds = two_two(60);
+        let all = generated_and_missed(&window(&kinds, None));
+        // A duplicate superseded mid-run (#78): the window takes the next
+        // new frame a refresh late.
+        let steps = window(&kinds, Some(61));
+        assert_eq!(generated_and_missed(&steps), all, "{steps:?}");
+        assert_eq!(steps.iter().filter(|s| s.missed).count(), 1, "{steps:?}");
+        // The new frame its generated frame held still shows, on the late
+        // new frame's refresh, which is held in its turn. Card frames 58 to
+        // 64, 61 superseded: Generated, Held, Generated, (61), Held (60's
+        // new frame), Held (62's), Generated: 2:2 as before.
+        let shows: Vec<Show> = steps[58..64].iter().map(|s| s.show).collect();
+        assert_eq!(shows, [Show::Generated, Show::Held, Show::Generated, Show::Held, Show::Held, Show::Generated], "{steps:?}");
+        assert!(steps[61].missed, "the late new frame's generated frame is the one missed");
+    }
+
+    #[test]
+    fn a_superseded_new_frame_costs_one_generated_frame_and_is_counted() {
+        let kinds = two_two(60);
+        let all = generated_and_missed(&window(&kinds, None));
+        let steps = window(&kinds, Some(60));
+        assert_eq!(generated_and_missed(&steps), all, "{steps:?}");
+        assert_eq!(steps.iter().filter(|s| s.missed).count(), 1, "{steps:?}");
     }
 
     #[test]

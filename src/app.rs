@@ -1437,19 +1437,21 @@ impl App {
         // Frame generation (framegen.rs): what this card frame shows. A
         // duplicate withheld in new-frames-only mode is not presented,
         // unless the overlay wants drawing anyway.
-        let show = match self.framegen.as_mut() {
+        // The cadence is the capture thread's: it saw the card frames this
+        // window never took (#78).
+        let (show, missed) = match self.framegen.as_mut() {
             Some(fg) if new_frame => {
                 let late = fg.took(superseded, superseded_duplicates);
-                let step = fg.schedule.next(tag.kind, tag.captured, late);
+                let step = fg.schedule.next(tag.kind, self.opts.live.cadence(), late);
                 let show = if step.show == Show::Withheld && self.pacing.repaint_wanted() { Show::Real } else { step.show };
-                self.opts.live.framegen_step(show, step.missed);
                 if show == Show::Withheld {
+                    self.opts.live.framegen_step(show, step.missed, tag.kind);
                     fg.withheld += 1;
                     return Ok(());
                 }
-                Some(show)
+                (Some(show), step.missed)
             }
-            _ => None,
+            _ => (None, false),
         };
 
         let acquire_start = now_monotonic();
@@ -1550,22 +1552,35 @@ impl App {
                 let times = gfx.timer.as_mut().and_then(|t| t.generate());
                 generated = generator.generate(&gfx.device, &gfx.queue, &mut encoder, frames, times);
             }
-            match show {
+            // What this card frame showed, counted once the generator has
+            // said whether it cut (#78).
+            let kind = tag.kind;
+            let shown = match show {
                 Some(Show::Generated) if generated => {
                     *held = Some(tag);
                     tag.generated = true;
+                    show
                 }
                 // A scene cut: the new frame now, nothing held.
-                Some(Show::Generated) => {
-                    schedule.cut();
-                }
+                Some(Show::Generated) => Some(schedule.cut()),
+                // The held new frame; on a new frame (the window a refresh
+                // behind), that new frame is held in its turn.
                 Some(Show::Held) => {
                     if let Some(h) = held.take() {
-                        tag = h;
+                        let this = std::mem::replace(&mut tag, h);
+                        if upload {
+                            *held = Some(this);
+                        }
                     }
+                    show
                 }
-                _ => {}
+                _ => show,
+            };
+            if let Some(shown) = shown {
+                self.opts.live.framegen_step(shown, missed, kind);
             }
+            // A held frame shown on a new frame is the previous new frame.
+            let from = if show == Some(Show::Held) && upload { 1 - newest } else { newest };
             if !generated {
                 let copy = |texture| wgpu::TexelCopyTextureInfo {
                     texture,
@@ -1574,7 +1589,7 @@ impl App {
                     aspect: wgpu::TextureAspect::All,
                 };
                 encoder.copy_texture_to_texture(
-                    copy(&gpu.frames[newest]),
+                    copy(&gpu.frames[from]),
                     copy(&gfx.rgb),
                     wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
                 );
