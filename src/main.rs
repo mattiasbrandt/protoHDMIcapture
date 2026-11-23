@@ -92,7 +92,8 @@ const USAGE: &str = concat!(
   --note TEXT     a note for NAME.json (\"GTA 6, standing still\")
   --replay FILE   a recorded clip instead of the card, looping
   --framegen MODE frame generation (#66): copy (the last new frame, a
-                  refresh late) or new-only (duplicates not presented)"
+                  refresh late), blend (the two new frames half and half,
+                  #67) or new-only (duplicates not presented)"
 );
 
 /// Called first thing in main, before any thread exists.

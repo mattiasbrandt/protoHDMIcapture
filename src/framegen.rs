@@ -24,8 +24,9 @@
 //!   source's own frame rate (#69).
 //! - **A generator** writes the picture halfway between two new frames,
 //!   the convert pass's RGB frames at the capture's size, before scaling.
-//!   `Copy` is the one on `main`, for the wiring and its tests; the real
-//!   ones come on their own branches (#67, #68).
+//!   Copy (the last new frame again) is for the wiring and its tests;
+//!   blend (#67, half and half) is round one's baseline; the others come
+//!   on their own branches (#68).
 //!
 //! The user-facing setting (FRAMEGEN), its key and its overlay row come
 //! with the generator that wins round one; until then the mode is a dev
@@ -39,20 +40,24 @@ use crate::gputime::PassTimes;
 /// How the window uses frame generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// Generated frames from the `Copy` generator: the last new frame
+    /// Generated frames from the copy generator: the last new frame
     /// again, so the picture is today's, a refresh late.
     Copy,
+    /// Generated frames from the `Blend` generator: the two new frames
+    /// mixed half and half (#67, round one's baseline: ghosts on motion).
+    Blend,
     /// No generator: each new frame once, duplicates not presented.
     NewOnly,
 }
 
 impl Mode {
     /// Every mode, as `--framegen` names them.
-    pub const ALL: [Mode; 2] = [Mode::Copy, Mode::NewOnly];
+    pub const ALL: [Mode; 3] = [Mode::Copy, Mode::Blend, Mode::NewOnly];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Mode::Copy => "copy",
+            Mode::Blend => "blend",
             Mode::NewOnly => "new-only",
         }
     }
@@ -67,7 +72,7 @@ impl Mode {
     /// The mode runs a generator on the GPU.
     pub fn generates(self) -> bool {
         match self {
-            Mode::Copy => true,
+            Mode::Copy | Mode::Blend => true,
             Mode::NewOnly => false,
         }
     }
@@ -79,6 +84,7 @@ impl Mode {
     pub fn judged(self) -> bool {
         match self {
             Mode::Copy | Mode::NewOnly => false,
+            Mode::Blend => true,
         }
     }
 }
@@ -158,10 +164,12 @@ impl Schedule {
     /// still).
     pub fn next(&mut self, kind: Kind, cadence: Cadence, late: bool) -> Step {
         let real = Step { show: Show::Real, missed: false };
-        match (self.mode, kind) {
-            (Mode::NewOnly, Kind::New) => real,
-            (Mode::NewOnly, Kind::Duplicate) => Step { show: Show::Withheld, missed: false },
-            (Mode::Copy, Kind::New) => {
+        // Every generating mode follows the same rules; only its picture
+        // differs (the generator).
+        match (self.mode.generates(), kind) {
+            (false, Kind::New) => real,
+            (false, Kind::Duplicate) => Step { show: Show::Withheld, missed: false },
+            (true, Kind::New) => {
                 let pair = std::mem::replace(&mut self.have_new, true);
                 let holding = std::mem::take(&mut self.holding);
                 if !pair || cadence != Cadence::TwoTwo {
@@ -179,8 +187,8 @@ impl Schedule {
                     Step { show: Show::Generated, missed: false }
                 }
             }
-            (Mode::Copy, Kind::Duplicate) if std::mem::take(&mut self.holding) => Step { show: Show::Held, missed: false },
-            (Mode::Copy, Kind::Duplicate) => real,
+            (true, Kind::Duplicate) if std::mem::take(&mut self.holding) => Step { show: Show::Held, missed: false },
+            (true, Kind::Duplicate) => real,
         }
     }
 
@@ -197,8 +205,7 @@ impl Schedule {
 pub struct Pair<'a> {
     /// The new frame before `next`.
     pub prev: &'a wgpu::TextureView,
-    /// Read by the real generators (#67, #68); `Copy` shows `prev`.
-    #[allow(dead_code)]
+    /// The new frame just taken.
     pub next: &'a wgpu::TextureView,
     /// Where the generated frame goes: what the window scales and shows.
     pub out: &'a wgpu::TextureView,
@@ -221,14 +228,21 @@ pub trait Generator {
     ) -> bool;
 }
 
-/// The trivial generator: the previous new frame, unchanged. Shown in
-/// place of the generated frame it makes the picture today's, one refresh
-/// late, which proves the wiring and the pacing without judging a picture.
-pub struct Copy {
+/// A generator that is one fragment pass over the frames: copy and
+/// blend. Its shader reads `prev` at binding 0 and, when it uses it,
+/// `next` at binding 1, texel for texel (the frames and `out` share a
+/// size).
+pub struct OnePass {
+    label: &'static str,
+    /// The shader reads `next` too.
+    reads_next: bool,
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
 }
 
+/// The trivial generator: the previous new frame, unchanged. Shown in
+/// place of the generated frame it makes the picture today's, one refresh
+/// late, which proves the wiring and the pacing without judging a picture.
 const COPY: &str = r#"
 @group(0) @binding(0) var prev: texture_2d<f32>;
 
@@ -237,18 +251,40 @@ const COPY: &str = r#"
 }
 "#;
 
-impl Copy {
-    pub fn new(device: &wgpu::Device) -> Self {
+/// Round one's baseline (#67): the two new frames mixed half and half.
+/// What moves between them shows twice, faintly (ghosting); what stands
+/// still is unchanged.
+const BLEND: &str = r#"
+@group(0) @binding(0) var prev: texture_2d<f32>;
+@group(0) @binding(1) var next: texture_2d<f32>;
+
+@fragment fn fs(in: VOut) -> @location(0) vec4f {
+    let at = vec2u(in.pos.xy);
+    return mix(textureLoad(prev, at, 0), textureLoad(next, at, 0), 0.5);
+}
+"#;
+
+impl OnePass {
+    fn new(device: &wgpu::Device, label: &'static str, shader: &str, reads_next: bool) -> Self {
+        let entries = [crate::app::texture_entry(0, false), crate::app::texture_entry(1, false)];
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("framegen copy"),
-            entries: &[crate::app::texture_entry(0, false)],
+            label: Some(label),
+            entries: &entries[..if reads_next { 2 } else { 1 }],
         });
-        let pipeline = crate::app::pipeline(device, "framegen copy", COPY, &layout, wgpu::TextureFormat::Rgba8Unorm);
-        Self { pipeline, layout }
+        let pipeline = crate::app::pipeline(device, label, shader, &layout, wgpu::TextureFormat::Rgba8Unorm);
+        Self { label, reads_next, pipeline, layout }
+    }
+
+    pub fn copy(device: &wgpu::Device) -> Self {
+        Self::new(device, "framegen copy", COPY, false)
+    }
+
+    pub fn blend(device: &wgpu::Device) -> Self {
+        Self::new(device, "framegen blend", BLEND, true)
     }
 }
 
-impl Generator for Copy {
+impl Generator for OnePass {
     fn generate(
         &mut self,
         device: &wgpu::Device,
@@ -257,10 +293,14 @@ impl Generator for Copy {
         frames: Pair<'_>,
         times: Option<PassTimes<'_>>,
     ) -> bool {
+        let entries = [
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(frames.prev) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(frames.next) },
+        ];
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("framegen copy"),
+            label: Some(self.label),
             layout: &self.layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(frames.prev) }],
+            entries: &entries[..if self.reads_next { 2 } else { 1 }],
         });
         let attachments = [Some(wgpu::RenderPassColorAttachment {
             view: frames.out,
@@ -269,7 +309,7 @@ impl Generator for Copy {
             ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
         })];
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("framegen copy"),
+            label: Some(self.label),
             color_attachments: &attachments,
             depth_stencil_attachment: None,
             timestamp_writes: times.as_ref().and_then(|t| t.render(true, true)),
@@ -286,7 +326,8 @@ impl Generator for Copy {
 /// The generator a mode runs, if any.
 pub fn generator(mode: Mode, device: &wgpu::Device) -> Option<Box<dyn Generator>> {
     match mode {
-        Mode::Copy => Some(Box::new(Copy::new(device))),
+        Mode::Copy => Some(Box::new(OnePass::copy(device))),
+        Mode::Blend => Some(Box::new(OnePass::blend(device))),
         Mode::NewOnly => None,
     }
 }
@@ -493,12 +534,17 @@ mod tests {
         assert_eq!(refusal(Mode::NewOnly, IntegratedGpu, "x"), None, "no generator, nothing refused");
     }
 
-    /// The `Copy` generator on the GPU: its output is the previous new
-    /// frame, texel for texel, through the window's frame format:
-    /// `cargo test -- --ignored gpu_copy`.
-    #[test]
-    #[ignore = "needs a GPU"]
-    fn gpu_copy_outputs_the_previous_frame() {
+    /// Two pictures with something different in every texel.
+    fn pictures(w: u32, h: u32) -> (Vec<u8>, Vec<u8>) {
+        let picture = |seed: u32| -> Vec<u8> {
+            (0..w * h).flat_map(|i| [(i.wrapping_mul(seed) >> 3) as u8, (i % w) as u8 * 4, (i / w) as u8 * 7, 255]).collect()
+        };
+        (picture(2_654_435_761), picture(40_503))
+    }
+
+    /// `mode`'s generator on the GPU over `prev` and `next` (`w`×`h`,
+    /// `Rgba8Unorm`, the window's frame format): its output.
+    fn generate_on_gpu(mode: Mode, (w, h): (u32, u32), prev_px: &[u8], next_px: &[u8]) -> Vec<u8> {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = crate::app::BACKENDS;
         let instance = wgpu::Instance::new(desc);
@@ -510,7 +556,6 @@ mod tests {
         }))
         .expect("a GPU");
         let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
-        let (w, h) = (64u32, 36u32);
         let texture = |usage| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: None,
@@ -523,10 +568,6 @@ mod tests {
                 view_formats: &[],
             })
         };
-        let picture = |seed: u32| -> Vec<u8> {
-            (0..w * h).flat_map(|i| [(i.wrapping_mul(seed) >> 3) as u8, (i % w) as u8 * 4, (i / w) as u8 * 7, 255]).collect()
-        };
-        let (prev_px, next_px) = (picture(2_654_435_761), picture(40_503));
         let source = |px: &[u8]| {
             let t = texture(wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
             queue.write_texture(
@@ -537,7 +578,7 @@ mod tests {
             );
             t
         };
-        let (prev, next) = (source(&prev_px), source(&next_px));
+        let (prev, next) = (source(prev_px), source(next_px));
         let out = texture(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
         let views = [&prev, &next, &out].map(|t| t.create_view(&Default::default()));
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -546,7 +587,7 @@ mod tests {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let mut generator = generator(Mode::Copy, &device).expect("copy generates");
+        let mut generator = generator(mode, &device).expect("the mode generates");
         let mut encoder = device.create_command_encoder(&Default::default());
         let frames = Pair { prev: &views[0], next: &views[1], out: &views[2] };
         assert!(generator.generate(&device, &queue, &mut encoder, frames, None));
@@ -561,9 +602,48 @@ mod tests {
         queue.submit([encoder.finish()]);
         readback.map_async(wgpu::MapMode::Read, .., |r| r.unwrap());
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-        let got = readback.get_mapped_range(..).unwrap().to_vec();
-        assert!(got == prev_px, "the previous frame, texel for texel");
-        assert!(got != next_px);
+        readback.get_mapped_range(..).unwrap().to_vec()
+    }
+
+    /// The copy generator on the GPU: its output is the previous new
+    /// frame, texel for texel: `cargo test -- --ignored gpu_`.
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn gpu_copy_outputs_the_previous_frame() {
+        let (prev, next) = pictures(64, 36);
+        let got = generate_on_gpu(Mode::Copy, (64, 36), &prev, &next);
+        assert!(got == prev, "the previous frame, texel for texel");
+        assert!(got != next);
+    }
+
+    /// The blend generator on the GPU (#67): every texel the mean of the
+    /// two frames', within one step of 1/255 (the rounding of a unorm
+    /// write); a texel the same in both stays as it was.
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn gpu_blend_outputs_the_mean_of_the_two_frames() {
+        let (w, h) = (64, 36);
+        let (prev, mut next) = pictures(w, h);
+        // A still corner: the same in both frames.
+        next[..16].copy_from_slice(&prev[..16]);
+        let got = generate_on_gpu(Mode::Blend, (w, h), &prev, &next);
+        assert_eq!(got.len(), prev.len());
+        let mut moved = 0;
+        for (i, ((&g, &a), &b)) in got.iter().zip(&prev).zip(&next).enumerate() {
+            let mean = (f64::from(a) + f64::from(b)) / 2.0;
+            assert!((f64::from(g) - mean).abs() <= 1.0, "texel byte {i}: {g}, the mean of {a} and {b} is {mean}");
+            moved += usize::from(a != b);
+        }
+        // The pictures differ in their red byte, a quarter of all bytes.
+        assert!(moved > prev.len() / 8, "the pictures differ, so the test can see a blend: {moved}");
+        assert_eq!(got[..16], prev[..16], "what stands still is unchanged");
+    }
+
+    #[test]
+    fn every_generating_mode_follows_the_same_schedule() {
+        let kinds = two_two(10);
+        assert_eq!(run(Mode::Blend, &kinds), run(Mode::Copy, &kinds));
+        assert!(run(Mode::Blend, &kinds).contains(&Show::Generated));
     }
 
     #[test]
@@ -571,6 +651,6 @@ mod tests {
         for m in Mode::ALL {
             assert_eq!(Mode::from_flag(m.as_str()), Ok(m));
         }
-        assert!(Mode::from_flag("blend").unwrap_err().contains("copy or new-only"));
+        assert!(Mode::from_flag("warp").unwrap_err().contains("copy or blend or new-only"));
     }
 }
