@@ -26,8 +26,12 @@ repo file, cloned source, PDF text); **[snippet]** = search-result text only;
   callback can add it [fetched source, not built]. The NvOFFRUC library is
   a true 2x frame-rate up-converter, but it is CUDA or DX11 only [fetched],
   so it would mean CUDA interop from wgpu.
-- **DLSS Frame Generation, DLSS and Smooth Motion are out for us.** DLSS-G
-  needs the game's depth, motion vectors and HUD-less colour [snippet].
+- **DLSS Frame Generation, DLSS and Smooth Motion are not usable as
+  shipped.** DLSS-G needs the game's depth, motion vectors and HUD-less
+  colour [snippet]. **Corrected 2026-11-24:** "needs motion vectors" does
+  not mean "out": community tools run DLSS 5 without game integration by
+  feeding *estimated* motion vectors, one of them from NVIDIA Optical Flow
+  on the picture alone (lower quality by its own account); see 2c.
   Smooth Motion is a driver-level Vulkan present layer for games, with no
   app-side API [fetched, NVIDIA's Linux README]; it could interfere with our
   presentation if a user has it on, so it is a test item, not a feature.
@@ -182,8 +186,30 @@ card provides none of them [derived from [frame-generation.md](frame-generation.
 
 ### 2c. DLSS upscaling
 
-Needs motion vectors and depth [snippet]. Out of scope, as in
-[`upscaling-modern-monitors.md`](upscaling-modern-monitors.md).
+Needs motion vectors (and colour; depth for some features) from the engine
+[snippet]. NVIDIA's developer material for DLSS 5 says it takes each frame's
+colour and motion vectors, and NVIDIA has said there will be no driver-level
+DLSS 5 override, because a driver cannot supply that data [snippet].
+
+**Corrected 2026-11-24 (the user's challenge):** the requirement is motion
+vectors, not the game itself. Community projects run DLSS 5 in games that
+never shipped it by substituting estimated inputs [snippet, READMEs]:
+
+- NIGos/dlss5-bridge (a ReShade add-on): DLSS 5 in D3D11 and Vulkan games,
+  and "optionally in games with no DLSS via NVIDIA Optical Flow (lower
+  quality)": motion estimated from the picture alone.
+- jlrouzies-fr/DLSS5-Feeder: a synthetic input set from ReShade's depth
+  buffer and estimated motion vectors; notes temporal artefacts in fast
+  motion.
+
+Both run inside the game's process. For a capture viewer the relevant one is
+the optical-flow path: it needs no game. **We already estimate motion**
+(ffx-quality's per-pixel flow), so a temporal upscaler can in principle be
+fed our motion field: DLSS super resolution on NVIDIA (#88), and, vendor
+neutral and testable here, AMD FSR 2/3 upscaling (MIT). Open: faking depth
+(flat), disocclusion without depth, and whether our flow's known failures
+(building windows, signs) make the temporal result worse than a spatial
+upscaler. Unverified; a spike, not a plan.
 
 ## 3. Our code on NVIDIA
 
