@@ -103,10 +103,10 @@ const USAGE: &str = concat!(
 ///   libpipewire adds PIPEWIRE_PROPS to each new stream; WirePlumber
 ///   honours the key. An existing PIPEWIRE_PROPS is kept, with a warning.
 /// - DISABLE_RTKIT=1 for libpipewire's client module-rt (#76): with RTKit
-///   it clamps this process's RLIMIT_RTTIME to 0 (PipeWire 1.6.9 reads
-///   RTKit's RTTimeUSecMax as 0: "clamping rt.time.soft from … to 0
-///   because of RTKit"), and an unprivileged process cannot raise a hard
-///   limit again. cpal then promotes its audio threads through RTKit
+///   it clamps this process's RLIMIT_RTTIME to the portal's (or RTKit's)
+///   RTTimeUSecMax, which has been 0 ("clamping rt.time.soft from … to 0
+///   because of RTKit"; 200000 after the portal restarted, #90), and an
+///   unprivileged process cannot raise a hard limit again. cpal then promotes its audio threads through RTKit
 ///   itself (audio_thread_priority), which first sets RLIMIT_RTTIME to
 ///   (one buffer, RTKit's maximum): from 0/0 that is a raise, refused
 ///   (EPERM), and the sound ran without real-time priority. Without
@@ -128,6 +128,9 @@ fn environment() {
     unsafe {
         env::set_var("DISABLE_RTKIT", "1")
     };
+    // What the refusal note compares with, before any library runs (#90).
+    #[cfg(target_os = "linux")]
+    audio::note_rttime_at_start();
 }
 
 /// The audio loopback the settings ask for, not started yet: None for

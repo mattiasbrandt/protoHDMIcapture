@@ -266,11 +266,23 @@ a run:
   priority for a real-time thread, `TS` for an ordinary one; RTKit's
   journal (`journalctl -u rtkit-daemon`) logs each grant.
 - protoHDMIcapture sets `DISABLE_RTKIT=1` for its own libpipewire: with
-  RTKit, PipeWire 1.6.9's client module clamps the process's
-  `RLIMIT_RTTIME` to 0 (`PIPEWIRE_DEBUG=mod.rt:5 pw-mon` shows "clamping
-  rt.time.soft … to 0 because of RTKit"), and cpal's own RTKit promotion
-  then cannot set the limit it needs (`setrlimit` EPERM). The `--ignored`
-  test `pipewire_clients_rttime_limit_with_and_without_rtkit` shows both.
+  RTKit, PipeWire's client module clamps the process's `RLIMIT_RTTIME` to
+  what the desktop portal (or RTKit) says `RTTimeUSecMax` is, and the
+  portal has said 0 (`PIPEWIRE_DEBUG=mod.rt:5 pw-mon` showed "clamping
+  rt.time.soft … to 0 because of RTKit"; after the portal restarted it said
+  200000, #90). From 0/0 cpal's own RTKit promotion cannot set the limit it
+  needs (`setrlimit` EPERM). The portal's answer:
+  `busctl --user get-property org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop org.freedesktop.portal.Realtime RTTimeUSecMax`.
+- **A refusal names the limit** (#90): the note says `RLIMIT_RTTIME at
+  start …, now …` and, when it went to 0 inside the process, says so. A
+  running viewer's limit: `grep realtime /proc/<pid>/limits`.
+- **The ignored tests:** `the_viewers_audio_threads_run_real_time` opens the
+  viewer's audio path on a source that is not the card and checks the
+  threads run FIFO/RR (`PHC_AUDIO_TEST_SOURCE=<node>`, `--test-threads=1`;
+  `PHC_LIMIT_FIRST=1` puts #90's 0/0 back and fails it);
+  `pipewire_clients_rttime_limit_with_and_without_rtkit` checks
+  `DISABLE_RTKIT` leaves the limit alone and prints what PipeWire does
+  without it.
 - PipeWire's own server needs RTKit at its start: one started before RTKit
   was reachable logs `mod.rt: RTKit error: …ServiceUnknown` and runs its
   data loop as `TS` until restarted.

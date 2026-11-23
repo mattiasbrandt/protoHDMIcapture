@@ -149,6 +149,58 @@ fn seen(min: &AtomicU32, max: &AtomicU32, n: u32) {
     max.fetch_max(n, Ordering::Relaxed);
 }
 
+/// This process's RLIMIT_RTTIME (soft, hard) in microseconds, None for
+/// unlimited (#90). cpal's real-time promotion first sets it to (one
+/// buffer, RTKit's maximum), which an unprivileged process cannot do once
+/// something has lowered the hard limit below RTKit's maximum.
+#[cfg(target_os = "linux")]
+pub fn rttime() -> Option<(Option<u64>, Option<u64>)> {
+    let mut r = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // Safety: a valid out-pointer for getrlimit.
+    if unsafe { libc::getrlimit(libc::RLIMIT_RTTIME, &mut r) } < 0 {
+        return None;
+    }
+    let us = |v: libc::rlim_t| (v != libc::RLIM_INFINITY).then_some(v);
+    Some((us(r.rlim_cur), us(r.rlim_max)))
+}
+
+/// RLIMIT_RTTIME as main's `environment` found it, before any library ran
+/// (#90): what the refusal note compares with.
+#[cfg(target_os = "linux")]
+// process-global: the limit at the process's start, read once
+static RTTIME_AT_START: std::sync::OnceLock<Option<(Option<u64>, Option<u64>)>> = std::sync::OnceLock::new();
+
+/// Keeps the limit as it is at the start (main's `environment`).
+#[cfg(target_os = "linux")]
+pub fn note_rttime_at_start() {
+    let _ = RTTIME_AT_START.set(rttime());
+}
+
+/// A limit for the note: "unlimited", "200000 us", or "unknown".
+#[cfg(target_os = "linux")]
+fn limit_text(l: Option<(Option<u64>, Option<u64>)>) -> String {
+    let one = |v: Option<u64>| v.map_or("unlimited".to_string(), |v| format!("{v} us"));
+    match l {
+        Some((soft, hard)) => format!("soft {} / hard {}", one(soft), one(hard)),
+        None => "unknown".into(),
+    }
+}
+
+/// What the refusal note adds (#90): RLIMIT_RTTIME at the start and now,
+/// so a limit lowered inside the process shows where it went.
+#[cfg(target_os = "linux")]
+fn rttime_note(at_start: Option<(Option<u64>, Option<u64>)>, now: Option<(Option<u64>, Option<u64>)>) -> String {
+    // A cpal promotion that worked leaves the hard limit at RTKit's
+    // maximum, which is not the fault; a hard limit of 0 is (#90).
+    let lowered = matches!((at_start, now), (Some((_, start)), Some((_, Some(0)))) if start != Some(0));
+    format!(
+        "RLIMIT_RTTIME at start {}, now {}{}",
+        limit_text(at_start),
+        limit_text(now),
+        if lowered { ": lowered inside this process, so the promotion cannot raise it back" } else { "" }
+    )
+}
+
 fn on_error(counters: &Arc<Counters>, notify: &NotifySlot, side: &'static str) -> impl FnMut(cpal::Error) + Send + 'static {
     let (counters, notify) = (counters.clone(), notify.clone());
     move |e| {
@@ -165,7 +217,11 @@ fn on_error(counters: &Arc<Counters>, notify: &NotifySlot, side: &'static str) -
             // error (host/wasapi/stream.rs `boost_current_thread_priority`).
             ErrorKind::RealtimeDenied => {
                 if !counters.realtime_refused.swap(true, Ordering::Relaxed) {
-                    eprintln!("note: real-time priority refused; sound may crackle under load ({side}: {e})");
+                    #[cfg(target_os = "linux")]
+                    let limit = format!("; {}", rttime_note(RTTIME_AT_START.get().copied().flatten(), rttime()));
+                    #[cfg(not(target_os = "linux"))]
+                    let limit = String::new();
+                    eprintln!("note: real-time priority refused; sound may crackle under load ({side}: {e}{limit})");
                 }
             }
             // The stream is gone: cpal reports PipeWire's stream state
@@ -1325,9 +1381,80 @@ mod tests {
                 .to_string()
         };
         assert_eq!(limit(true), "unlimited", "DISABLE_RTKIT leaves RLIMIT_RTTIME alone");
-        // What main's DISABLE_RTKIT works around; if this starts failing,
-        // PipeWire reads RTKit's limit right and the workaround can go.
-        assert_eq!(limit(false), "0", "PipeWire with RTKit clamps the soft limit to 0");
+        // Without DISABLE_RTKIT, module-rt clamps the limit to what the
+        // portal (or RTKit) says RTTimeUSecMax is: 0 while #76 was measured,
+        // 200000 after the portal restarted (#90). That depends on the
+        // desktop's state, so it is printed, not asserted;
+        // `the_viewers_audio_threads_run_real_time` guards the rule that
+        // matters.
+        eprintln!("without DISABLE_RTKIT, PipeWire's client RLIMIT_RTTIME: {}", limit(false));
+    }
+
+    /// The viewer's audio threads run real-time (#90, #76): with main's
+    /// DISABLE_RTKIT, a loopback's `pw_in` and `pw_out` end up SCHED_FIFO
+    /// or SCHED_RR, nothing is refused, and RLIMIT_RTTIME is not left at
+    /// 0. `PHC_LIMIT_FIRST=1` puts the bug back: the limit lowered to 0/0
+    /// before the start, as #90's viewer had it, and the test fails.
+    /// Needs PipeWire and RTKit, and a source that is not the capture card:
+    /// `PHC_AUDIO_TEST_SOURCE=<node name> cargo test --release -- --ignored
+    /// the_viewers_audio_threads_run_real_time --test-threads=1` (it sets
+    /// an environment variable, so alone).
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn the_viewers_audio_threads_run_real_time() {
+        let Ok(source) = std::env::var("PHC_AUDIO_TEST_SOURCE") else {
+            panic!("set PHC_AUDIO_TEST_SOURCE to a PipeWire source node name (not the capture card)");
+        };
+        // As main's `environment`. Safety: run alone, before any other thread.
+        unsafe { std::env::set_var("DISABLE_RTKIT", "1") };
+        if std::env::var_os("PHC_LIMIT_FIRST").is_some() {
+            let zero = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            // Safety: a valid rlimit; lowering is always allowed.
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_RTTIME, &zero) }, 0);
+        }
+        let audio = Audio::start(&source, None, 50, 10).expect("the loopback starts");
+        thread::sleep(Duration::from_secs(2));
+        let policy = |name: &str| -> Vec<String> {
+            std::fs::read_dir("/proc/self/task")
+                .unwrap()
+                .filter_map(|t| {
+                    let t = t.ok()?.path();
+                    (std::fs::read_to_string(t.join("comm")).ok()?.trim() == name).then(|| {
+                        let stat = std::fs::read_to_string(t.join("stat")).unwrap_or_default();
+                        // Field 41 (policy), counted after the ")" that ends comm.
+                        stat.rsplit(')').next().unwrap_or("").split_whitespace().nth(38).unwrap_or("?").to_string()
+                    })
+                })
+                .collect()
+        };
+        for name in ["pw_in", "pw_out"] {
+            let p = policy(name);
+            assert!(!p.is_empty() && p.iter().all(|p| p == "1" || p == "2"), "{name}: policies {p:?} (1 FIFO, 2 RR)");
+        }
+        assert!(!audio.counters.realtime_refused.load(Ordering::Relaxed), "nothing refused");
+        let (_, hard) = rttime().expect("RLIMIT_RTTIME");
+        assert_ne!(hard, Some(0), "RLIMIT_RTTIME is not left at 0");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_refusal_note_says_where_rlimit_rttime_went() {
+        let unlimited = Some((None, None));
+        // #90's viewer: unlimited at the start, 0/0 at the refusal.
+        assert_eq!(
+            rttime_note(unlimited, Some((Some(0), Some(0)))),
+            "RLIMIT_RTTIME at start soft unlimited / hard unlimited, now soft 0 us / hard 0 us: \
+             lowered inside this process, so the promotion cannot raise it back"
+        );
+        // A cpal promotion's own limit (one buffer, RTKit's maximum) is lower
+        // too, but only after it worked; and a limit already low at the
+        // start was not lowered here.
+        let low = Some((Some(5333), Some(200_000)));
+        assert!(!rttime_note(low, low).contains("lowered"));
+        assert!(!rttime_note(unlimited, low).contains("lowered"), "a promotion's own limit is no fault");
+        assert!(!rttime_note(unlimited, unlimited).contains("lowered"));
+        assert_eq!(rttime_note(None, unlimited), "RLIMIT_RTTIME at start unknown, now soft unlimited / hard unlimited");
     }
 
     #[test]
