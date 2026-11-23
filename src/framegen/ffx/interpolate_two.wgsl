@@ -45,10 +45,15 @@
 // A blend of the background with the object in front of it, the halo
 // around a moving edge, is what the one-sided cases replace.
 //
-// Before all that, the static-HUD mask (hud_mask.wgsl, #73 step 4): where
-// the pixel, or where the forward flow would fetch it from, is a block of
-// still HUD, the two frames are blended unmoved, so HUD text over a moving
-// background is not dragged along with the background.
+// The static-HUD mask (hud_mask.wgsl, #73 step 4) keeps a still HUD
+// still: inside its blocks the flow is zero (the two frames blended
+// unmoved), feathered over one block so its edge is no seam. Outside, a
+// pixel warps with its own motions; a motion whose sample would land on
+// the mask is not trusted (it would drag the HUD into the background), so
+// the pixel takes its other motions. The rule used to blend a pixel
+// unmoved wherever its motion touched the mask, which cut a block-edged
+// seam through a moving road beside a screen-locked car that the mask
+// takes for HUD (#73, the driving clip).
 
 struct Interp {
     size: vec2f,
@@ -77,6 +82,24 @@ struct Interp {
 fn masked(y: vec2f) -> bool {
     let b = clamp(vec2i(floor(y / 8.0)), vec2i(0), ip.mask_size - 1);
     return hud_mask[b.y * ip.mask_size.x + b.x] != 0u;
+}
+
+// One mask block as 0 or 1 (clamped to the frame's blocks).
+fn mask_at(b: vec2i) -> f32 {
+    let at = clamp(b, vec2i(0), ip.mask_size - 1);
+    return select(0.0, 1.0, hud_mask[at.y * ip.mask_size.x + at.x] != 0u);
+}
+
+// The mask feathered: bilinear between block centres, so a pixel inside a
+// run of masked blocks is 1, one outside them 0, and the edge ramps over
+// one block.
+fn mask_weight(y: vec2f) -> f32 {
+    let b = y / 8.0 - 0.5;
+    let b0 = vec2i(floor(b));
+    let f = b - vec2f(b0);
+    let top = mix(mask_at(b0), mask_at(b0 + vec2i(1, 0)), f.x);
+    let bottom = mix(mask_at(b0 + vec2i(0, 1)), mask_at(b0 + vec2i(1, 1)), f.x);
+    return mix(top, bottom, f.y);
 }
 
 fn at_block(b: vec2i) -> i32 {
@@ -132,7 +155,9 @@ fn attempt(y: vec2f, u: vec2f) -> Try {
     // Agreement within two flow-luma pixels (vectors are whole luma
     // pixels; bilinear ones fall between).
     let tolerance = 2.0 * ip.scale;
-    let trusted = dot(u, u) <= ip.max_motion * ip.max_motion;
+    // A moving sample taken from the mask would drag the HUD (ip.use_mask).
+    let off_mask = ip.use_mask == 0u || dot(u, u) < 0.25 || !(masked(y - half_u) || masked(y + half_u));
+    let trusted = dot(u, u) <= ip.max_motion * ip.max_motion && off_mask;
     t.next_agrees = trusted && length(nearest_n(y + half_u) + u) <= tolerance;
     t.prev_agrees = trusted && length(nearest_p(y - half_u) - u) <= tolerance;
     let d = abs(t.a.rgb - t.b.rgb);
@@ -174,12 +199,21 @@ fn one_way(y: vec2f, at_next: vec4f) -> vec4f {
             return at_next;
         }
     }
+    // Inside the mask: zero flow, the two frames blended unmoved; at its
+    // edge, ramped into the warped picture.
+    var hud_w = 0.0;
     if (ip.use_mask != 0u) {
-        let half_v = 0.5 * vn;
-        if (masked(y) || masked(y - half_v) || masked(y + half_v)) {
-            return vec4f((0.5 * (at_next + textureLoad(prev_frame, pix, 0))).rgb, 1.0);
-        }
+        hud_w = mask_weight(y);
     }
+    let unmoved = vec4f((0.5 * (at_next + textureLoad(prev_frame, pix, 0))).rgb, 1.0);
+    if (hud_w >= 1.0) {
+        return unmoved;
+    }
+    return mix(warped(y, vn, at_next), unmoved, hud_w);
+}
+
+// The picture halfway from the motions (the mask aside).
+fn warped(y: vec2f, vn: vec2f, at_next: vec4f) -> vec4f {
     var motions: array<vec2f, 4>;
     motions[0] = -nearest_n(y);
     motions[1] = nearest_p(y);

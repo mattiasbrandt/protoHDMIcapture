@@ -1237,29 +1237,41 @@ mod tests {
         let (prev, next) = (rig.frame(&picture(w, h, (0, 0), 7, 0, 256)), rig.frame(&picture(w, h, (8, 4), 7, 0, 256)));
         let out = rig.texture(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
         let views = [&prev, &next, &out].map(|t| t.create_view(&Default::default()));
-        let mut times = Vec::new();
-        for _ in 0..60 {
-            timer.arm();
-            let mut encoder = rig.device.create_command_encoder(&Default::default());
-            let frames = Pair { prev: &views[0], next: &views[1], out: &views[2] };
-            assert!(ffx.generate(&rig.device, &rig.queue, &mut encoder, frames, timer.generate()));
-            timer.resolve(&mut encoder);
-            rig.queue.submit([encoder.finish()]);
-            timer.submitted();
-            rig.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            if let Some(t) = timer.take().unwrap()
+        // Back to back (full clocks), then paced at 60 Hz as the window runs
+        // it (the GPU's power level follows the load, #75).
+        for paced in [false, true] {
+            let mut times = Vec::new();
+            for i in 0..if paced { 180 } else { 60 } {
+                let started = std::time::Instant::now();
+                timer.arm();
+                let mut encoder = rig.device.create_command_encoder(&Default::default());
+                let frames = Pair { prev: &views[0], next: &views[1], out: &views[2] };
+                assert!(ffx.generate(&rig.device, &rig.queue, &mut encoder, frames, timer.generate()));
+                timer.resolve(&mut encoder);
+                rig.queue.submit([encoder.finish()]);
+                timer.submitted();
+                rig.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                if let Some(t) = timer.take().unwrap()
                 && let Some(g) = t.generate
-            {
-                times.push(g);
+                // Paced: the last 2 s, once the clocks have settled.
+                && (!paced || i >= 60)
+                {
+                    times.push(g);
+                }
+                if paced {
+                    std::thread::sleep(std::time::Duration::from_micros(16_667).saturating_sub(started.elapsed()));
+                }
             }
+            times.sort();
+            assert!(!times.is_empty(), "timed at least once");
+            eprintln!(
+                "{name} at 1920x1080, {}: median {:?}, p90 {:?}, p99 {:?}, {} frames",
+                if paced { "paced at 60 Hz" } else { "back to back" },
+                times[times.len() / 2],
+                times[times.len() * 9 / 10],
+                times[times.len() * 99 / 100],
+                times.len()
+            );
         }
-        times.sort();
-        assert!(!times.is_empty(), "timed at least once");
-        eprintln!(
-            "{name} at 1920x1080: median {:?}, p90 {:?}, {} frames",
-            times[times.len() / 2],
-            times[times.len() * 9 / 10],
-            times.len()
-        );
     }
 }
