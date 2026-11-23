@@ -115,6 +115,10 @@ pub struct Slot {
     pub data: Vec<u8>,
     pub tag: Option<Tag>,
     pub superseded: u64,
+    /// Of `superseded`, the duplicate frames: the window never took them,
+    /// so new-frames-only never withheld them either, yet they were
+    /// duplicates the source sent (#72: counted as repeated refreshes).
+    pub superseded_duplicates: u64,
 }
 
 impl Slot {
@@ -124,6 +128,9 @@ impl Slot {
     pub fn put(&mut self, data: &[u8], mut tag: Tag) {
         if let Some(waiting) = self.tag {
             self.superseded += 1;
+            if waiting.kind == Kind::Duplicate {
+                self.superseded_duplicates += 1;
+            }
             if waiting.kind == Kind::New {
                 tag.kind = Kind::New;
             }
@@ -191,7 +198,7 @@ pub fn run(host: &mut dyn Host, mut source: Box<dyn FrameSource>, plan: Plan, qu
     });
 
     let format = source.format();
-    let slot = Arc::new(Mutex::new(Slot { data: vec![0; format.frame_size()], tag: None, superseded: 0 }));
+    let slot = Arc::new(Mutex::new(Slot { data: vec![0; format.frame_size()], tag: None, superseded: 0, superseded_duplicates: 0 }));
     // Stops the capture: set once the window has ended.
     let stop = Arc::new(AtomicBool::new(false));
     let capture_thread = {
@@ -324,7 +331,7 @@ mod tests {
 
     #[test]
     fn a_duplicate_over_an_untaken_new_frame_stays_new() {
-        let mut slot = Slot { data: vec![0; 4], tag: None, superseded: 0 };
+        let mut slot = Slot { data: vec![0; 4], tag: None, superseded: 0, superseded_duplicates: 0 };
         slot.put(&[1; 4], tag(Kind::New));
         slot.put(&[2; 4], tag(Kind::Duplicate));
         assert_eq!(slot.superseded, 1);
@@ -339,6 +346,9 @@ mod tests {
         slot.put(&[4; 4], tag(Kind::New));
         assert_eq!(slot.tag.map(|t| t.kind), Some(Kind::New));
         assert_eq!(slot.superseded, 2);
+        // Only the duplicate the window never took is a superseded
+        // duplicate (#72), not the untaken new frame before.
+        assert_eq!(slot.superseded_duplicates, 1);
     }
     /// Longer than any test should wait: a hang fails instead.
     const PATIENCE: Duration = Duration::from_secs(10);

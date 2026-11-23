@@ -11,6 +11,11 @@ use crate::dashboard::Live;
 use crate::present::Tag;
 
 const WINDOW: Duration = Duration::from_secs(10);
+/// This many presents in a row discarded, with as many frame callbacks
+/// between them, and the presents are being replaced before display: the
+/// latency cannot be read (#72: the openfg layer commits its generated
+/// frame on our feedback, then the real one over it).
+pub const REPLACED: u32 = 30;
 
 /// Median and p99 of a set of durations, in milliseconds.
 pub fn percentiles(samples: &mut [Duration]) -> Option<(f64, f64)> {
@@ -77,6 +82,17 @@ pub struct Stats {
     last_present: Option<Duration>,
     refresh: Option<Duration>,
     flags: BTreeMap<u32, u64>,
+    /// Refreshes from one present to the next, counted by how many
+    /// (`--stats`): a 2:2 source in new-frames-only mode should be all 2s;
+    /// 3s next to 1s are a present landing a refresh late, then on time.
+    gaps: BTreeMap<u64, u64>,
+    /// Presents discarded in a row, and the frame callbacks since the
+    /// first of them (`REPLACED`).
+    discard_streak: u32,
+    done_in_streak: u32,
+    /// GPU use while a GPU enhancement is on (gpustat.rs), for the 10 s
+    /// lines.
+    gpu: Option<Arc<crate::gpustat::Shared>>,
     window: Window,
     window_start: Duration,
 }
@@ -104,6 +120,10 @@ impl Stats {
             last_present: None,
             refresh: None,
             flags: BTreeMap::new(),
+            gaps: BTreeMap::new(),
+            discard_streak: 0,
+            done_in_streak: 0,
+            gpu: None,
             window: Window::default(),
             window_start: start,
         }
@@ -152,6 +172,30 @@ impl Stats {
     pub fn discarded(&mut self) {
         self.discarded += 1;
         self.last_present = None;
+        self.discard_streak = self.discard_streak.saturating_add(1);
+        if self.discard_streak >= REPLACED && self.done_in_streak >= REPLACED {
+            self.live.set_replaced(true);
+        }
+    }
+
+    /// The compositor's frame callback: it is still taking our presents,
+    /// so a run of discards with these is our presents being replaced, not
+    /// a window the compositor hides.
+    pub fn frame_done(&mut self) {
+        if self.discard_streak > 0 {
+            self.done_in_streak = self.done_in_streak.saturating_add(1);
+        }
+    }
+
+    /// GPU use for the 10 s lines while a GPU enhancement is on, none
+    /// while it is off.
+    pub fn set_gpu(&mut self, gpu: Option<Arc<crate::gpustat::Shared>>) {
+        self.gpu = gpu;
+    }
+
+    /// Presents counted as replaced before display (`REPLACED`).
+    pub fn replaced(&self) -> bool {
+        self.discard_streak >= REPLACED && self.done_in_streak >= REPLACED
     }
 
     /// The picture back after no signal (an HDMI pull, the card pulled
@@ -168,6 +212,9 @@ impl Stats {
             return;
         }
         self.presented += 1;
+        self.discard_streak = 0;
+        self.done_in_streak = 0;
+        self.live.set_replaced(false);
         if self.verbose {
             *self.flags.entry(flags).or_default() += 1;
         }
@@ -188,6 +235,9 @@ impl Stats {
             // their refreshes to the frame before: not repeated.
             let refreshes = ((at - prev).as_secs_f64() / r.as_secs_f64()).round() as u64;
             skipped = refreshes.saturating_sub(1 + u64::from(tag.withheld));
+            if self.verbose {
+                *self.gaps.entry(refreshes).or_default() += 1;
+            }
             self.skipped_refreshes += skipped;
         }
         self.last_present = Some(at);
@@ -215,8 +265,9 @@ impl Stats {
 
         if at - self.window_start >= WINDOW {
             let w = &mut self.window;
+            let gpu = self.gpu.as_ref().map_or(String::new(), |g| format!("  | {}", crate::gpustat::window_line(g)));
             eprintln!(
-                "{:6.1} s  dequeue->present {}  | kernel->present {}  | repeated refreshes {}",
+                "{:6.1} s  dequeue->present {}  | kernel->present {}  | repeated refreshes {}{gpu}",
                 (at - self.start).as_secs_f64(),
                 fmt(&mut w.to_present),
                 fmt(&mut w.kernel_to_present),
@@ -232,6 +283,12 @@ impl Stats {
             "summary: submitted {}, presented {}, discarded {}, not acquired {}, superseded before upload {}, presented before dequeue {}, pace timeouts {}",
             self.submitted, self.presented, self.discarded, self.not_acquired, superseded, self.before_dequeue, self.pace_timeouts
         );
+        if self.presented == 0 && self.replaced() {
+            eprintln!(
+                "summary: latency not measurable: all {} presents were replaced before display (a frame-generation layer?)",
+                self.discarded
+            );
+        }
         eprintln!("summary: dequeue->present {}  (gating: median <= 16.7, p99 <= 33.3)", fmt_full(&mut self.to_present));
         eprintln!("summary: kernel->present  {}", fmt_full(&mut self.kernel_to_present));
         eprintln!("summary: get_current_texture wait {}", fmt(&mut self.acquire));
@@ -246,6 +303,9 @@ impl Stats {
         if !self.gpu_generate.is_empty() {
             eprintln!("summary: GPU time ({} frames)  frame generation {}", self.gpu_generate.len(), fmt(&mut self.gpu_generate));
         }
+        if let Some(line) = gpu_share(&mut self.gpu_convert, &mut self.gpu_scale, &mut self.gpu_generate, self.refresh) {
+            eprintln!("{line}");
+        }
         if !self.overlay.is_empty() {
             eprintln!("summary: overlay CPU ({} frames)  {}", self.overlay.len(), fmt(&mut self.overlay));
         }
@@ -258,7 +318,28 @@ impl Stats {
         // DXGI (Windows): 0 unknown, else the presentation mode + 1 (present/dxgi.rs).
         let flags: Vec<String> = self.flags.iter().map(|(f, n)| format!("{f:#x}x{n}")).collect();
         eprintln!("summary: presentation flags {}", flags.join(" "));
+        if !self.gaps.is_empty() {
+            let gaps: Vec<String> = self.gaps.iter().map(|(r, n)| format!("{r}x{n}")).collect();
+            eprintln!("summary: refreshes between presents (refreshes x presents) {}", gaps.join(" "));
+        }
     }
+}
+
+/// protoHDMIcapture's GPU share of a refresh: the medians of its passes
+/// (convert, scale, and the generator where one ran) summed, against the
+/// refresh interval. Portable: the window's own timestamp queries.
+fn gpu_share(convert: &mut [Duration], scale: &mut [Duration], generate: &mut [Duration], refresh: Option<Duration>) -> Option<String> {
+    let r = refresh?;
+    let med = |v: &mut [Duration]| percentiles(v).map_or(0.0, |(m, _)| m);
+    if convert.is_empty() {
+        return None;
+    }
+    let ms = med(convert) + med(scale) + med(generate);
+    Some(format!(
+        "summary: GPU share of a refresh {:.1} % ({ms:.2} ms of {:.2} ms, the passes' medians summed)",
+        ms / (r.as_secs_f64() * 1e3) * 100.0,
+        r.as_secs_f64() * 1e3
+    ))
 }
 
 #[cfg(test)]
@@ -351,6 +432,59 @@ mod tests {
         // A refresh more than the withheld duplicate explains is repeated.
         present_fg(&mut s, Duration::from_secs(1) + REFRESH * 21, false, 1);
         assert_eq!(s.skipped_refreshes, 1);
+    }
+
+    #[test]
+    fn presents_replaced_before_display_make_the_latency_unmeasurable() {
+        // The openfg layer commits its generated frame with our feedback
+        // and the real one over it: every present discarded, the frame
+        // callbacks still coming (#72).
+        let live = Arc::new(Live::new());
+        let mut s = Stats::new(Duration::ZERO, false, live.clone());
+        for _ in 0..REPLACED - 1 {
+            s.discarded();
+            s.frame_done();
+        }
+        assert!(!s.replaced(), "not yet: a short run of discards is a hidden window's");
+        s.discarded();
+        s.frame_done();
+        s.discarded();
+        assert!(s.replaced() && live.replaced_shown());
+        // A present shown again: measurable.
+        present(&mut s, Duration::from_secs(1));
+        assert!(!s.replaced() && !live.replaced_shown());
+    }
+
+    #[test]
+    fn discards_without_frame_callbacks_are_a_hidden_window_not_replaced_presents() {
+        let live = Arc::new(Live::new());
+        let mut s = Stats::new(Duration::ZERO, false, live.clone());
+        for _ in 0..REPLACED * 3 {
+            s.discarded();
+        }
+        assert!(!s.replaced());
+        assert!(!live.replaced_shown());
+    }
+
+    #[test]
+    fn the_refreshes_between_presents_are_counted_by_length() {
+        let mut s = Stats::new(Duration::ZERO, true, Arc::new(Live::new()));
+        let t0 = Duration::from_secs(1);
+        for at in [0, 2, 4, 7, 8, 10] {
+            present_fg(&mut s, t0 + REFRESH * at, false, 1);
+        }
+        assert_eq!(s.gaps.iter().map(|(r, n)| (*r, *n)).collect::<Vec<_>>(), [(1, 1), (2, 3), (3, 1)]);
+        // A present a refresh late, then one on time: one repeated refresh.
+        assert_eq!(s.skipped_refreshes, 1);
+    }
+
+    #[test]
+    fn the_gpu_share_is_the_passes_medians_against_a_refresh() {
+        let ms = |v: f64| Duration::from_secs_f64(v / 1e3);
+        let line = gpu_share(&mut [ms(0.03)], &mut [ms(0.2)], &mut [ms(0.44)], Some(REFRESH)).unwrap();
+        assert!(line.contains("4.0 %"), "{line}");
+        assert!(gpu_share(&mut [], &mut [], &mut [], Some(REFRESH)).is_none());
+        assert!(gpu_share(&mut [ms(1.0)], &mut [ms(1.0)], &mut [], None).is_none());
     }
 
     #[test]

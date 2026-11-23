@@ -149,6 +149,37 @@ gst or ffplay are legacy's.
   scheme_current`; put the value back in a `finally`. Hidden settings
   such as IDLEDISABLE show only with `powercfg /qh`, not `/query`.
 
+## Reading GPU use (#72)
+
+- **Only with a GPU enhancement on**: frame generation (`--framegen`) or an
+  enhancement SCALING preset. A plain run samples and shows nothing new.
+- **The dashboard's GPU section**, the last 10 s at 10 Hz, as nvtop and
+  amdgpu_top read them:
+  - `busy`, `clocks`, `VRAM`, `power`, `temperature` and `fan`: the whole
+    card, from amdgpu's sysfs and hwmon (other drivers: "not available",
+    with why);
+  - `protoHDMIcapture`: its own share of the GPU's engines and its VRAM,
+    from its DRM file descriptors (`/proc/self/fdinfo`, `drm-engine-*`).
+- **`--stats`**:
+  - each 10 s line ends with the GPU's busy %, ours, the power and the
+    junction temperature;
+  - the summary adds `GPU use` (each number's median and max over the run)
+    and `GPU share of a refresh` (the passes' GPU times against the
+    refresh interval: how much of the frame budget protoHDMIcapture
+    spends; under 10 % at 1080p60 on a gaming GPU leaves headroom for
+    picture quality).
+- **`refreshes between presents`** (`--stats` summary): how many refreshes
+  passed from one present to the next. A 60 fps feed is all 1s; a 30 fps
+  source in new-frames-only all 2s. A 3 next to a 1 is a present that
+  landed a refresh late and the next one on time: judder, and one
+  repeated refresh.
+- **`latency: not measurable`**: every present was discarded while the
+  compositor's frame callbacks kept coming, so something presents over
+  ours before display. The openfg layer does: inside our present it
+  commits its generated frame first, carrying our feedback and frame
+  callback, then the real frame over it in the same refresh (Mailbox), so
+  our feedback is always "discarded" and its generated frame never shows.
+
 ## Recording a clip (dev builds)
 
 For trying frame generation and upscaling on the same card frames every

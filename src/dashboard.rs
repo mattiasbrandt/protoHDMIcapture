@@ -123,6 +123,14 @@ pub struct Live {
     generated: AtomicU64,
     missed: AtomicU64,
     withheld: AtomicU64,
+    /// GPU use (gpustat.rs, #72), while a GPU enhancement is on; None: no
+    /// GPU section.
+    gpu: Mutex<Option<Arc<crate::gpustat::Shared>>>,
+    /// The compositor discards every present while frame callbacks keep
+    /// coming: another present replaces ours before display (a
+    /// frame-generation layer inserting its own, #72), so no latency can
+    /// be read.
+    replaced: AtomicBool,
 }
 
 /// A rate not known yet, in `Live`'s f64-bit fields (a NaN's bits).
@@ -171,6 +179,33 @@ impl Live {
             generated: AtomicU64::new(0),
             missed: AtomicU64::new(0),
             withheld: AtomicU64::new(0),
+            gpu: Mutex::new(None),
+            replaced: AtomicBool::new(false),
+        }
+    }
+
+    /// The GPU section's numbers while a GPU enhancement is on, none while
+    /// it is off (gpustat.rs `Monitor`).
+    pub fn set_gpu(&self, gpu: Option<Arc<crate::gpustat::Shared>>) {
+        *self.gpu.lock().expect("the GPU section's lock is never poisoned") = gpu;
+    }
+
+    /// The GPU section is shown.
+    #[cfg(test)]
+    pub fn gpu_shown(&self) -> bool {
+        self.gpu.lock().expect("the GPU section's lock is never poisoned").is_some()
+    }
+
+    /// The latency is shown as not measurable.
+    #[cfg(test)]
+    pub fn replaced_shown(&self) -> bool {
+        self.replaced.load(Ordering::Relaxed)
+    }
+
+    /// Our presents are replaced before display, or no longer.
+    pub fn set_replaced(&self, replaced: bool) {
+        if self.replaced.swap(replaced, Ordering::Relaxed) != replaced && replaced {
+            self.event("latency: not measurable: every present is replaced before display (a frame-generation layer?)".into());
         }
     }
 
@@ -446,6 +481,11 @@ impl Rolling {
                 }),
                 None => Value::Null,
             },
+            "gpu": match &*live.gpu.lock().expect("the GPU section's lock is never poisoned") {
+                Some(g) => crate::gpustat::json(g),
+                None => Value::Null,
+            },
+            "latency_replaced": live.replaced.load(Ordering::Relaxed),
             "window_s": window_s,
             "dequeue_present": latency(&mut to),
             "kernel_present": latency(&mut kernel),
@@ -945,6 +985,61 @@ fn num(v: &Value) -> Option<f64> {
     v.as_f64()
 }
 
+/// The GPU section (gpustat.rs, #72): only while a GPU enhancement is on
+/// (`gpu` null otherwise). The window's median, and its max where it
+/// moves.
+fn gpu_section(out: &mut Vec<String>, g: &Value, p: &Paint) {
+    if g.is_null() {
+        return;
+    }
+    let row = |out: &mut Vec<String>, name: &str, value: String| out.push(format!("  {} {value}", p.dim(&format!("{name:<17}"))));
+    let med = |k: &str| num(&g[k]["median"]);
+    let mm = |k: &str, unit: &str| match (num(&g[k]["median"]), num(&g[k]["max"])) {
+        (Some(m), Some(x)) => Some(format!("{m:.0}{unit} {}", p.dim(&format!("(max {x:.0}{unit})")))),
+        _ => None,
+    };
+    out.push(String::new());
+    out.push(format!("  {}", p.head("GPU")));
+    match (g["source"].as_str(), g["unavailable"].as_str()) {
+        (Some(src), _) => row(out, "read from", p.dim(&format!("{src} · last {:.0} s", crate::gpustat::WINDOW.as_secs_f64()))),
+        (_, Some(why)) => row(out, "whole GPU", p.dim(&format!("not available: {why}"))),
+        _ => {}
+    }
+    if let Some(busy) = mm("busy_pct", " %") {
+        row(out, "busy", busy);
+    }
+    let ours = match (mm("ours_pct", " %"), num(&g["ours_vram_mib"])) {
+        (Some(pct), Some(v)) => Some(format!("{pct} of the engines · {v:.0} MB VRAM")),
+        (Some(pct), None) => Some(format!("{pct} of the engines")),
+        (None, Some(v)) => Some(format!("{v:.0} MB VRAM")),
+        (None, None) => None,
+    };
+    row(out, "protoHDMIcapture", ours.unwrap_or_else(|| p.dim("no DRM engine counters (fdinfo)")));
+    let clocks: Vec<String> = [("shader", med("shader_mhz")), ("memory", med("memory_mhz"))]
+        .into_iter()
+        .filter_map(|(n, v)| v.map(|v| format!("{n} {v:.0} MHz")))
+        .collect();
+    if !clocks.is_empty() {
+        row(out, "clocks", clocks.join(" · "));
+    }
+    if let (Some(used), Some(total)) = (num(&g["vram_used_mib"]), num(&g["vram_total_mib"])) {
+        row(out, "VRAM", format!("{:.1} of {:.1} GB", used / 1024.0, total / 1024.0));
+    }
+    if let Some(w) = mm("power_w", " W") {
+        row(out, "power", w);
+    }
+    let temps: Vec<String> = [("edge", "edge_c"), ("junction", "junction_c"), ("memory", "memory_c")]
+        .into_iter()
+        .filter_map(|(n, k)| med(k).map(|v| format!("{n} {v:.0} °C")))
+        .collect();
+    if !temps.is_empty() {
+        row(out, "temperature", temps.join(" · "));
+    }
+    if let Some(f) = med("fan_rpm") {
+        row(out, "fan", format!("{f:.0} RPM"));
+    }
+}
+
 /// One snapshot as the dashboard's text.
 fn render(s: &Value, p: &Paint) -> String {
     let mut out = Vec::new();
@@ -1047,7 +1142,9 @@ fn render(s: &Value, p: &Paint) -> String {
         row(
             &mut out,
             name,
-            if v.is_null() {
+            if v.is_null() && s["latency_replaced"].as_bool() == Some(true) {
+                p.red("not measurable: every present is replaced before display (a frame-generation layer?)")
+            } else if v.is_null() {
                 p.dim("no frame presented yet")
             } else {
                 format!(
@@ -1071,6 +1168,7 @@ fn render(s: &Value, p: &Paint) -> String {
         ),
     );
     row(&mut out, "process", format!("cpu {}% · rss {} MB", n1(&s["cpu_pct"]), n1(&s["rss_mb"])));
+    gpu_section(&mut out, &s["gpu"], p);
 
     out.push(String::new());
     out.push(format!("  {}", p.head("Audio")));
@@ -1875,5 +1973,61 @@ mod tests {
             signal_json(&no(Since::Never, Reason::Unusable("short".into()))),
             ("never", json!("frames the viewer cannot use: short"))
         );
+    }
+
+    #[test]
+    fn the_gpu_section_shows_only_while_a_gpu_enhancement_is_on() {
+        // A plain run: no "gpu" in the snapshot, no GPU section (#72).
+        let live = Live::new();
+        let s = Rolling::new(&live).snapshot(&live);
+        assert!(s["gpu"].is_null());
+        assert!(!render(&s, &Paint { on: false }).lines().any(|l| l == "  GPU"));
+        // On: the section, nvtop-style, from what the sampler read.
+        let shared = Arc::new(crate::gpustat::Shared::new(Ok("amdgpu sysfs".into()), false));
+        let card = crate::gpustat::Card {
+            busy_pct: Some(8.0),
+            shader_mhz: Some(1329.0),
+            memory_mhz: Some(1258.0),
+            vram_used: Some(2 << 30),
+            vram_total: Some(16 << 30),
+            power_w: Some(49.0),
+            edge_c: Some(49.0),
+            junction_c: Some(51.0),
+            memory_c: Some(60.0),
+            fan_rpm: Some(0.0),
+        };
+        shared.push(Instant::now(), crate::gpustat::Sample { card, ours_pct: Some(3.0), ours_vram: Some(450 << 20) });
+        live.set_gpu(Some(shared));
+        let text = render(&Rolling::new(&live).snapshot(&live), &Paint { on: false });
+        let gpu: Vec<&str> = text.lines().skip_while(|l| *l != "  GPU").take_while(|l| !l.is_empty()).collect();
+        assert_eq!(
+            gpu,
+            [
+                "  GPU",
+                "  read from         amdgpu sysfs · last 10 s",
+                "  busy              8 % (max 8 %)",
+                "  protoHDMIcapture  3 % (max 3 %) of the engines · 450 MB VRAM",
+                "  clocks            shader 1329 MHz · memory 1258 MHz",
+                "  VRAM              2.0 of 16.0 GB",
+                "  power             49 W (max 49 W)",
+                "  temperature       edge 49 °C · junction 51 °C · memory 60 °C",
+                "  fan               0 RPM",
+            ],
+            "{text}"
+        );
+        live.set_gpu(None);
+        assert!(Rolling::new(&live).snapshot(&live)["gpu"].is_null());
+    }
+
+    #[test]
+    fn replaced_presents_say_the_latency_is_not_measurable() {
+        let live = Live::new();
+        live.set_replaced(true);
+        let text = render(&Rolling::new(&live).snapshot(&live), &Paint { on: false });
+        assert!(text.contains("kernel→presented  not measurable: every present is replaced before display"), "{text}");
+        assert!(live.events.lock().unwrap().iter().any(|e| e.contains("latency: not measurable")));
+        live.set_replaced(false);
+        let text = render(&Rolling::new(&live).snapshot(&live), &Paint { on: false });
+        assert!(text.contains("no frame presented yet"), "{text}");
     }
 }

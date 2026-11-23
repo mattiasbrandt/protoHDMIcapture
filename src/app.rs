@@ -28,6 +28,7 @@ use crate::capture::{Format, FrameSource, Signal, now_monotonic};
 use crate::desktop::Desktop;
 use crate::duplicate::Kind;
 use crate::framegen::{self, Generator, Mode, Pair, Schedule, Show};
+use crate::gpustat;
 use crate::gputime::GpuTimer;
 use crate::keys::{self, Action};
 use crate::live_changes::LiveChanges;
@@ -285,6 +286,12 @@ struct App {
     /// Frame generation, when it runs (`Options::framegen`, unless the GPU
     /// refused it).
     framegen: Option<Framegen>,
+    /// GPU use (gpustat.rs, #72), sampled only while a GPU enhancement is
+    /// on.
+    gpu: gpustat::Monitor,
+    /// The adapter's PCI vendor and device ids and its name, for the GPU
+    /// use's source.
+    adapter: Option<(u32, u32, String)>,
 }
 
 /// Frame generation in the window (framegen.rs, #66): the schedule, and
@@ -301,11 +308,29 @@ struct Framegen {
     /// The slot's `superseded` at the last take: a rise means the window
     /// took a frame over one it never took, a refresh behind.
     superseded: u64,
+    /// The slot's `superseded_duplicates` at the last take.
+    superseded_duplicates: u64,
 }
 
 impl Framegen {
     fn new(mode: Mode) -> Self {
-        Self { schedule: Schedule::new(mode), gpu: None, held: None, withheld: 0, superseded: 0 }
+        Self { schedule: Schedule::new(mode), gpu: None, held: None, withheld: 0, superseded: 0, superseded_duplicates: 0 }
+    }
+
+    /// The window took a card frame, with the slot's counts then: whether
+    /// it is late (it replaced a frame the window never took). In
+    /// new-frames-only, a duplicate frame replaced in the slot was not
+    /// presented either, as a withheld one is not: its refresh is not a
+    /// repeated one (#72: 18 of a 20 s run's repeats were these).
+    fn took(&mut self, superseded: u64, superseded_duplicates: u64) -> bool {
+        let late = superseded > self.superseded;
+        let skipped = superseded_duplicates.saturating_sub(self.superseded_duplicates);
+        self.superseded = superseded;
+        self.superseded_duplicates = superseded_duplicates;
+        if self.schedule.mode() == Mode::NewOnly {
+            self.withheld = self.withheld.saturating_add(u32::try_from(skipped).unwrap_or(u32::MAX));
+        }
+        late
     }
 }
 
@@ -565,6 +590,8 @@ impl Host for Winit {
             gfx: None,
             end: end.clone(),
             framegen: None,
+            gpu: gpustat::Monitor::new(std::path::Path::new("/proc/self/fdinfo")),
+            adapter: None,
         };
         let delay_ms = app.delay_ms();
         app.opts.live_changes.mark_baseline(delay_ms);
@@ -577,6 +604,9 @@ impl Host for Winit {
         if app.opts.stats {
             let superseded = slot.lock().expect("the slot's lock is never poisoned").superseded;
             app.pacing.stats().summary(superseded);
+            for line in gpustat::summary(&app.gpu.history()) {
+                eprintln!("{line}");
+            }
         }
     }
 }
@@ -800,6 +830,9 @@ impl App {
             self.opts.live.framegen(mode.as_str());
             self.framegen = Some(Framegen::new(mode));
         }
+        let info = adapter.get_info();
+        self.adapter = Some((info.vendor, info.device, info.name));
+        self.update_gpu();
         let rgb_view = rgb.create_view(&Default::default());
 
         let convert_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -917,6 +950,21 @@ impl App {
 
     /// The viewport and the scaler for the surface's size and SCALING; after
     /// a resize and on c.
+    /// GPU use sampled and shown while a GPU enhancement is on (frame
+    /// generation, an enhancement SCALING preset), not otherwise (#72):
+    /// called where either can change.
+    fn update_gpu(&mut self) {
+        let on = gpustat::enhanced(self.framegen.as_ref().map(|f| f.schedule.mode()), self.opts.live_changes.scaling());
+        let Some((vendor, device, name)) = self.adapter.clone() else { return };
+        match self.gpu.set(on, || gpustat::source_for(vendor, device, &name), self.opts.stats, gpustat::PERIOD) {
+            Ok(shown) => {
+                self.opts.live.set_gpu(shown.clone());
+                self.pacing.stats().set_gpu(shown);
+            }
+            Err(e) => eprintln!("warning: GPU use: {e}"),
+        }
+    }
+
     fn relayout(&mut self) {
         let Some(gfx) = self.gfx.as_mut() else { return };
         let frame = (self.format.width, self.format.height);
@@ -1023,6 +1071,7 @@ impl App {
             Action::CycleScaling => {
                 self.opts.live_changes.cycle_scaling();
                 self.relayout();
+                self.update_gpu();
             }
             Action::ResetColour => {
                 self.opts.live_changes.reset_colour();
@@ -1358,9 +1407,9 @@ impl App {
         // Built before the frame is taken: it reads the app's state.
         let scene = self.scene_text(Instant::now());
         let Some(gfx) = self.gfx.as_mut() else { return Ok(()) };
-        let (mut tag, superseded) = {
+        let (mut tag, (superseded, superseded_duplicates)) = {
             let mut s = self.slot.lock().expect("the slot's lock is never poisoned");
-            let superseded = s.superseded;
+            let superseded = (s.superseded, s.superseded_duplicates);
             let tag = match s.tag.take() {
                 Some(tag) => {
                     std::mem::swap(&mut s.data, &mut gfx.upload);
@@ -1382,8 +1431,7 @@ impl App {
         // unless the overlay wants drawing anyway.
         let show = match self.framegen.as_mut() {
             Some(fg) if new_frame => {
-                let late = superseded > fg.superseded;
-                fg.superseded = superseded;
+                let late = fg.took(superseded, superseded_duplicates);
                 let step = fg.schedule.next(tag.kind, tag.captured, late);
                 let show = if step.show == Show::Withheld && self.pacing.repaint_wanted() { Show::Real } else { step.show };
                 self.opts.live.framegen_step(show, step.missed);
@@ -1770,7 +1818,7 @@ mod tests {
             window_no: 0,
             frame_wake: Arc::default(),
             format,
-            slot: Arc::new(Mutex::new(Slot { data: Vec::new(), tag: None, superseded: 0 })),
+            slot: Arc::new(Mutex::new(Slot { data: Vec::new(), tag: None, superseded: 0, superseded_duplicates: 0 })),
             gfx: None,
             overlay: Overlay::new("ps5", Instant::now()),
             notices: Arc::default(),
@@ -1783,6 +1831,8 @@ mod tests {
             pacing: Pacing::new(Duration::ZERO, format.fps, Stats::new(Duration::ZERO, false, Arc::new(crate::dashboard::Live::new()))),
             end: End::new(Arc::new(|_| {})),
             framegen: None,
+            gpu: gpustat::Monitor::new(&dir),
+            adapter: None,
             opts: Options {
                 audio: AudioSetup::Off("none".into()),
                 source: "ps5".into(),
@@ -1792,6 +1842,45 @@ mod tests {
         };
         app.opts.live_changes.mark_baseline(None);
         (app, file)
+    }
+
+    #[test]
+    fn gpu_use_is_sampled_and_shown_only_with_a_gpu_enhancement() {
+        // A plain run: no sampler, no GPU section (#72).
+        let (mut app, _) = app_with("SCALING=balanced\n");
+        app.adapter = Some((0x10de, 1, "a test GPU".into()));
+        app.update_gpu();
+        assert!(!app.gpu.running());
+        assert!(!app.opts.live.gpu_shown());
+        // Frame generation on: sampled, shown (this GPU's whole-card
+        // numbers are not read: the section says why).
+        app.framegen = Some(Framegen::new(Mode::Copy));
+        app.update_gpu();
+        assert!(app.gpu.running());
+        assert!(app.opts.live.gpu_shown());
+        // Off again mid-run: stopped, gone.
+        app.framegen = None;
+        app.update_gpu();
+        assert!(!app.gpu.running());
+        assert!(!app.opts.live.gpu_shown());
+    }
+
+    #[test]
+    fn new_only_counts_a_duplicate_replaced_in_the_slot_as_withheld() {
+        let mut fg = Framegen::new(Mode::NewOnly);
+        // The duplicate after a new frame came while the last present was
+        // in flight; the next new frame replaced it in the slot.
+        assert!(fg.took(1, 1), "late: it replaced a frame the window never took");
+        assert_eq!(fg.withheld, 1);
+        assert!(!fg.took(1, 1));
+        assert_eq!(fg.withheld, 1, "counted once");
+        // A new frame replaced (the window a refresh behind) is a drop.
+        assert!(fg.took(2, 1));
+        assert_eq!(fg.withheld, 1);
+        // Generating modes keep withheld at 0: they present every frame.
+        let mut copy = Framegen::new(Mode::Copy);
+        copy.took(3, 3);
+        assert_eq!(copy.withheld, 0);
     }
 
     /// A plain key pressed: true when it asked for something.

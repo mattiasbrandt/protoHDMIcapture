@@ -149,7 +149,10 @@ impl Pacing {
         match o {
             Outcome::Presented { tag, at, refresh, flags } => self.stats.presented(tag, at, refresh, flags),
             Outcome::Discarded => self.stats.discarded(),
-            Outcome::FrameDone => self.in_flight = self.in_flight.saturating_sub(1),
+            Outcome::FrameDone => {
+                self.in_flight = self.in_flight.saturating_sub(1);
+                self.stats.frame_done();
+            }
         }
     }
 

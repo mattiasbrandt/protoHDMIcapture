@@ -13,6 +13,7 @@ mod desktop;
 mod duplicate;
 mod feed;
 mod framegen;
+mod gpustat;
 mod gputime;
 mod keys;
 mod level;
