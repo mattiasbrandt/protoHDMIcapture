@@ -44,6 +44,11 @@
 // - Neither: ffx's interpolation along the forward flow (interpolate.wgsl).
 // A blend of the background with the object in front of it, the halo
 // around a moving edge, is what the one-sided cases replace.
+//
+// Before all that, the static-HUD mask (hud_mask.wgsl, #73 step 4): where
+// the pixel, or where the forward flow would fetch it from, is a block of
+// still HUD, the two frames are blended unmoved, so HUD text over a moving
+// background is not dragged along with the background.
 
 struct Interp {
     size: vec2f,
@@ -54,6 +59,10 @@ struct Interp {
     of_size: vec2i,
     max_motion: f32,
     hud: f32,
+    // The HUD mask's blocks (8x8 frame pixels each); use_mask 0: none.
+    mask_size: vec2i,
+    use_mask: u32,
+    _pad: u32,
 }
 
 @group(0) @binding(0) var<uniform> ip: Interp;
@@ -63,6 +72,12 @@ struct Interp {
 @group(0) @binding(4) var<storage, read> flow_n: array<vec2i>;
 @group(0) @binding(5) var<storage, read> scd: array<u32>;
 @group(0) @binding(6) var<storage, read> flow_p: array<vec2i>;
+@group(0) @binding(7) var<storage, read> hud_mask: array<u32>;
+
+fn masked(y: vec2f) -> bool {
+    let b = clamp(vec2i(floor(y / 8.0)), vec2i(0), ip.mask_size - 1);
+    return hud_mask[b.y * ip.mask_size.x + b.x] != 0u;
+}
 
 fn at_block(b: vec2i) -> i32 {
     let at = clamp(b, vec2i(0), ip.of_size - 1);
@@ -157,6 +172,12 @@ fn one_way(y: vec2f, at_next: vec4f) -> vec4f {
         let d = abs(at_next.rgb - at_prev.rgb);
         if (max(d.r, max(d.g, d.b)) <= ip.hud) {
             return at_next;
+        }
+    }
+    if (ip.use_mask != 0u) {
+        let half_v = 0.5 * vn;
+        if (masked(y) || masked(y - half_v) || masked(y + half_v)) {
+            return vec4f((0.5 * (at_next + textureLoad(prev_frame, pix, 0))).rgb, 1.0);
         }
     }
     var motions: array<vec2f, 4>;

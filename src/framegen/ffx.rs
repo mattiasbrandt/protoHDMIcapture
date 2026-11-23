@@ -21,7 +21,8 @@
 //! - **Interpolation** into the output, a render pass at the frames' size;
 //!   `ffx-quality` searches the flow both ways (the previous frame's
 //!   blocks into the new frame too) and interpolates knowing which frame
-//!   sees a region (interpolate_two.wgsl).
+//!   sees a region (interpolate_two.wgsl), and keeps blocks of still HUD
+//!   (hud_mask.wgsl, after openfg's static-UI mask) blended unmoved.
 //!
 //! What differs from the SDK, and why:
 //! - **No wave (subgroup) operations.** The SDK reduces with wave sums and
@@ -82,14 +83,23 @@ pub struct Quality {
     /// used alone, instead of a blend of the background with the object
     /// (the halo around moving edges).
     pub two_way: bool,
+    /// The static-HUD mask (hud_mask.wgsl, after openfg's, #73 step 4):
+    /// blocks of still, high-contrast detail (HUD text, a minimap) are
+    /// blended unmoved, not warped with the background moving behind
+    /// them. With `two_way` only (its interpolation reads the mask).
+    pub hud_mask: bool,
 }
 
 impl Quality {
     /// `ffx`: #68's generator, unchanged.
-    pub const FAST: Self = Self { scale: 2, radius: 8, refine: false, two_way: false };
+    pub const FAST: Self = Self { scale: 2, radius: 8, refine: false, two_way: false, hud_mask: false };
     /// `ffx-quality`.
-    pub const BEST: Self = Self { scale: 1, radius: 16, refine: true, two_way: true };
+    pub const BEST: Self = Self { scale: 1, radius: 16, refine: true, two_way: true, hud_mask: true };
 }
+
+/// New-frame pairs a block must stay static HUD in a row before it is
+/// masked: a background that stops for a moment is not a HUD.
+const HUD_FRAMES: u32 = 3;
 /// The coarsest level is at least this many luma pixels on its short side
 /// (the search reads 4-pixel words and 8x8 blocks).
 const MIN_LEVEL_SIDE: u32 = 8;
@@ -201,6 +211,8 @@ struct Pipelines {
     filter: wgpu::ComputePipeline,
     scale: wgpu::ComputePipeline,
     refine: wgpu::ComputePipeline,
+    /// `Quality::hud_mask`: the detector and its dilation.
+    hud: Option<(wgpu::ComputePipeline, wgpu::ComputePipeline)>,
     interpolate: wgpu::RenderPipeline,
     interpolate_layout: wgpu::BindGroupLayout,
     /// `Quality::two_way`: interpolate_two.wgsl, and its layout (the
@@ -235,6 +247,20 @@ struct State {
     /// The flow from the new frame back to the previous one, and with
     /// `Quality::two_way` from the previous frame on to the new one.
     dirs: Vec<Direction>,
+    /// `Quality::hud_mask`'s buffers, kept from call to call (the counts
+    /// are the mask's history).
+    hud: Option<HudState>,
+    /// Bound as the mask when there is none (two-way without hud_mask).
+    no_mask: wgpu::Buffer,
+}
+
+struct HudState {
+    blocks: (u32, u32),
+    params: wgpu::Buffer,
+    counts: wgpu::Buffer,
+    mask: wgpu::Buffer,
+    dilated: wgpu::Buffer,
+    dilate: wgpu::BindGroup,
 }
 
 /// One direction's flow: the search from one frame's luma into the
@@ -315,6 +341,10 @@ impl State {
                 i(out_size.1),
                 f(MAX_MOTION),
                 f(HUD),
+                i(size.0.div_ceil(8)),
+                i(size.1.div_ceil(8)),
+                (q.hud_mask as u32).to_le_bytes(),
+                0u32.to_le_bytes(),
             ]
             .concat();
             uniform(device, "ffx interpolate", &bytes)
@@ -401,6 +431,23 @@ impl State {
                 Direction { flow_filtered, search, filter, scale, fine }
             })
             .collect();
+        let hud = q.hud_mask.then(|| {
+            let blocks = (size.0.div_ceil(8), size.1.div_ceil(8));
+            let i = |v: u32| (v as i32).to_le_bytes();
+            let bytes: Vec<u8> =
+                [i(size.0), i(size.1), i(blocks.0), i(blocks.1), HUD_FRAMES.to_le_bytes(), [0; 4], [0; 4], [0; 4]].concat();
+            let params = uniform(device, "ffx hud", &bytes);
+            let cells = u64::from(blocks.0 * blocks.1) * 4;
+            let (counts, mask, dilated) = (
+                storage(device, "ffx hud counts", cells),
+                storage(device, "ffx hud mask", cells),
+                storage(device, "ffx hud dilated", cells),
+            );
+            let (_, dilate_pipeline) = p.hud.as_ref().expect("made with hud_mask");
+            let dilate = bind(device, dilate_pipeline, "ffx hud dilate", &[b(&params), b(&mask), b(&dilated)]);
+            HudState { blocks, params, counts, mask, dilated, dilate }
+        });
+        let no_mask = storage(device, "ffx no hud mask", 4);
         Self {
             size,
             src,
@@ -417,6 +464,8 @@ impl State {
             histograms,
             divergence,
             dirs,
+            hud,
+            no_mask,
         }
     }
 }
@@ -469,6 +518,7 @@ impl Ffx {
                     read_only_storage(4),
                     read_only_storage(5),
                     read_only_storage(6),
+                    read_only_storage(7),
                 ],
             });
             let pipeline = crate::app::pipeline(
@@ -496,6 +546,12 @@ impl Ffx {
             filter: compute(device, "ffx filter", include_str!("ffx/filter.wgsl")),
             scale: compute(device, "ffx scale", include_str!("ffx/scale.wgsl")),
             refine: compute(device, "ffx refine", include_str!("ffx/refine.wgsl")),
+            hud: quality.hud_mask.then(|| {
+                (
+                    compute(device, "ffx hud", include_str!("ffx/hud_mask.wgsl")),
+                    compute(device, "ffx hud dilate", include_str!("ffx/hud_dilate.wgsl")),
+                )
+            }),
             interpolate,
             interpolate_layout,
             interpolate_two,
@@ -571,6 +627,23 @@ impl Ffx {
         }
         encoder.copy_buffer_to_buffer(&s.filtered_histogram, 0, &s.previous_histogram, 0, HISTOGRAM_BINS * 4);
         encoder.clear_buffer(&s.histogram, 0, None);
+        // The HUD detector reads this pair's frames: bound per call.
+        let hud = s.hud.as_ref().map(|h| {
+            let (detect, _) = p.hud.as_ref().expect("made with hud_mask");
+            let group = bind(
+                device,
+                detect,
+                "ffx hud",
+                &[
+                    h.params.as_entire_binding(),
+                    wgpu::BindingResource::TextureView(prev),
+                    wgpu::BindingResource::TextureView(next),
+                    h.counts.as_entire_binding(),
+                    h.mask.as_entire_binding(),
+                ],
+            );
+            (h, group)
+        });
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("ffx flow"), timestamp_writes: None });
         pass.set_pipeline(&p.histogram);
         pass.set_bind_group(0, &s.histograms[0], &[]);
@@ -605,6 +678,15 @@ impl Ffx {
                 let (gx, gy) = groups(f.size, 16, 4);
                 pass.dispatch_workgroups(gx, gy, 1);
             }
+        }
+        if let (Some((h, group)), Some((detect, dilate))) = (&hud, &p.hud) {
+            let (gx, gy) = groups(h.blocks, 8, 8);
+            pass.set_pipeline(detect);
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(gx, gy, 1);
+            pass.set_pipeline(dilate);
+            pass.set_bind_group(0, &h.dilate, &[]);
+            pass.dispatch_workgroups(gx, gy, 1);
         }
     }
 }
@@ -645,6 +727,8 @@ impl Generator for Ffx {
         let (pipeline, layout) = match (&p.interpolate_two, s.dirs.get(1)) {
             (Some((pipeline, layout)), Some(backward)) => {
                 entries.push(wgpu::BindGroupEntry { binding: 6, resource: backward.output().as_entire_binding() });
+                let mask = s.hud.as_ref().map_or(&s.no_mask, |h| &h.dilated);
+                entries.push(wgpu::BindGroupEntry { binding: 7, resource: mask.as_entire_binding() });
                 (pipeline, layout)
             }
             _ => (&p.interpolate, &p.interpolate_layout),
@@ -768,6 +852,35 @@ mod tests {
             }
         }
         sum as f64 / n as f64
+    }
+
+    /// The HUD overlay's rectangle: (x0, y0, x1, y1).
+    const OVERLAY: (i32, i32, i32, i32) = (64, 64, 176, 96);
+
+    /// Noise moved by `by`, under a static HUD overlay: sparse glyph cores
+    /// (opaque white, about one pixel in 16) with anti-aliased edges (50 %
+    /// white over what is behind), as HUD text over a moving scene.
+    fn hud_scene(w: u32, h: u32, by: (i32, i32)) -> (Vec<u8>, Vec<bool>) {
+        let core = |x: i32, y: i32| {
+            let (x0, y0, x1, y1) = OVERLAY;
+            (x0..x1).contains(&x) && (y0..y1).contains(&y) && hash(x, y, 77).is_multiple_of(16)
+        };
+        let mut px = noise(w, h, by, 13, 0..0);
+        let mut cores = vec![false; (w * h) as usize];
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let i = (y as u32 * w + x as u32) as usize;
+                if core(x, y) {
+                    px[i * 4..i * 4 + 3].copy_from_slice(&[255, 255, 255]);
+                    cores[i] = true;
+                } else if core(x - 1, y) || core(x + 1, y) || core(x, y - 1) || core(x, y + 1) {
+                    for k in 0..3 {
+                        px[i * 4 + k] = ((u16::from(px[i * 4 + k]) + 255) / 2) as u8;
+                    }
+                }
+            }
+        }
+        (px, cores)
     }
 
     struct Rig {
@@ -1006,6 +1119,52 @@ mod tests {
         let best = halo(&rig.generate(&mut Ffx::new(&rig.device, Quality::BEST), &prev, &next), &truth, w, (88, 72));
         eprintln!("halo (mean abs error, 8-bit levels): ffx {fast:.2}, ffx-quality {best:.2}");
         assert!(best * 2.5 <= fast, "ffx-quality {best:.2} against ffx {fast:.2}: not 2.5 times smaller");
+    }
+
+    /// The static-HUD mask: HUD text over a textured background moving
+    /// (8, 4) a frame, so the flow under the text follows the background.
+    /// Without the mask the warp drags the white glyph pixels to where the
+    /// true halfway picture has none: ghost text. After three pairs the
+    /// overlay is masked: no ghost pixels, and every opaque core pixel
+    /// exact (#73 step 4).
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn gpu_ffx_quality_keeps_a_static_hud() {
+        let rig = Rig::new(SIZE, wgpu::Features::empty());
+        let (w, h) = SIZE;
+        let frame = |k: i32| hud_scene(w, h, (8 * k, 4 * k)).0;
+        let (truth, cores) = hud_scene(w, h, (28, 14));
+        // Ghost: glyph white (every channel at least 240) where the truth
+        // has no glyph pixel (noise has all three that high about once in
+        // 4000 pixels).
+        let white = |px: &[u8], i: usize| px[i * 4..i * 4 + 3].iter().all(|&c| c >= 240);
+        let ghosts_and_cores = |quality: Quality| {
+            let mut ffx = Ffx::new(&rig.device, quality);
+            let mut out = Vec::new();
+            for k in 0..4 {
+                out = rig.generate(&mut ffx, &frame(k), &frame(k + 1));
+            }
+            let (x0, y0, x1, y1) = OVERLAY;
+            let (mut ghosts, mut exact, mut all) = (0, 0, 0);
+            for y in y0 - 8..y1 + 8 {
+                for x in x0 - 8..x1 + 8 {
+                    let i = (y as u32 * w + x as u32) as usize;
+                    if cores[i] {
+                        all += 1;
+                        exact += usize::from(out[i * 4..i * 4 + 3] == truth[i * 4..i * 4 + 3]);
+                    } else if white(&out, i) && !white(&truth, i) {
+                        ghosts += 1;
+                    }
+                }
+            }
+            (ghosts, exact, all)
+        };
+        let (ghosts, exact, all) = ghosts_and_cores(Quality::BEST);
+        let (unmasked, _, _) = ghosts_and_cores(Quality { hud_mask: false, ..Quality::BEST });
+        eprintln!("HUD ghost pixels: masked {ghosts}, unmasked {unmasked}; cores exact {exact} of {all}");
+        assert_eq!(exact, all, "every opaque core pixel exact");
+        assert!(unmasked >= 20, "the scene drags the text without the mask: {unmasked} ghost pixels");
+        assert!(ghosts * 10 <= unmasked, "masked {ghosts} ghost pixels against {unmasked}");
     }
 
     /// A dark picture, then an unrelated bright one: a scene change, and the
