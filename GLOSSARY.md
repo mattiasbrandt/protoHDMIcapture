@@ -109,6 +109,18 @@ refreshes, latency, CPU, the audio's delay, underruns and xruns, the
 monitors, and recent events. Never part of the overlay.
 _Avoid_: debug window, stats
 
+**Duplicate frame**:
+A card frame showing the same picture as the one before it, because the
+source sent its picture again: a 30 fps game in a 60 Hz signal sends each
+picture twice. The others are new frames.
+_Avoid_: repeat, repeated frame (that is close to a repeated refresh)
+
+**Frame generation**:
+Making pictures between two new frames, shown in the place of duplicate
+frames, so a 30 fps source looks like 60. Each one is a **generated
+frame**; it costs about one refresh of delay.
+_Avoid_: interpolation (one way to do it), frame enhancer, motion smoothing
+
 **Repeated refresh**:
 A monitor refresh that showed the previous card frame again because no new
 one was ready: a dropped or late frame, seen as judder.

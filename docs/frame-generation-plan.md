@@ -1,149 +1,118 @@
 # Frame generation and upscaling: plan
 
-Proposal, 2026-11-23, tracked in #63. Not grilled yet: the decisions at the
-end are open, and no slice starts before they are settled. The findings this
-rests on, with sources, are in
-[`docs/research/frame-generation.md`](research/frame-generation.md).
+Decided 2026-11-23 in a grilling on #63. The findings this rests on, with
+sources, are in [`docs/research/frame-generation.md`](research/frame-generation.md).
 
 ## Goal
 
 A 30 fps console game, GTA 6 on PS5 first, shown at 60 fps and optionally
 upscaled, inside protoHDMIcapture. The first test bed is AMD on Linux with
-the MS2130 card. The design serves every GPU wgpu drives, on Linux and
-Windows, and any capture card the project supports.
+the MS2130 card. The design serves every dedicated GPU wgpu drives, on Linux
+and Windows, and any capture card the project supports.
 
 Out of scope:
 - Anything that needs the game's motion vectors or depth: DLSS, FSR 2/3/4,
   FSR frame generation, XeSS. A capture card never delivers them.
-- Copying code whose licence does not allow it into an MIT OR Apache-2.0
-  project. Reading any of it to learn from is fine; a port keeps the
-  source's notice.
+- Copying code whose licence does not allow it. Reading any of it to learn
+  from is fine; a port keeps the source's notice.
+- protoHDMIcapture legacy: neither feature is brought to view.sh.
+
+## What ships (once a winner exists)
+
+- **Frame generation** (GLOSSARY.md) is opt-in: `FRAMEGEN=off|2x`, off by
+  default.
+  - It is meant for dedicated gaming GPUs. On an integrated GPU it is
+    refused at startup, with a message saying so.
+  - It is a live change: `g`, with the Tab overlay open, switches it
+    off ↔ 2x, the overlay row shows its value, and `w` saves it.
+  - Only 2x: one generated frame between two new frames. A later 4x for
+    high-refresh monitors is the reason the value names a multiplier.
+  - A generated frame only ever replaces a **duplicate frame**, and only
+    while the cadence is a steady 2:2 (a 30 fps source in a 60 Hz signal).
+    A 60 fps source, a menu, a frame-rate dip, a scene cut and the first
+    frames all show real frames, as today. It never adds more than one
+    refresh of delay.
+- **Upscaling:** one new `SCALING` preset named `sharp`, which `c` cycles
+  to after high-quality. FSR 1 and NVIDIA Image Scaling are both tried;
+  only the winner lands.
 
 ## The shape
 
 ```
-card frame ──► new-frame detection ──► (new)    ──► optical flow ──► generated frame ─┐
-                    │                                                                 ├─► scale (SCALING, FSR 1) ─► present
-                    └─────────────────► (repeat) ──► the held real frame ─────────────┘
+card frame ─► duplicate-frame detection ─► schedule ─┬─► generated frame (new frame in a 2:2 cadence)
+                                                     ├─► held real frame (the duplicate that follows)
+                                                     └─► real frame (anything else)
+                                                                  │
+                                                                  ▼
+                                                  scale (SCALING) ─► present
 ```
 
-Generated frames are presented when a new frame arrives. The real frame
-follows when its repeat arrives, one refresh later. That makes the card's
-own cadence the clock, the way protoHDMIcapture presents today
-(`src/pacing.rs`). When the cadence breaks (a third repeat, a skipped
-frame) or a scene cut is detected, the real frame shows as today, and
-nothing is generated across the gap.
+The card's own cadence is the clock: protoHDMIcapture still presents once
+per card frame (`src/pacing.rs`); only what it presents changes.
+Generation runs on the convert pass's RGB frames at the capture's size,
+before scaling.
 
-## Steps
+## Groundwork, on `main` first
 
-Each step lands on its own and is useful without the next.
+| # | What | Notes |
+|---|---|---|
+| #64 | Dev recorder and replay | `cargo build --features dev` only: `--record <name> --seconds N`, headless, raw frames to `/var/tmp/protohdmicapture-clips/` (on disk; `/tmp` is RAM-backed on many desktops). Keepers are copied by hand to `~/.local/share/protohdmicapture/clips/`. `--replay <file>` plays a clip through the normal window. |
+| #65 | Duplicate-frame detection | `mpdecimate`'s 8×8 luma block test on the capture thread; the source's frame rate, cadence and cadence breaks on the dashboard; the kind travels on the frame's tag. |
+| #66 | The frame-generation seam | The pure schedule, the generator trait, the window keeping the previous new frame, the integrated-GPU refusal, a `copy` test generator and a new-frames-only mode for external layers. Driven by a dev flag. |
 
-### 1. New-frame detection
+The `FRAMEGEN` setting, its key, overlay row and README entry land
+together with the winning approach, so an automatic release never shows a
+setting that does nothing yet.
 
-Tell a new source frame from a repeat by content. Compare each card frame
-with the previous one as a block-difference score over a downsampled luma
-(the method of FFmpeg's `mpdecimate`). The threshold sits above MJPEG and
-noise jitter and below real motion.
+## Round one: local branches, judged on the same clips
 
-- The dashboard shows the source's own frame rate next to the card's
-  ("30.0 fps in a 60 Hz signal"), plus a count of cadence breaks.
-- A presenting mode that shows only new frames. Step 3 needs it, and a
-  user who runs an external layer gets it too.
-- **Done when:** unit tests pass on synthetic sequences (2:2, a break to
-  2:3, a still scene, noise below the threshold), and one card run of GTA 6
-  on PS5 records its real cadence and break rate on the dashboard. The
-  card run needs a go.
+| # | Branch | Approach |
+|---|---|---|
+| #67 | `fg-blend` | Blend the two frames: the baseline, and a check that the seam works |
+| #68 | `fg-ffx` | AMD FidelityFX Optical Flow (SDK v1.1.4, MIT) ported to WGSL, plus an interpolation pass: the main candidate |
+| #69 | `fg-layer` | No code: openfg, afmf-linux and lsfg-vk over the new-frames-only mode, enabled by environment variable for protoHDMIcapture only |
+| #70 | `up-fsr1` | FSR 1 as `SCALING=sharp` |
+| #71 | `up-nis` | NVIDIA Image Scaling as `SCALING=sharp` |
 
-### 2. Spatial upscaling
+Branches stay local.
 
-FSR 1 (EASU + RCAS) or NVIDIA Image Scaling, ported to WGSL as a fourth
-`SCALING` preset, next to the libplacebo-derived filters in `src/scale.rs`.
-Both are MIT.
+**Recordings.** The first clips are headless: the user sets up GTA 6 with
+the character standing still, and the agent records. Each recording
+reports its share of new frames and its brightness per second, so a clip
+that went idle or dark is flagged. The fallback is the user playing while
+the agent records.
 
-- A 1:1 feed stays the frame itself, as it does for the other presets.
-- **Done when:** the preset is selectable in the settings, the wizard and
-  the `c` key; a GPU test in `src/scale.rs`'s existing style checks its
-  output on a test pattern; and `--stats` GPU time is recorded at
-  1080p → 1440p and 1080p → 4K on the AMD GPU.
+**Judging.** The user judges by eye; there is no objective score, since
+GTA 6 gives no 60 fps ground truth. The agent replays the same clips
+through each branch and tabulates:
+- GPU ms per generated frame (`--stats`);
+- generated and missed frames;
+- screenshots of the same moments (HUD, a fast pan, a scene cut).
 
-### 3. Quality experiment with external layers
+Then one card session: the user watches each branch live and picks.
+Latency is measured in the same session. `fg-ffx` passes if real frames'
+kernel → presented median stays within 44.9 ms (`docs/testing.md`) +
+16.7 ms + its GPU time.
 
-Before porting anything, find out whether optical-flow interpolation looks
-good enough on GTA 6. Run protoHDMIcapture in step 1's new-frames-only
-mode under openfg or afmf-linux (both MIT, both built on FidelityFX Optical
-Flow). If the user owns Lossless Scaling, run it under lsfg-vk as well.
-Nothing is bundled.
+**The losers.** Their issues close as not planned, with the scores kept
+on them.
 
-- Judge the HUD, fast camera pans and scene cuts by eye on the PS5, and
-  read latency from `--stats`. A layer's extra presents may confuse the
-  Wayland feedback; if they do, say so.
-- **Done when:** a written verdict on #63 says go, no-go, or go with a
-  named mitigation (a HUD mask, a lower flow resolution). Card run, needs a
-  go.
+## Later, only if round one falls short
 
-### 4. Frame generation in protoHDMIcapture
-
-Port FidelityFX Optical Flow (from SDK v1.1.x, MIT) and an interpolation
-pass to WGSL compute. afmf-linux's and openfg's portability edits are the
-reference. The feature goes behind an off-by-default setting.
-
-- It uses wgpu's `Features::SUBGROUP` where the adapter has it. Without it,
-  the setting reports "not available on this GPU" at startup, not mid-run.
-- Pacing as in "The shape" above; scene cuts and cadence breaks fall back
-  to the real frame.
-- **Done when:**
-  - pure tests on the pacing schedule pass, including the break and cut
-    fallbacks;
-  - a GPU test interpolates a moving synthetic pattern within a set error;
-  - one card run shows real frames' kernel → presented median within the
-    44.9 ms baseline (`docs/testing.md`) + 16.7 ms + the measured compute
-    time, with the generated frames' share counted.
-
-  The card run needs a go.
-
-### 5. Vendor fast paths (only if step 4 falls short)
-
-Each is gated by a measurement showing step 4 too slow or too poor on that
-vendor:
-- AMD AMF FRC on Windows (DX11/DX12 interop; MIT headers, runtime in the
-  driver);
-- NVIDIA optical flow (`VK_NV_optical_flow`) through the driver, not the
-  SDK, which cannot ship with an open-source app;
-- RTX Video Super Resolution for upscaling on Windows.
-
-### Not planned
-
-- ML interpolation (RIFE via ncnn on Vulkan): only if step 3 or 4 shows
-  optical flow's quality falls short. First a timing test on the AMD GPU at
-  540p.
-- Extrapolation, which avoids the wait but ghosts: research only.
+- **Vendor fast paths:**
+  - AMD AMF FRC on Windows (DX11/DX12);
+  - NVIDIA optical flow through the driver (`VK_NV_optical_flow`), not
+    the SDK, which cannot ship with an open-source app;
+  - RTX Video Super Resolution.
+- **ML interpolation (RIFE via ncnn):** first a timing test on the AMD
+  GPU.
+- **Extrapolation:** it avoids the wait, but it is research only.
 
 ## Capture cards
 
-No purchase is needed for steps 1–4. The MS2130 delivers uncompressed YUYV
-1080p60 over USB 3, which is the right input for 30 → 60, and it already
-works on this project's Linux path. A better card buys:
-
-- **Lower card latency.** Frame generation adds to the chain, so the card's
-  own internal delay matters more. The MS2130's is reported at 6 to 11
-  frames, unmeasured.
-- **Headroom:** 1440p, 120 Hz or HDR capture.
-
-The research note's table lists candidate classes. Before buying, check
-that the store takes returns and that `v4l2-ctl --list-formats-ext` on the
-card lists uncompressed modes. A 10 Gbit/s or HDR (P010) card also needs
-project work first: capture-card profiles take a `Link:` of 480 or 5000
-only, and `FMT` has no P010.
-
-## Open decisions
-
-- Is the added refresh plus compute acceptable as an opt-in setting? Is it
-  a live change on a key?
-- FSR 1, NIS, or both, as presets?
-- Names: the setting, and glossary terms for a new source frame, a repeat,
-  and a generated frame. "Repeated refresh" is already taken for the
-  monitor side.
-- Legacy: what a new `SCALING` value means for view.sh's mpv
-  ([ADR 0002](adr/0002-legacy-kept-best-effort.md): best effort; it may
-  read as balanced).
-- Buy a card now, or after step 3?
+The card decision waits until after round one. The MS2130 delivers
+uncompressed YUYV 1080p60 over USB 3, the right input for 30 → 60. A
+better card buys lower card latency (unmeasured) and headroom for 1440p,
+120 Hz or HDR. A 10 Gbit/s or HDR (P010) card also needs project work
+first: capture-card profiles take a `Link:` of 480 or 5000 only, and `FMT`
+has no P010.
