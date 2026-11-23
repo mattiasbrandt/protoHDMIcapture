@@ -15,9 +15,9 @@ Windows, and any capture card the project supports.
 Out of scope:
 - Anything that needs the game's motion vectors or depth: DLSS, FSR 2/3/4,
   FSR frame generation, XeSS. A capture card never delivers them.
-- Code from lsfg-vk v2 (CC BY-NC-ND), SVP, MVTools (GPL), the NVIDIA SDKs
-  or other binary-only SDKs. Only MIT or Apache-licensed sources are
-  vendored, with their notice kept.
+- Copying code whose licence does not allow it into an MIT OR Apache-2.0
+  project. Reading any of it to learn from is fine; a port keeps the
+  source's notice.
 
 ## The shape
 
@@ -58,7 +58,7 @@ noise jitter and below real motion.
 
 FSR 1 (EASU + RCAS) or NVIDIA Image Scaling, ported to WGSL as a fourth
 `SCALING` preset, next to the libplacebo-derived filters in `src/scale.rs`.
-Both are MIT. Confirm the LICENSE in the FSR repo itself before porting.
+Both are MIT.
 
 - A 1:1 feed stays the frame itself, as it does for the other presets.
 - **Done when:** the preset is selectable in the settings, the wizard and
@@ -107,8 +107,8 @@ Each is gated by a measurement showing step 4 too slow or too poor on that
 vendor:
 - AMD AMF FRC on Windows (DX11/DX12 interop; MIT headers, runtime in the
   driver);
-- NVIDIA optical flow (`VK_NV_optical_flow`), after a licence review of
-  calling it without the SDK;
+- NVIDIA optical flow (`VK_NV_optical_flow`) through the driver, not the
+  SDK, which cannot ship with an open-source app;
 - RTX Video Super Resolution for upscaling on Windows.
 
 ### Not planned

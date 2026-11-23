@@ -8,9 +8,9 @@ follows from them is [`docs/frame-generation-plan.md`](../frame-generation-plan.
 Nothing here was run on a card.
 
 Five research passes went into this note. Their claims were spot-checked
-against the cloned sources where they decide something: the licences, the
-lsfg-vk present-mode override, the FidelityFX licence split, AMF FRC's
-platforms, and Veyra's and SmoovPlay's READMEs.
+against the cloned sources where they decide something: the lsfg-vk
+present-mode override, AMF FRC's platforms, and Veyra's and SmoovPlay's
+READMEs.
 
 Verification key: **[fetched]** = read at the source this session (page,
 repo file or cloned source); **[snippet]** = search-result text only;
@@ -29,7 +29,7 @@ repo file or cloned source); **[snippet]** = search-result text only;
   DLSS-G, or RIFE on TensorRT. Veyra alone offers AMD (AMF FRC) and Intel
   paths. None runs on Linux.
 - **The AMD route on Linux exists and is open:** AMD's FidelityFX Optical
-  Flow shaders are MIT-licensed. Two MIT Vulkan layers, afmf-linux and
+  Flow shaders are open source. Two open Vulkan layers, afmf-linux and
   openfg, already interpolate with them on RADV, at about 0.6 ms of GPU time
   per generated frame at 3440×1440 (RX 9070 XT). Ported to WGSL, they
   would run on every GPU wgpu drives.
@@ -41,7 +41,7 @@ repo file or cloned source); **[snippet]** = search-result text only;
 - **Cost: about one refresh (16.7 ms) of added latency, plus compute.**
   [derived] It is a refresh, not a full 33 ms game frame, because the
   generated frame takes the slot where the repeat would have shown (below).
-- **Upscaling adds no wait**, only its own GPU time. FSR 1 and NIS are MIT,
+- **Upscaling adds no wait**, only its own GPU time. FSR 1 and NIS are open,
   spatial and small enough to port to WGSL next to the existing scalers
   (`src/scale.rs`).
 
@@ -111,15 +111,15 @@ product does this for video, so it is a research option only.
 
 From each tool's own repo or store page [fetched unless marked].
 
-| Tool | What it is | Frame generation | Upscaling | Platform | Licence | Latency claim |
-|---|---|---|---|---|---|---|
-| Veyra ([Likely7/Veyra-NRVideo](https://github.com/Likely7/Veyra-NRVideo)) | D3D12 capture-card / PS5 Remote Play player; also an OBS filter | NVIDIA Video FG, DLSS-G, AMD AMF FRC, XeSS | RTX VSR, FSR | Windows (OBS filter on Linux) | GPL-3.0 | "10–20 ms less than OBS" [snippet] |
-| Veyra-NRVideo | the same repo's name. `veyranrvideo/VeyraNRVideo` is a sourceless lookalike: avoid | — | — | — | — | — |
-| SmoovPlay ([smoovplay/smoovplay](https://github.com/smoovplay/smoovplay)) | PS5 Remote Play first, capture card experimental | RIFE on TensorRT, or NVIDIA VFG | FSR 1, RTX VSR | Windows | MIT | +35.4 / 35.8 ms median, self-measured |
-| NeuralScreen ([perseval-BLR/NeuralScreen](https://github.com/perseval-BLR/NeuralScreen)) | window/desktop overlay, no capture input | DLSS-G | NVIDIA NR | Windows, RTX | PolyForm Strict (not open source); bundles a leaked NVIDIA DLL per its README | 25–30 ms (README) vs 40–60 ms (GameGPU) |
-| NitLink ([nitlink-dev/nitlink](https://github.com/nitlink-dev/nitlink), Steam 5346980) | capture viewer; the Steam build adds FG | NVIDIA VFG (subscription) | — | Windows, RTX 3080+ | MIT viewer, EULA'd FG | none |
-| NAIMAN | no primary source found | — | — | — | — | — |
-| Lossless Scaling (Steam 993090) | screen-capture overlay over any window | LSFG (proprietary, optical flow) | LS1, FSR, NIS, Anime4K, … | Windows; Linux via lsfg-vk | proprietary | ~10 ms at 40→80 [snippet] |
+| Tool | What it is | Frame generation | Upscaling | Platform | Latency claim |
+|---|---|---|---|---|---|
+| Veyra ([Likely7/Veyra-NRVideo](https://github.com/Likely7/Veyra-NRVideo)) | D3D12 capture-card / PS5 Remote Play player; also an OBS filter | NVIDIA Video FG, DLSS-G, AMD AMF FRC, XeSS | RTX VSR, FSR | Windows (OBS filter on Linux) | "10–20 ms less than OBS" [snippet] |
+| Veyra-NRVideo | the same repo's name. `veyranrvideo/VeyraNRVideo` is a sourceless lookalike: avoid | — | — | — | — |
+| SmoovPlay ([smoovplay/smoovplay](https://github.com/smoovplay/smoovplay)) | PS5 Remote Play first, capture card experimental | RIFE on TensorRT, or NVIDIA VFG | FSR 1, RTX VSR | Windows | +35.4 / 35.8 ms median, self-measured |
+| NeuralScreen ([perseval-BLR/NeuralScreen](https://github.com/perseval-BLR/NeuralScreen)) | window/desktop overlay, no capture input | DLSS-G | NVIDIA NR | Windows, RTX | 25–30 ms (README) vs 40–60 ms (GameGPU) |
+| NitLink ([nitlink-dev/nitlink](https://github.com/nitlink-dev/nitlink), Steam 5346980) | capture viewer; the Steam build adds FG | NVIDIA VFG (subscription) | — | Windows, RTX 3080+ | none |
+| NAIMAN | no primary source found | — | — | — | — |
+| Lossless Scaling (Steam 993090) | screen-capture overlay over any window | LSFG (proprietary, optical flow) | LS1, FSR, NIS, Anime4K, … | Windows; Linux via lsfg-vk | ~10 ms at 40→80 [snippet] |
 
 Veyra's README carries a Pump.fun token address.
 
@@ -140,10 +140,8 @@ first, latency self-reported.
 
 - **lsfg-vk** is a Vulkan implicit layer that runs LSFG's shaders from the
   user's own `Lossless.dll` (the user must own Lossless Scaling on Steam).
-  v1.0.0 was MIT. v2 (2026-09-05) is **CC BY-NC-ND 4.0**: no commercial use,
-  no derivatives ([lsfg-vk.dev blog](https://lsfg-vk.dev/blog/important-changes-to-lsfg-vk/)
-  [fetched]). Nothing of it may be copied into protoHDMIcapture. A user may
-  run it as a separate program.
+  The user runs it as a separate program
+  ([lsfg-vk.dev](https://lsfg-vk.dev/) [fetched]).
 - It hooks swapchain creation and present. It forces FIFO present mode
   (`override_present_mode`, default true) and adds swapchain images
   [fetched, v1 source and v2 docs]. protoHDMIcapture asks for Mailbox and
@@ -157,40 +155,32 @@ first, latency self-reported.
   ([Steam page](https://store.steampowered.com/app/993090/Lossless_Scaling/)
   [fetched]). It would capture protoHDMIcapture's window, with the same
   duplicate problem [unverified].
-- afmf-linux and openfg are MIT layers of the same kind, with the same
+- afmf-linux and openfg are open layers of the same kind, with the same
   constraints. Once protoHDMIcapture presents only new game frames, any of
   the three becomes a cheap quality experiment, with nothing bundled.
 
 ## Techniques, by what they need
 
-| Technique | Needs | On video alone | Added wait | GPU cost (published) | Licence | Vendors / OS | Path into protoHDMIcapture |
-|---|---|---|---|---|---|---|---|
-| FSR 1 (EASU + RCAS) | the frame | yes | none | 4K ≤ 0.40 ms on RX 6800 XT ([GPUOpen](https://gpuopen.com/fidelityfx-superresolution/) [fetched]) | MIT | all, all OSes | port to WGSL |
-| NVIDIA Image Scaling 1.0.3 | the frame | yes | none | not published | MIT (whole SDK) [fetched] | all (fp32 path is vendor-neutral) | port to WGSL |
-| FidelityFX Optical Flow + interpolation (as afmf-linux / openfg) | two frames | yes, with scene-change detection | one refresh | 560–610 µs per generated frame at 3440×1440, RX 9070 XT; ~3× on RX 7800 XT ([afmf-linux docs](https://github.com/serialexperimentslainnnn/afmf-linux) [fetched]) | MIT (SDK v1.1.x; the shader files keep MIT headers in v2) | any GPU with subgroup ops; tested on RADV only | port GLSL to WGSL compute; wgpu 30 has `Features::SUBGROUP` |
-| Frame blending (mpv `--tscale`) | two frames | yes | 1–2 frames | trivial | port the idea, no code | all | WGSL; ghosts on motion |
-| RIFE v4 | two frames | yes | one refresh + inference | 68 ms at 1080p on a TITAN X Pascal (2020 paper); ~11 ms per frame on RTX 3070 Ti (forum) [snippet] | MIT | NVIDIA (TensorRT), all via ncnn-Vulkan; no AMD figure | ncnn in its own Vulkan context, or a WGSL port of the network; heaviest |
-| AMD AMF FRC | two frames | yes | at least one refresh; "one extra frame time" with look-ahead on | not published | MIT headers, runtime ships in the AMD driver | AMD, **DX11/DX12 only** ([AMF_FRC_API.md](https://github.com/GPUOpen-LibrariesAndSDKs/AMF/blob/master/amf/doc/AMF_FRC_API.md) [fetched]) | Windows only; D3D interop |
-| NVIDIA Optical Flow (`VK_NV_optical_flow`, OF SDK) | two frames | yes | one refresh | not published | SDK licence forbids distribution and open-source use (clauses 4(b), 4(e)) [fetched] | NVIDIA Ampere+ in Vulkan | a raw Vulkan side path; licence review first |
-| NVIDIA RTX Video Super Resolution / Video FG | the frame(s) | yes | — | not published | NVIDIA SDK licence (not read) | NVIDIA RTX, Windows | what the Windows tools use; D3D interop |
-| AFMF (AMD driver) | driver-internal | yes | driver-side | — | proprietary | AMD, Windows only [snippet] | the user turns it on; not ours |
-| DLSS-G, FSR 3/4 FG, XeSS-FG, FSR 2/3/4 and XeSS upscaling | the game's motion vectors and depth | **no** | — | — | various, mostly binary-only | — | not possible on a capture |
+| Technique | Needs | On video alone | Added wait | GPU cost (published) | Vendors / OS | Path into protoHDMIcapture |
+|---|---|---|---|---|---|---|
+| FSR 1 (EASU + RCAS) | the frame | yes | none | 4K ≤ 0.40 ms on RX 6800 XT ([GPUOpen](https://gpuopen.com/fidelityfx-superresolution/) [fetched]) | all, all OSes | port to WGSL |
+| NVIDIA Image Scaling 1.0.3 | the frame | yes | none | not published | all (fp32 path is vendor-neutral) | port to WGSL |
+| FidelityFX Optical Flow + interpolation (as afmf-linux / openfg) | two frames | yes, with scene-change detection | one refresh | 560–610 µs per generated frame at 3440×1440, RX 9070 XT; ~3× on RX 7800 XT ([afmf-linux docs](https://github.com/serialexperimentslainnnn/afmf-linux) [fetched]) | any GPU with subgroup ops; tested on RADV only | port GLSL to WGSL compute; wgpu 30 has `Features::SUBGROUP` |
+| Frame blending (mpv `--tscale`) | two frames | yes | 1–2 frames | trivial | all | WGSL; ghosts on motion |
+| RIFE v4 | two frames | yes | one refresh + inference | 68 ms at 1080p on a TITAN X Pascal (2020 paper); ~11 ms per frame on RTX 3070 Ti (forum) [snippet] | NVIDIA (TensorRT), all via ncnn-Vulkan; no AMD figure | ncnn in its own Vulkan context, or a WGSL port of the network; heaviest |
+| AMD AMF FRC | two frames | yes | at least one refresh; "one extra frame time" with look-ahead on | not published | AMD, **DX11/DX12 only** ([AMF_FRC_API.md](https://github.com/GPUOpen-LibrariesAndSDKs/AMF/blob/master/amf/doc/AMF_FRC_API.md) [fetched]) | Windows only; D3D interop |
+| NVIDIA Optical Flow (`VK_NV_optical_flow`, OF SDK) | two frames | yes | one refresh | not published | NVIDIA Ampere+ in Vulkan | a raw Vulkan side path through the driver; NVIDIA's SDK itself cannot ship with an open-source app |
+| NVIDIA RTX Video Super Resolution / Video FG | the frame(s) | yes | — | not published | NVIDIA RTX, Windows | what the Windows tools use; D3D interop |
+| AFMF (AMD driver) | driver-internal | yes | driver-side | — | AMD, Windows only [snippet] | the user turns it on; not ours |
+| DLSS-G, FSR 3/4 FG, XeSS-FG, FSR 2/3/4 and XeSS upscaling | the game's motion vectors and depth | **no** | — | — | — | not possible on a capture |
 
-Licence traps, checked in the cloned sources:
-- The FidelityFX SDK v2 licence file (`license.md` in its docs folder)
-  grants binary-only redistribution by default. Its exception list puts the
-  optical-flow sources under MIT: `ffx_opticalflow.h` and the
-  `gpu/opticalflow/` shaders, e.g.
-  `ffx_opticalflow_compute_optical_flow_v5.h`. SDK v1.1.4's `LICENSE.txt` is
-  MIT for the whole SDK
-  ([v1.1.4 tag](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/v1.1.4/LICENSE.txt)
-  [fetched]). openfg vendors its optical flow from v1.1.4 with the notice
-  kept.
-- Intel's XeSS SDK is binary-only (Intel Simplified Software License).
-- MVTools (SVP's engine) is GPL and libplacebo is LGPL: external process or
-  dynamic link only. SVP itself is closed and personal-use only.
-- protoHDMIcapture is MIT OR Apache-2.0, so MIT shaders can be vendored with
-  their notice. A copyleft or no-derivatives source cannot.
+What we would copy, if a step ports code rather than reimplementing it
+(protoHDMIcapture is MIT OR Apache-2.0):
+- FSR 1, NIS and RIFE are MIT. Keep their notice in the ported files.
+- FidelityFX Optical Flow is MIT in SDK v1.1.4
+  ([LICENSE.txt](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/v1.1.4/LICENSE.txt)
+  [fetched]), and listed as an MIT exception in v2's licence file. Port
+  from v1.1.4, as openfg does, and keep AMD's notice.
 
 ## Capture cards: what makes a good input
 
