@@ -358,6 +358,45 @@ target/release/protohdmicapture --framegen-score CLIP --framegen MODE \
   controls' defaults; a pair a generator declines (a scene cut) is not
   scored, and counted. The whole 30 s clip takes about 15 s.
 
+## Testing on a GPU we have not measured (#87)
+
+Every GPU timing so far was taken on one AMD GPU (`gpustat.rs`'s
+`MEASURED`). A tester with another GPU, NVIDIA first, runs this and sends
+the output back; nothing here needs anything but the tester's own
+machine, a capture card for the live part, and a dev build.
+
+1. **Build** the commit or branch named in the request (the GPU
+   enhancements live on a branch until they ship):
+   `cargo build --release --features dev`, from inside the checkout.
+2. **Say what it runs on.** Every output below starts with the GPU line
+   (`summary: GPU …`, `score: on …`, the dashboard's "on" row): name,
+   vendor, driver, Wayland or X11. Also send `vulkaninfo --summary` (the
+   driver's own view) and, on NVIDIA, `nvidia-smi` once.
+3. **The headless GPU tests** (no card, no window):
+   `cargo test --release --features dev -- --ignored --nocapture gpu 2>&1 | tee gpu-tests.log`.
+   They time each pass, paced and back to back; send the log.
+4. **The score on a clip of your own** (#81; clips are game footage and
+   stay on your machine, only the numbers travel): record about 30 s while
+   playing (`target/release/protohdmicapture --record mine --seconds 30`,
+   see "Recording a clip"), then for each mode the build has:
+   `target/release/protohdmicapture --framegen-score /var/tmp/protohdmicapture-clips/mine.clip --framegen MODE 2>&1 | tee score-MODE.log`.
+5. **Live, about 5 minutes**:
+   `target/release/protohdmicapture --stats 2>&1 | tee live.log`; play,
+   open the overlay (Tab) and switch the enhancements as the build offers
+   them, about a minute each; then `q`. Send `live.log` and what you saw
+   (glitches, stutter, how it felt) with the time you saw it.
+6. **The GPU section**: open the dashboard (`d`) while an enhancement runs.
+   On NVIDIA it should say "read from NVIDIA NVML" with busy, clocks, VRAM,
+   power and temperature; compare one moment with `nvidia-smi`, and send
+   the dashboard's text and the `nvidia-smi` output. "not available: …"
+   is a result too: send its reason.
+7. **GameMode** (optional, see "GameMode (#77)"): with your own
+   `/etc/gamemode.ini`, `gamemoded -s` during an enhancement, and on NVIDIA
+   `nvidia-smi` for the clocks.
+
+Once a vendor's numbers are recorded on the issue, its id joins `MEASURED`
+and its results drop the "not yet measured" note.
+
 ## Signals
 
 - **Run a signal test in the foreground.** A job started with `&` from a
