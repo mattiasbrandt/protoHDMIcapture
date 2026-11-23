@@ -707,20 +707,55 @@ mod tests {
         fs::remove_dir_all(d).unwrap();
     }
 
+    /// Ten frames of rising brightness, each dequeued 3 ms after its
+    /// capture, then nothing.
+    struct Stepped(Format);
+
+    impl FrameSource for Stepped {
+        fn format(&self) -> Format {
+            self.0
+        }
+
+        fn start(&mut self) -> io::Result<Box<dyn Stream + '_>> {
+            Ok(Box::new(SteppedStream { size: self.0.frame_size(), n: 0 }))
+        }
+    }
+
+    struct SteppedStream {
+        size: usize,
+        n: u32,
+    }
+
+    impl Stream for SteppedStream {
+        fn next(&mut self, wait: Duration, take: &mut dyn FnMut(Raw<'_>)) -> io::Result<()> {
+            if self.n >= 10 {
+                thread::sleep(wait.min(ms(5)));
+                return Ok(());
+            }
+            let data = vec![(16 + 20 * self.n) as u8; self.size];
+            let t = now_monotonic();
+            take(Raw { data: &data, captured: t, dequeued: t + ms(3), mark: Mark::Sequence(self.n), flagged: false });
+            self.n += 1;
+            thread::sleep(ms(2));
+            Ok(())
+        }
+    }
+
     #[test]
     fn the_metadata_matches_its_clip() {
         let d = dir();
         let path = d.join("meta.clip");
         let wide = Format { width: 64, ..FORMAT };
-        let mut source = Pattern::new(wide);
+        let mut source = Stepped(wide);
         let stop = AtomicBool::new(false);
         let r = thread::scope(|s| {
             s.spawn(|| {
-                thread::sleep(ms(100));
+                thread::sleep(ms(150));
                 stop.store(true, Ordering::Relaxed);
             });
             record_into(&mut source, &path, &stop).unwrap()
         });
+        assert_eq!(r.frames, 10);
         let about = About {
             note: Some("GTA 6, standing still".into()),
             card: "USB3 Video".into(),
@@ -750,7 +785,9 @@ mod tests {
             assert_eq!(f["captured_ns"], captured.as_nanos() as u64);
             assert_eq!(f["dequeued_ns"], dequeued.as_nanos() as u64);
             assert!((f["luma"].as_f64().unwrap() - luma).abs() < 0.01, "{f} vs {luma}");
+            assert_eq!(*dequeued - *captured, ms(3));
         }
+        assert_eq!(frames[9]["luma"], 16.0 + 20.0 * 9.0);
         assert_eq!(metadata_path(&path), d.join("meta.json"));
         fs::remove_dir_all(d).unwrap();
     }
