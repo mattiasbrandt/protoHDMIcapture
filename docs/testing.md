@@ -165,6 +165,11 @@ gst or ffplay are legacy's.
     hardware, #87); other drivers: "not available", with why;
   - `protoHDMIcapture`: its own share of the GPU's engines and its VRAM,
     from its DRM file descriptors (`/proc/self/fdinfo`, `drm-engine-*`).
+- **The GPU it ran on**: `--stats`' summary starts `summary: GPU <name>
+  (<vendor>, <driver>, <Wayland|X11>)`, the score's first line names the
+  same, and so does the dashboard's GPU section ("on"). A GPU whose vendor
+  was never measured for the project adds "not yet measured on this GPU"
+  (only AMD so far, `gpustat.rs`'s `MEASURED`; #87).
 - **`--stats`**:
   - each 10 s line ends with the GPU's busy %, ours, the power and the
     junction temperature;

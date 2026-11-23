@@ -210,8 +210,53 @@ pub fn source_for(vendor: u32, device: u32, name: &str) -> Result<Box<dyn Source
 
 /// PCI vendor ids (wgpu's `AdapterInfo::vendor`).
 pub const AMD: u32 = 0x1002;
-#[cfg(target_os = "linux")]
 pub const NVIDIA: u32 = 0x10de;
+pub const INTEL: u32 = 0x8086;
+
+/// The vendors whose GPU timings were measured for the project (#87):
+/// results on any other vendor's GPU say "not yet measured on this GPU".
+/// A vendor joins once a tester's numbers are recorded (docs/testing.md,
+/// "Testing on a GPU we have not measured").
+const MEASURED: &[u32] = &[AMD];
+
+fn vendor_name(vendor: u32) -> String {
+    match vendor {
+        AMD => "AMD".into(),
+        NVIDIA => "NVIDIA".into(),
+        INTEL => "Intel".into(),
+        v => format!("vendor {v:#06x}"),
+    }
+}
+
+/// The display server the window runs under, from the environment
+/// (`get`: `std::env::var`'s answer): a result says what it was measured
+/// under, since compositing differs.
+pub fn display_server(get: impl Fn(&str) -> Option<String>) -> &'static str {
+    let set = |k: &str| get(k).is_some_and(|v| !v.is_empty());
+    if cfg!(windows) {
+        "Windows"
+    } else if set("WAYLAND_DISPLAY") {
+        "Wayland"
+    } else if set("DISPLAY") {
+        "X11"
+    } else {
+        "no display server"
+    }
+}
+
+/// The GPU a result was measured on, for `--stats`, the score and the
+/// dashboard: its name, vendor, driver and the display server, and a note
+/// where its vendor's timings were never measured.
+pub fn describe(info: &wgpu::AdapterInfo, display: &str) -> String {
+    describe_parts(&info.name, info.vendor, &info.driver, &info.driver_info, display)
+}
+
+fn describe_parts(name: &str, vendor: u32, driver: &str, driver_info: &str, display: &str) -> String {
+    let driver = [driver, driver_info].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
+    let driver = if driver.is_empty() { "driver unknown".to_string() } else { driver };
+    let note = if MEASURED.contains(&vendor) { "" } else { " · not yet measured on this GPU" };
+    format!("{name} ({}, {driver}, {display}){note}", vendor_name(vendor))
+}
 
 /// The process's own use, summed over its DRM clients on one card.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -723,5 +768,34 @@ mod tests {
     fn the_current_clock_is_the_starred_line() {
         assert_eq!(current_clock("0: 500Mhz \n1: 1329Mhz *\n2: 2520Mhz \n"), Some(1329.0));
         assert_eq!(current_clock("0: 500Mhz \n"), None);
+    }
+
+    #[test]
+    fn a_result_names_its_gpu_driver_and_display_and_flags_unmeasured_vendors() {
+        // The vendor measured here: no note.
+        assert_eq!(describe_parts("Radeon RX 0000", AMD, "radv", "Mesa 0.0", "Wayland"), "Radeon RX 0000 (AMD, radv Mesa 0.0, Wayland)");
+        // Any other vendor says its timings were never measured.
+        assert_eq!(
+            describe_parts("GeForce RTX 0000", NVIDIA, "NVIDIA", "000.00", "X11"),
+            "GeForce RTX 0000 (NVIDIA, NVIDIA 000.00, X11) · not yet measured on this GPU"
+        );
+        assert_eq!(
+            describe_parts("A GPU", 0x1234, "", "", "Wayland"),
+            "A GPU (vendor 0x1234, driver unknown, Wayland) · not yet measured on this GPU"
+        );
+    }
+
+    #[test]
+    fn the_display_server_comes_from_the_environment() {
+        let env =
+            |vars: &'static [(&'static str, &'static str)]| move |k: &str| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string());
+        if cfg!(windows) {
+            assert_eq!(display_server(env(&[])), "Windows");
+            return;
+        }
+        assert_eq!(display_server(env(&[("WAYLAND_DISPLAY", "wayland-1"), ("DISPLAY", ":0")])), "Wayland");
+        assert_eq!(display_server(env(&[("DISPLAY", ":0")])), "X11");
+        assert_eq!(display_server(env(&[("WAYLAND_DISPLAY", ""), ("DISPLAY", ":0")])), "X11", "an empty value is unset");
+        assert_eq!(display_server(env(&[])), "no display server");
     }
 }

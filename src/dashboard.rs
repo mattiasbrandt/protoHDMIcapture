@@ -130,6 +130,9 @@ pub struct Live {
     gpu: Mutex<Option<Arc<crate::gpustat::Shared>>>,
     /// GameMode (gamemode.rs, #77), shown in the GPU section.
     gamemode: Mutex<Option<Arc<Mutex<crate::gamemode::Status>>>>,
+    /// The GPU the run measures on (gpustat::describe, #87), named in the
+    /// GPU section.
+    machine: Mutex<Option<String>>,
     /// The compositor discards every present while frame callbacks keep
     /// coming: another present replaces ours before display (a
     /// frame-generation layer inserting its own, #72), so no latency can
@@ -186,6 +189,7 @@ impl Live {
             withheld: AtomicU64::new(0),
             gpu: Mutex::new(None),
             gamemode: Mutex::new(None),
+            machine: Mutex::new(None),
             replaced: AtomicBool::new(false),
         }
     }
@@ -194,6 +198,11 @@ impl Live {
     /// it is off (gpustat.rs `Monitor`).
     pub fn set_gpu(&self, gpu: Option<Arc<crate::gpustat::Shared>>) {
         *self.gpu.lock().expect("the GPU section's lock is never poisoned") = gpu;
+    }
+
+    /// The GPU the run measures on, for the GPU section (#87).
+    pub fn set_machine(&self, machine: String) {
+        *self.machine.lock().expect("the GPU name's lock is never poisoned") = Some(machine);
     }
 
     /// The window's GameMode status (gamemode.rs), for the GPU section.
@@ -516,6 +525,9 @@ impl Rolling {
             "gpu": match &*live.gpu.lock().expect("the GPU section's lock is never poisoned") {
                 Some(g) => {
                     let mut j = crate::gpustat::json(g);
+                    if let Some(m) = &*live.machine.lock().expect("the GPU name's lock is never poisoned") {
+                        j["machine"] = json!(m);
+                    }
                     if let Some(status) = &*live.gamemode.lock().expect("the GameMode row's lock is never poisoned") {
                         j["gamemode"] = status.lock().expect("the GameMode status's lock is never poisoned").json();
                     }
@@ -1093,6 +1105,9 @@ fn gpu_section(out: &mut Vec<String>, g: &Value, p: &Paint) {
     };
     out.push(String::new());
     out.push(format!("  {}", p.head("GPU")));
+    if let Some(m) = g["machine"].as_str() {
+        row(out, "on", m.to_string());
+    }
     match (g["source"].as_str(), g["unavailable"].as_str()) {
         (Some(src), _) => row(out, "read from", p.dim(&format!("{src} · last {:.0} s", crate::gpustat::WINDOW.as_secs_f64()))),
         (_, Some(why)) => row(out, "whole GPU", p.dim(&format!("not available: {why}"))),
@@ -2317,6 +2332,15 @@ mod tests {
                 "  temperature       edge 49 °C · junction 51 °C · memory 60 °C",
                 "  fan               0 RPM",
             ],
+            "{text}"
+        );
+        // The GPU it runs on (#87), named under the section's head.
+        live.set_machine("GeForce RTX 0000 (NVIDIA, NVIDIA 000.00, X11) · not yet measured on this GPU".into());
+        let text = render(&Rolling::new(&live).snapshot(&live), &Paint { on: false });
+        let head = text.lines().skip_while(|l| *l != "  GPU").nth(1);
+        assert_eq!(
+            head,
+            Some("  on                GeForce RTX 0000 (NVIDIA, NVIDIA 000.00, X11) · not yet measured on this GPU"),
             "{text}"
         );
         // GameMode (#77): its row under the clocks, for each status; none

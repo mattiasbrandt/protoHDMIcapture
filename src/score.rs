@@ -264,7 +264,8 @@ impl Gpu {
         }))
         .map_err(|e| format!("graphics adapter: {e}"))?;
         let info = adapter.get_info();
-        eprintln!("score: on {} ({:?})", info.name, info.backend);
+        let on = crate::gpustat::describe(&info, crate::gpustat::display_server(|k| std::env::var(k).ok()));
+        eprintln!("score: on {on} ({:?})", info.backend);
         // Half floats where the GPU has them, for generators that use them.
         let required_features = adapter.features() & wgpu::Features::SHADER_F16;
         let (device, queue) =

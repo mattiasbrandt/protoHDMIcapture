@@ -72,6 +72,9 @@ pub struct Stats {
     verbose: bool,
     /// The run's dashboard numbers.
     live: Arc<Live>,
+    /// The GPU the run measures on (gpustat::describe), the summary's
+    /// first line (#87).
+    machine: Option<String>,
     start: Duration,
     to_present: Vec<Duration>,
     kernel_to_present: Vec<Duration>,
@@ -134,6 +137,7 @@ impl Stats {
         Self {
             verbose,
             live,
+            machine: None,
             start,
             to_present: Vec::with_capacity(64 * 1024),
             kernel_to_present: Vec::with_capacity(64 * 1024),
@@ -239,6 +243,11 @@ impl Stats {
         }
     }
 
+    /// The GPU the run measures on, named first in the summary (#87).
+    pub fn set_machine(&mut self, machine: String) {
+        self.machine = Some(machine);
+    }
+
     /// GPU use for the 10 s lines while a GPU enhancement is on, none
     /// while it is off.
     pub fn set_gpu(&mut self, gpu: Option<Arc<crate::gpustat::Shared>>) {
@@ -335,6 +344,9 @@ impl Stats {
     }
 
     pub fn summary(&mut self, superseded: u64) {
+        if let Some(m) = &self.machine {
+            eprintln!("summary: GPU {m}");
+        }
         eprintln!(
             "summary: submitted {}, presented {}, discarded {}, not acquired {}, superseded before upload {}, presented before dequeue {}, pace timeouts {}",
             self.submitted, self.presented, self.discarded, self.not_acquired, superseded, self.before_dequeue, self.pace_timeouts

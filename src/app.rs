@@ -863,6 +863,10 @@ impl App {
             self.framegen = Some(Framegen::new(mode));
         }
         let info = adapter.get_info();
+        // The GPU, driver and display server the run measures on (#87).
+        let machine = gpustat::describe(&info, gpustat::display_server(|k| std::env::var(k).ok()));
+        self.pacing.stats().set_machine(machine.clone());
+        self.opts.live.set_machine(machine);
         self.device_type = Some(info.device_type);
         self.adapter = Some((info.vendor, info.device, info.name));
         self.update_gpu();
