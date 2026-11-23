@@ -191,6 +191,8 @@ struct SceneText {
     key_bar: Option<String>,
     no_signal: Option<String>,
     message: Option<String>,
+    /// The enhancement that runs (dev builds, #80).
+    label: Option<String>,
 }
 
 /// What reaches the window's loop from other threads, with the number of
@@ -1341,10 +1343,22 @@ impl App {
                 key_bar: None,
                 no_signal: None,
                 message: self.overlay.current_message(now).map(str::to_string),
+                label: None,
             });
         }
+        // Read every frame, so it follows c and frame generation turning
+        // on or off.
+        let label = overlay::enhancement_label(self.framegen.as_ref().map(|f| f.schedule.mode()), self.opts.live_changes.scaling());
         if !self.overlay.visible(now) {
-            return None;
+            // The label alone: it stays on while the overlay is hidden.
+            return label.map(|l| SceneText {
+                page: None,
+                kind: PageKind::Panel,
+                key_bar: None,
+                no_signal: None,
+                message: None,
+                label: Some(l),
+            });
         }
         let loopback = self.loopback().is_some();
         let page = match self.overlay.page {
@@ -1380,6 +1394,7 @@ impl App {
             key_bar: self.overlay.key_bar_showing(now).then(|| overlay::key_bar(loopback)),
             no_signal: self.overlay.no_signal(),
             message: self.overlay.current_message(now).map(str::to_string),
+            label,
         })
     }
 
@@ -1655,6 +1670,8 @@ impl App {
                 key_bar: text.key_bar.as_deref(),
                 no_signal: text.no_signal.as_deref(),
                 message: text.message.as_deref(),
+                label: text.label.as_deref(),
+                viewport: gfx.viewport.map(|v| v as f32),
             };
             let size = (gfx.config.width, gfx.config.height);
             let drawing = Instant::now();

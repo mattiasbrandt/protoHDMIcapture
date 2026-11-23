@@ -7,6 +7,9 @@
 use std::time::{Duration, Instant};
 
 use crate::capture::{Reason, Signal, Since};
+use crate::framegen::Mode;
+use crate::gpustat;
+use crate::scale::Scaling;
 use crate::sources::{self, Profile};
 
 /// Tells the window something to show from another thread: a message and
@@ -242,10 +245,49 @@ pub fn tips_lines(id: &str, profile: Option<&Profile>) -> Vec<String> {
     out
 }
 
+/// The enhancement that runs (#80), for the window's top-right corner in
+/// dev builds, so a judging run and its screenshots say what is on: frame
+/// generation's mode and an enhancement SCALING preset (`gpustat::enhanced`),
+/// each by its own name. None on a plain run, and always in a release build.
+pub fn enhancement_label(framegen: Option<Mode>, scaling: Scaling) -> Option<String> {
+    if !cfg!(feature = "dev") {
+        return None;
+    }
+    let parts: Vec<String> = [
+        framegen.map(|m| format!("framegen {}", m.as_str())),
+        gpustat::enhanced(None, scaling).then(|| format!("scaling {}", scaling.as_str())),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::level::Level;
+
+    /// Every SCALING preset, in `c`'s cycle (the branches' presets too).
+    fn presets() -> Vec<Scaling> {
+        std::iter::successors(Some(Scaling::Balanced), |s| Some(s.next()).filter(|n| *n != Scaling::Balanced)).collect()
+    }
+
+    #[test]
+    fn the_enhancement_label_names_what_runs_in_dev_builds_only() {
+        let dev = cfg!(feature = "dev");
+        for scaling in presets() {
+            let preset = gpustat::enhanced(None, scaling);
+            let want_preset = format!("scaling {}", scaling.as_str());
+            // A plain run (no frame generation, no enhancement preset): none.
+            assert_eq!(enhancement_label(None, scaling), (dev && preset).then(|| want_preset.clone()), "{scaling:?}");
+            for mode in Mode::ALL {
+                let fg = format!("framegen {}", mode.as_str());
+                let want = if preset { format!("{fg} · {want_preset}") } else { fg };
+                assert_eq!(enhancement_label(Some(mode), scaling), dev.then_some(want), "{mode:?} {scaling:?}");
+            }
+        }
+    }
 
     fn panel(audio: Audio, changes: &[String]) -> Vec<String> {
         panel_lines(&Panel {

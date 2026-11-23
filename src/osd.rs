@@ -313,6 +313,14 @@ fn wrap_ranges(text: &[char], cols: usize, hang: usize) -> Vec<(usize, usize, us
     }
 }
 
+/// The enhancement label's box (#80): `fs` in from the picture's top-right
+/// corner, the text `text_w` wide with half `fs` either side.
+fn label_box(viewport: [f32; 4], text_w: f32, fs: f32) -> Rect {
+    let [x, y, w, _] = viewport;
+    let size = Vec2::new((text_w + fs).floor(), (fs * 1.6).floor());
+    Rect::from_min_size(Pos2::new((x + w - fs - size.x).floor(), (y + fs).floor()), size)
+}
+
 /// One frame's overlay.
 #[derive(Default)]
 pub struct Scene<'a> {
@@ -323,6 +331,12 @@ pub struct Scene<'a> {
     /// The banner's detail line.
     pub no_signal: Option<&'a str>,
     pub message: Option<&'a str>,
+    /// The enhancement that runs (dev builds, #80), top right inside the
+    /// picture.
+    pub label: Option<&'a str>,
+    /// Where the picture lands: x, y, width, height (the letterbox's
+    /// inside).
+    pub viewport: [f32; 4],
 }
 
 pub struct Osd {
@@ -481,6 +495,16 @@ fn paint(p: &egui::Painter, w: f32, h: f32, scene: &Scene) {
         }
     }
 
+    // The enhancement that runs (dev builds, #80): top right inside the
+    // picture, always on, so every screenshot of the window carries it.
+    if let Some(text) = scene.label {
+        let fs = (h / 45.0).floor().max(14.0);
+        let font = FontId::monospace(fs);
+        let at = label_box(scene.viewport, text_width(p, text, &font), fs);
+        p.rect_filled(at, 0.0, BOX);
+        outlined(p, at.center(), Align2::CENTER_CENTER, text, font, ACCENT);
+    }
+
     // A short message, top left, where mpv shows its OSD messages; a long
     // one (an audio error's reason) wraps inside the window.
     if let Some(text) = scene.message {
@@ -501,6 +525,51 @@ fn paint(p: &egui::Painter, w: f32, h: f32, scene: &Scene) {
 mod tests {
     use super::*;
     use crate::overlay;
+
+    /// The text shapes `scene` paints in a `w`×`h` window, with where each
+    /// lands (egui on the CPU: no GPU).
+    fn painted_text(w: f32, h: f32, scene: &Scene) -> Vec<(String, Rect)> {
+        let ctx = egui::Context::default();
+        let mut out = Vec::new();
+        // The first pass loads the fonts; the second is measured.
+        for _ in 0..2 {
+            let mut input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h))), ..Default::default() };
+            if let Some(v) = input.viewports.get_mut(&input.viewport_id) {
+                v.native_pixels_per_point = Some(1.0);
+            }
+            let mut output = ctx.run_ui(input, |ui| paint(&ui.ctx().layer_painter(LayerId::background()), w, h, scene));
+            // No GPU here: the font texture's upload is not needed.
+            output.textures_delta.clear();
+            out = output
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    egui::Shape::Text(t) => Some((t.galley.text().to_string(), t.visual_bounding_rect())),
+                    _ => None,
+                })
+                .collect();
+        }
+        out
+    }
+
+    #[test]
+    fn the_enhancement_label_sits_top_right_inside_the_picture() {
+        // DP-1's 3440x1440 with the 1080p frame letterboxed to 2560x1440,
+        // and a tall window whose picture starts lower down.
+        for (w, h, viewport) in [(3440.0, 1440.0, [440.0, 0.0, 2560.0, 1440.0]), (1280.0, 1024.0, [0.0, 152.0, 1280.0, 720.0])] {
+            let label = "framegen ffx-quality · scaling ultra";
+            let shapes = painted_text(w, h, &Scene { label: Some(label), viewport, ..Default::default() });
+            let [vx, vy, vw, vh] = viewport;
+            let at: Vec<Rect> = shapes.iter().filter(|(t, _)| t == label).map(|(_, r)| *r).collect();
+            assert_eq!(at.len(), 5, "the text and its four outline copies: {shapes:?}");
+            for r in at {
+                assert!(r.min.x >= vx + vw / 2.0 && r.max.x <= vx + vw, "inside the picture's right half: {r:?} in {viewport:?}");
+                assert!(r.min.y >= vy && r.max.y <= vy + vh / 8.0, "at the picture's top: {r:?} in {viewport:?}");
+            }
+        }
+        // No label: nothing drawn.
+        assert!(painted_text(3440.0, 1440.0, &Scene::default()).is_empty());
+    }
 
     /// The fonts the overlay draws with hold its text and its status
     /// symbols: egui 0.37 bundles no font unless a feature asks for one
