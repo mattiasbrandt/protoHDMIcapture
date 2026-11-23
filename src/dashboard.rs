@@ -1386,7 +1386,7 @@ pub fn client(run_dir: &Path) -> Result<(), String> {
             }
             Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => (
                 last.as_ref().map_or_else(String::new, |v| render(v, &paint)),
-                Some(format!("The viewer has not answered for {:.0} s.", since.elapsed().as_secs_f64())),
+                Some(format!("protoHDMIcapture has not answered for {:.0} s.", since.elapsed().as_secs_f64())),
             ),
             Err(e) => return Err(format!("dashboard socket: {e}")),
         };
