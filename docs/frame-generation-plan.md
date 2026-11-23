@@ -61,7 +61,7 @@ before scaling.
 
 | # | What | Notes |
 |---|---|---|
-| #64 | Dev recorder and replay | `cargo build --features dev` only: `--record <name> --seconds N`, headless, raw frames to `/var/tmp/protohdmicapture-clips/` (on disk; `/tmp` is RAM-backed on many desktops). Keepers are copied by hand to `~/.local/share/protohdmicapture/clips/`. `--replay <file>` plays a clip through the normal window. |
+| #64 | Dev recorder and replay | `cargo build --features dev` only: `--record <name> --seconds N`, in the normal window since #79 (the user plays while it records), raw frames to `/var/tmp/protohdmicapture-clips/` (on disk; `/tmp` is RAM-backed on many desktops). Keepers are copied by hand to `~/.local/share/protohdmicapture/clips/`. `--replay <file>` plays a clip through the normal window. |
 | #65 | Duplicate-frame detection | `mpdecimate`'s 8×8 luma block test on the capture thread; the source's frame rate, cadence and cadence breaks on the dashboard; the kind travels on the frame's tag. |
 | #66 | The frame-generation seam | The pure schedule, the generator trait, the window keeping the previous new frame, the integrated-GPU refusal, a `copy` test generator and a new-frames-only mode for external layers. Driven by a dev flag. |
 
@@ -81,11 +81,11 @@ setting that does nothing yet.
 
 Branches stay local.
 
-**Recordings.** The first clips are headless: the user sets up GTA 6 with
-the character standing still, and the agent records. Each recording
-reports its share of new frames and its brightness per second, so a clip
-that went idle or dark is flagged. The fallback is the user playing while
-the agent records.
+**Recordings.** The first clip was recorded headless, the character
+standing still. Since #79 a recording keeps the normal window, so the user
+plays while the agent records (there is no loop-out screen at the test
+machine). Each recording reports its share of new frames and its
+brightness per second, so a clip that went idle or dark is flagged.
 
 **Judging, in three stages** (decided 2026-11-23). The user judges by eye;
 there is no objective score, since GTA 6 gives no 60 fps ground truth.
