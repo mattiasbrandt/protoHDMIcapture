@@ -25,10 +25,11 @@ Out of scope:
 ## What ships (once a winner exists)
 
 - **Frame generation** (GLOSSARY.md) is opt-in, off by default.
-  **Not locked to one method** (the user, 2026-11-23): after round two both
-  ffx-quality and rife are candidates, and more than one may ship; the
-  setting's form (`FRAMEGEN=off|2x`, or a value per method such as
-  `off|ffx|rife`) is decided with #84.
+  **ffx-quality and rife ship** (the user, 2026-11-24, after the live
+  session): neither is perfect (buildings and signs glitch), both are good
+  enough as an opt-in, and their stutter bursts are worked on first. It is
+  never turned on by itself, not by the wizard either. The setting's form
+  (`FRAMEGEN=off|ffx-quality|rife` or similar) is decided with #84.
   - It is meant for dedicated gaming GPUs. On an integrated GPU it is
     refused at startup, with a message saying so.
   - It is a live change: `g`, with the Tab overlay open, switches it
@@ -41,15 +42,19 @@ Out of scope:
     A 60 fps source, a menu, a frame-rate dip, a scene cut and the first
     frames all show real frames, as today. It never adds more than one
     refresh of delay.
-- **Upscaling:** one new `SCALING` preset named `sharp`, which `c` cycles
-  to after high-quality. FSR 1 and NVIDIA Image Scaling are both tried;
-  only the winner lands.
-- **The wizard suggests them from the hardware** (#84): it measures the
-  winning generator and `sharp` on the user's GPU, headless and paced, and
-  suggests each only where it fits with room, saying the latency cost
-  plainly. The user decides; frame generation stays off by default. An
-  integrated GPU, a GPU without the room, or a 60 fps source get the
-  reason instead.
+- **Upscaling** (the user, 2026-11-24): its own setting,
+  `UPSCALING=off|fsr|nis` (FSR 1 and NVIDIA Image Scaling; the values follow
+  the user's verdict between them), the name users know from games. It
+  upscales and sharpens when the picture is enlarged; `SCALING`
+  (balanced, fast, high-quality) stays the ordinary scaler, unrenamed. The
+  wizard turns Upscaling on when it finds a gaming GPU and a monitor that
+  enlarges the picture; its own overlay row and key (#85).
+- **The wizard and the hardware** (#84, #85): Upscaling is turned on with
+  a gaming GPU on an enlarging monitor. Frame generation is only suggested:
+  the wizard measures the shipped generators on the user's GPU, headless and
+  paced, and says which fit with room and what they cost in delay; the user
+  decides, and it stays off by default. An integrated GPU, a GPU without
+  the room, or a 60 fps source get the reason instead.
 - **The README describes the feature** (#84): what it does and does not do,
   its delay, where it looks worse, `sharp`, GameMode's GPU opt-in, and
   what could come later (the "Later" list below and round two's findings).
