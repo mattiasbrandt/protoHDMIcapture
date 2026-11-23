@@ -109,6 +109,24 @@ pub struct Stats {
     gpu: Option<Arc<crate::gpustat::Shared>>,
     window: Window,
     window_start: Duration,
+    /// The run's stretches by frame-generation mode (#86: a dev build's
+    /// `g` switches mid-run; `--stats` only).
+    stretches: Vec<Stretch>,
+    /// The frame-generation counts at the last present that ran it.
+    last_counts: [u64; 4],
+    /// When refreshes were repeated, and how many (`--stats` only): the
+    /// bursts line up with the source's beat against the display (#86).
+    repeats: Vec<(Duration, usize)>,
+}
+
+/// A stretch of the run in one frame-generation mode (None: off), from
+/// `from` (the run's time), with the counts and repeated refreshes at its
+/// start (#86).
+struct Stretch {
+    mode: Option<&'static str>,
+    from: Duration,
+    counts: [u64; 4],
+    repeated: u64,
 }
 
 impl Stats {
@@ -137,6 +155,9 @@ impl Stats {
             done_in_streak: 0,
             gpu: None,
             window: Window::default(),
+            stretches: Vec::new(),
+            last_counts: [0; 4],
+            repeats: Vec::new(),
             window_start: start,
         }
     }
@@ -154,7 +175,27 @@ impl Stats {
     /// One frame's pass times, read back at `at` (the monotonic clock).
     pub fn gpu(&mut self, t: crate::gputime::Times, at: Duration) {
         if self.verbose {
-            self.gpu_times.push(GpuSample { at: at.saturating_sub(self.start), times: t });
+            let mode = self.live.framegen_counts().map(|(m, _)| m);
+            self.gpu_times.push(GpuSample { at: at.saturating_sub(self.start), times: t, mode });
+        }
+    }
+
+    /// Opens a new stretch when the frame-generation mode changed (#86).
+    /// The counts do not move while it is off, so a stretch's end is the
+    /// next one's start, or the run's last counts.
+    fn track_mode(&mut self, at: Duration) {
+        let now = self.live.framegen_counts();
+        if let Some((_, counts)) = now {
+            self.last_counts = counts;
+        }
+        let mode = now.map(|(m, _)| m);
+        if self.stretches.last().map(|s| s.mode) != Some(mode) {
+            self.stretches.push(Stretch {
+                mode,
+                from: at.saturating_sub(self.start),
+                counts: self.last_counts,
+                repeated: self.skipped_refreshes,
+            });
         }
     }
 
@@ -228,6 +269,7 @@ impl Stats {
         self.live.set_replaced(false);
         if self.verbose {
             *self.flags.entry(flags).or_default() += 1;
+            self.track_mode(at);
         }
         if !refresh.is_zero() {
             self.refresh = Some(refresh);
@@ -250,6 +292,9 @@ impl Stats {
                 *self.gaps.entry(refreshes).or_default() += 1;
             }
             self.skipped_refreshes += skipped;
+            if self.verbose && skipped > 0 {
+                self.repeats.push((at.saturating_sub(self.start), skipped as usize));
+            }
         }
         self.last_present = Some(at);
         // A generated frame carries its new frame's times; the latency is
@@ -316,10 +361,19 @@ impl Stats {
         if !gpu_generate.is_empty() {
             eprintln!("summary: GPU time ({} frames)  frame generation {}", gpu_generate.len(), fmt(&mut gpu_generate));
         }
-        for line in gpu_timing_lines(&passes) {
+        let switched = self.stretches.len() > 1;
+        for line in gpu_timing_lines(&passes, !switched) {
             eprintln!("{line}");
         }
-        if let Some(line) = framegen_line(&self.live) {
+        if switched {
+            let end = self.last_present.map_or(Duration::ZERO, |p| p.saturating_sub(self.start));
+            for line in mode_lines(&self.stretches, &self.gpu_times, end, self.last_counts, self.skipped_refreshes) {
+                eprintln!("{line}");
+            }
+        } else if let Some(line) = framegen_line(&self.live) {
+            eprintln!("{line}");
+        }
+        if let Some(line) = repeat_line(&self.repeats) {
             eprintln!("{line}");
         }
         if let Some(line) = gpu_share(&mut gpu_convert, &mut gpu_scale, &mut gpu_generate, self.refresh) {
@@ -348,6 +402,8 @@ impl Stats {
 struct GpuSample {
     at: Duration,
     times: crate::gputime::Times,
+    /// The frame-generation mode it ran in (#86); None: off.
+    mode: Option<&'static str>,
 }
 
 /// One pass's samples: (when, how long), in the order they were read.
@@ -382,27 +438,41 @@ fn slow_ranges(pass: &Pass) -> Vec<(Duration, Duration, usize)> {
     let Some((median_ms, _)) = percentiles(&mut all) else { return Vec::new() };
     let median = Duration::from_secs_f64(median_ms / 1e3);
     let limit = median.mul_f64(SLOW).max(median + SLOW_FLOOR);
-    let mut ranges: Vec<(Duration, Duration, usize)> = Vec::new();
-    for &(at, d) in pass {
-        if d <= limit {
-            continue;
-        }
-        match ranges.last_mut() {
-            Some((_, to, n)) if at.saturating_sub(*to) <= SLOW_JOIN => {
+    ranges(pass.iter().filter(|(_, d)| *d > limit).map(|(at, _)| (*at, 1)), SLOW_JOIN)
+}
+
+/// Events (when, how many) closer together than `join` as one range
+/// (from, to, how many), in the order they happened.
+fn ranges(events: impl Iterator<Item = (Duration, usize)>, join: Duration) -> Vec<(Duration, Duration, usize)> {
+    let mut out: Vec<(Duration, Duration, usize)> = Vec::new();
+    for (at, n) in events {
+        match out.last_mut() {
+            Some((_, to, total)) if at.saturating_sub(*to) <= join => {
                 *to = at;
-                *n += 1;
+                *total += n;
             }
-            _ => ranges.push((at, at, 1)),
+            _ => out.push((at, at, n)),
         }
     }
-    ranges
+    out
+}
+
+/// Ranges as `--stats` names them: the first `cap`, the rest counted.
+fn named_ranges(r: &[(Duration, Duration, usize)], cap: usize) -> String {
+    let mut named: Vec<String> =
+        r.iter().take(cap).map(|(from, to, n)| format!("{:.1}–{:.1} s ×{n}", from.as_secs_f64(), to.as_secs_f64())).collect();
+    if r.len() > cap {
+        let rest = &r[cap..];
+        named.push(format!("+{} more in {} ranges", rest.iter().map(|x| x.2).sum::<usize>(), rest.len()));
+    }
+    named.join(", ")
 }
 
 /// `--stats`' lines on when the GPU ran slow (#82): each pass's p99 after
 /// the first `SETTLING`, and the time ranges of its slow samples. A window
 /// run's p99 is twice its median while a headless test's is not; these say
 /// whether the slow frames are the start, a moment (a screenshot) or spread.
-fn gpu_timing_lines(passes: &[Pass; 3]) -> Vec<String> {
+fn gpu_timing_lines(passes: &[Pass; 3], generation_ranges: bool) -> Vec<String> {
     let names = ["convert", "scale", "frame generation"];
     let mut settled: Vec<String> = Vec::new();
     let mut lines = Vec::new();
@@ -415,21 +485,21 @@ fn gpu_timing_lines(passes: &[Pass; 3]) -> Vec<String> {
             Some((_, p99)) => format!("{name} {p99:.2} ms"),
             None => format!("{name} no samples"),
         });
+        // Modes switched mid-run: one median across generators says
+        // nothing; `mode_lines` gives each its own.
+        if *name == "frame generation" && !generation_ranges {
+            continue;
+        }
         let ranges = slow_ranges(pass);
         if ranges.is_empty() {
             continue;
         }
-        let mut named: Vec<String> = ranges
-            .iter()
-            .take(SLOW_RANGES)
-            .map(|(from, to, n)| format!("{:.1}–{:.1} s ×{n}", from.as_secs_f64(), to.as_secs_f64()))
-            .collect();
-        if ranges.len() > SLOW_RANGES {
-            let rest = &ranges[SLOW_RANGES..];
-            named.push(format!("+{} more in {} ranges", rest.iter().map(|r| r.2).sum::<usize>(), rest.len()));
-        }
         let total: usize = ranges.iter().map(|r| r.2).sum();
-        lines.push(format!("summary: slow GPU frames, {name} (over {SLOW}x its median): {total} of {}: {}", pass.len(), named.join(", ")));
+        lines.push(format!(
+            "summary: slow GPU frames, {name} (over {SLOW}x its median): {total} of {}: {}",
+            pass.len(),
+            named_ranges(&ranges, SLOW_RANGES)
+        ));
     }
     if !settled.is_empty() {
         lines.insert(0, format!("summary: GPU p99 after the first {} s  {}", SETTLING.as_secs(), settled.join("  | ")));
@@ -454,6 +524,64 @@ fn gpu_share(convert: &mut [Duration], scale: &mut [Duration], generate: &mut [D
     ))
 }
 
+/// Repeated refreshes closer together than this are one burst (#86).
+const REPEAT_JOIN: Duration = Duration::from_secs(2);
+/// Bursts named; the rest are counted.
+const REPEAT_RANGES: usize = 10;
+
+/// `--stats`' line on when refreshes were repeated (#86): bursts that line
+/// up with the source's beat against the display (a 60.003 Hz card on a
+/// 59.973 Hz display slips a frame every ~33 s) show as evenly spaced.
+fn repeat_line(repeats: &[(Duration, usize)]) -> Option<String> {
+    let r = ranges(repeats.iter().copied(), REPEAT_JOIN);
+    (!r.is_empty()).then(|| format!("summary: repeated refreshes by time: {}", named_ranges(&r, REPEAT_RANGES)))
+}
+
+/// `--stats`' lines for a run whose frame-generation mode changed (#86, a
+/// dev build's `g`): per mode, in the order first used, its time, its
+/// counts, its repeated refreshes, and its generator's GPU time and slow
+/// ranges against its own median.
+fn mode_lines(stretches: &[Stretch], gpu: &[GpuSample], end: Duration, last_counts: [u64; 4], last_repeated: u64) -> Vec<String> {
+    let mut order: Vec<Option<&'static str>> = Vec::new();
+    for s in stretches {
+        if !order.contains(&s.mode) {
+            order.push(s.mode);
+        }
+    }
+    order
+        .into_iter()
+        .map(|mode| {
+            let (mut secs, mut counts, mut repeated) = (0.0, [0u64; 4], 0u64);
+            for (i, s) in stretches.iter().enumerate().filter(|(_, s)| s.mode == mode) {
+                let (to, c, r) = stretches.get(i + 1).map_or((end, last_counts, last_repeated), |n| (n.from, n.counts, n.repeated));
+                secs += to.saturating_sub(s.from).as_secs_f64();
+                for k in 0..4 {
+                    counts[k] += c[k].saturating_sub(s.counts[k]);
+                }
+                repeated += r.saturating_sub(s.repeated);
+            }
+            let name = mode.unwrap_or("off");
+            let Some(_) = mode else {
+                return format!("summary: frame generation off ({secs:.1} s): repeated refreshes {repeated}");
+            };
+            let [generated, missed, real, withheld] = counts;
+            let pass: Pass = gpu.iter().filter(|g| g.mode == mode).filter_map(|g| g.times.generate.map(|d| (g.at, d))).collect();
+            let mut times: Vec<Duration> = pass.iter().map(|(_, d)| *d).collect();
+            let gpu_part = match percentiles(&mut times) {
+                Some((m, p99)) => {
+                    let slow = slow_ranges(&pass);
+                    let slow = if slow.is_empty() { String::new() } else { format!(", slow {}", named_ranges(&slow, SLOW_RANGES)) };
+                    format!(" | GPU median {m:.2} ms p99 {p99:.2} ms{slow}")
+                }
+                None => String::new(),
+            };
+            format!(
+                "summary: frame generation {name} ({secs:.1} s): {generated} generated, {missed} missed, {real} shown real, {withheld} withheld | repeated refreshes {repeated}{gpu_part}"
+            )
+        })
+        .collect()
+}
+
 /// The summary's frame-generation counts (#78): every new frame is
 /// generated, missed or shown real; none while it does not run.
 fn framegen_line(live: &Live) -> Option<String> {
@@ -476,7 +604,7 @@ mod tests {
             .map(|i| {
                 let at = REFRESH * i;
                 let scale = if is_slow(at) { slow } else { Duration::from_micros(100) };
-                GpuSample { at, times: crate::gputime::Times { convert: Duration::from_micros(30), scale, generate: None } }
+                GpuSample { at, times: crate::gputime::Times { convert: Duration::from_micros(30), scale, generate: None }, mode: None }
             })
             .collect()
     }
@@ -489,7 +617,7 @@ mod tests {
         let mut scale: Vec<Duration> = passes[1].iter().map(|(_, d)| *d).collect();
         let (_, p99) = percentiles(&mut scale).unwrap();
         assert!((p99 - 0.2).abs() < 1e-9, "the whole run's p99 shows the doubling: {p99}");
-        let lines = gpu_timing_lines(&passes);
+        let lines = gpu_timing_lines(&passes, true);
         assert_eq!(lines[0], "summary: GPU p99 after the first 2 s  convert 0.03 ms  | scale 0.10 ms", "{lines:?}");
         assert_eq!(lines[1], "summary: slow GPU frames, scale (over 1.5x its median): 120 of 1798: 0.0–2.0 s ×120", "{lines:?}");
         assert_eq!(lines.len(), 2, "the convert pass never ran slow: {lines:?}");
@@ -500,7 +628,7 @@ mod tests {
         // The run script's screenshots at 10–11 s (#82).
         let burst = |at: Duration| at >= Duration::from_secs(10) && at < Duration::from_secs(11);
         let samples = run(30, Duration::from_micros(200), burst);
-        let lines = gpu_timing_lines(&gpu_passes(&samples));
+        let lines = gpu_timing_lines(&gpu_passes(&samples), true);
         assert_eq!(lines[1], "summary: slow GPU frames, scale (over 1.5x its median): 60 of 1798: 10.0–11.0 s ×60", "{lines:?}");
         // A 30 µs pass at 48 µs is 1.6x its median but 18 µs over it:
         // timer jitter, not slow (`SLOW_FLOOR`).
@@ -508,17 +636,108 @@ mod tests {
         for s in jitter.iter_mut().filter(|s| burst(s.at)) {
             s.times.convert = Duration::from_micros(48);
         }
-        assert_eq!(gpu_timing_lines(&gpu_passes(&jitter)).len(), 1, "only the settled p99 line");
+        assert_eq!(gpu_timing_lines(&gpu_passes(&jitter), true).len(), 1, "only the settled p99 line");
     }
 
     #[test]
     fn slow_ranges_past_the_cap_are_counted() {
         let every_two_s = |at: Duration| at.as_millis() % 2000 < 20;
         let samples = run(30, Duration::from_micros(200), every_two_s);
-        let lines = gpu_timing_lines(&gpu_passes(&samples));
+        let lines = gpu_timing_lines(&gpu_passes(&samples), true);
         // 15 bursts, 2 s apart: 5 named, the other 10 counted.
         assert_eq!(lines[1].matches(" s ×").count(), 5, "{lines:?}");
         assert!(lines[1].ends_with(" more in 10 ranges"), "{lines:?}");
+    }
+
+    fn secs(x: f64) -> Duration {
+        Duration::from_secs_f64(x)
+    }
+
+    /// A generator sample at `at` taking `ms`, in `mode`.
+    fn fg_sample(at: f64, ms: f64, mode: Option<&'static str>) -> GpuSample {
+        let t = crate::gputime::Times {
+            convert: Duration::from_micros(30),
+            scale: Duration::from_micros(200),
+            generate: mode.map(|_| secs(ms / 1e3)),
+        };
+        GpuSample { at: secs(at), times: t, mode }
+    }
+
+    #[test]
+    fn a_run_that_switches_modes_is_counted_per_mode() {
+        // off 0–10 s, blend 10–20 s, ffx 20–30 s, off 30–35 s, blend 35–40 s.
+        let st = |mode, from: f64, counts: [u64; 4], repeated| Stretch { mode, from: secs(from), counts, repeated };
+        let stretches = [
+            st(None, 0.0, [0; 4], 0),
+            st(Some("blend"), 10.0, [0; 4], 1),
+            st(Some("ffx"), 20.0, [290, 2, 8, 0], 1),
+            st(None, 30.0, [570, 12, 18, 0], 21),
+            st(Some("blend"), 35.0, [570, 12, 18, 0], 21),
+        ];
+        let mut gpu = Vec::new();
+        for i in 0..1200 {
+            let at = 10.0 + i as f64 / 60.0;
+            let mode = if at < 20.0 || at >= 35.0 {
+                Some("blend")
+            } else if at < 30.0 {
+                Some("ffx")
+            } else {
+                None
+            };
+            // ffx at 3 ms, twice that from 25 to 26 s; blend at 0.02 ms.
+            let ms = match mode {
+                Some("ffx") if (25.0..26.0).contains(&at) => 6.0,
+                Some("ffx") => 3.0,
+                _ => 0.02,
+            };
+            gpu.push(fg_sample(at, ms, mode));
+        }
+        let lines = mode_lines(&stretches, &gpu, secs(40.0), [710, 13, 20, 0], 23);
+        assert_eq!(
+            lines,
+            [
+                "summary: frame generation off (15.0 s): repeated refreshes 1",
+                "summary: frame generation blend (15.0 s): 430 generated, 3 missed, 10 shown real, 0 withheld | repeated refreshes 2 | GPU median 0.02 ms p99 0.02 ms",
+                "summary: frame generation ffx (10.0 s): 280 generated, 10 missed, 10 shown real, 0 withheld | repeated refreshes 20 | GPU median 3.00 ms p99 6.00 ms, slow 25.0–26.0 s ×60",
+            ],
+            "{lines:#?}"
+        );
+    }
+
+    #[test]
+    fn a_switch_opens_a_stretch_with_the_counts_so_far() {
+        use crate::duplicate::Kind;
+        use crate::framegen::Show;
+        let live = Arc::new(Live::new());
+        let mut s = Stats::new(Duration::ZERO, true, live.clone());
+        present(&mut s, secs(1.0));
+        live.framegen("ffx");
+        live.framegen_step(Show::Generated, false, Kind::New);
+        present(&mut s, secs(2.0));
+        live.framegen_step(Show::Generated, false, Kind::New);
+        present(&mut s, secs(3.0));
+        live.framegen_off();
+        present(&mut s, secs(4.0));
+        let modes: Vec<_> = s.stretches.iter().map(|x| (x.mode, x.from, x.counts[0])).collect();
+        assert_eq!(modes, [(None, secs(1.0), 0), (Some("ffx"), secs(2.0), 1), (None, secs(4.0), 2)]);
+    }
+
+    #[test]
+    fn repeated_refreshes_are_named_where_they_happened() {
+        assert_eq!(repeat_line(&[]), None);
+        let r = [(secs(10.0), 2), (secs(10.5), 3), (secs(43.3), 1)];
+        assert_eq!(repeat_line(&r).as_deref(), Some("summary: repeated refreshes by time: 10.0–10.5 s ×5, 43.3–43.3 s ×1"));
+    }
+
+    #[test]
+    fn a_switching_run_leaves_the_mixed_generation_ranges_out() {
+        // Two thirds blend: one median across both makes every ffx frame "slow".
+        let gpu: Vec<GpuSample> = (0..600)
+            .map(|i| fg_sample(i as f64 / 60.0, if i < 400 { 0.02 } else { 3.0 }, Some(if i < 400 { "blend" } else { "ffx" })))
+            .collect();
+        let passes = gpu_passes(&gpu);
+        assert!(gpu_timing_lines(&passes, true).iter().any(|l| l.contains("slow GPU frames, frame generation")));
+        assert!(!gpu_timing_lines(&passes, false).iter().any(|l| l.contains("slow GPU frames, frame generation")));
     }
 
     #[test]

@@ -176,6 +176,13 @@ gst or ffplay are legacy's.
   time ranges where a pass took over 1.5x its median. A range at the start
   is settling; one at a script's screenshot is the compositor's copy; spread
   evenly, it is a real cost.
+- **Per mode and over time** (`--stats` summary, #86): a run whose frame
+  generation changed (a dev build's `g`) gets one `frame generation MODE`
+  line per mode (its time, counts, repeated refreshes, its generator's GPU
+  time and slow ranges against its own median), and every run a `repeated
+  refreshes by time` line. Bursts about every 33 s are the card's beat
+  against the display (a 60.003 Hz signal on a 59.973 Hz mode slips a frame
+  each beat); with frame generation on they cost several refreshes.
 - **`refreshes between presents`** (`--stats` summary): how many refreshes
   passed from one present to the next. A 60 fps feed is all 1s; a 30 fps
   source in new-frames-only all 2s. A 3 next to a 1 is a present that
