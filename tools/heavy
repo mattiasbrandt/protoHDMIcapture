@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# One heavy job at a time on this machine: a cargo build, test or clippy,
+# or tools/check. Every checkout and worktree shares one lock, so parallel
+# workers queue here instead of overloading the desktop (on 2026-11-23,
+# parallel builds pushed the load to 42 on 8 cores and the OOM killer ended
+# the user's browser). The job runs at the lowest CPU and I/O priority with
+# 4 build jobs and 4 test threads.
+# Usage: tools/heavy <command> [args...]      e.g. tools/heavy cargo test duplicate
+set -uo pipefail
+[ $# -ge 1 ] || { echo "usage: tools/heavy <command> [args...]" >&2; exit 2; }
+# Already inside a heavy job (tools/check running cargo, a hook's check):
+# the lock is held; taking it again would wait on ourselves.
+[ -n "${PROTOHDMI_HEAVY_LOCKED:-}" ] && exec "$@"
+lock="${XDG_RUNTIME_DIR:-/tmp}/protohdmicapture-heavy.lock"
+export CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 PROTOHDMI_HEAVY_LOCKED=1
+exec 9>>"$lock"
+if ! flock -n 9; then
+    echo "tools/heavy: waiting for another heavy job to finish ($lock)" >&2
+    flock 9
+fi
+exec nice -n 19 ionice -c3 "$@"

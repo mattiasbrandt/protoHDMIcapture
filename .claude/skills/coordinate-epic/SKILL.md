@@ -46,6 +46,10 @@ when told.
    `subagent_type: "fork"` and `run_in_background: true`. A fork inherits this
    session's context, so the brief stays short. You are notified when each one
    finishes; no polling.
+   Their heavy jobs take turns through `tools/heavy` (one lock for every
+   worktree); a card run, a latency measurement or a disk benchmark waits
+   until no worker is building (`uptime`), or its numbers are invalid.
+   Clean-up (below) removes the worktree's `target/` (~30 GB) with it.
 
 ## Critic protocol (every slice, before it reaches `main`)
 

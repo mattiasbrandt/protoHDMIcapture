@@ -13,8 +13,12 @@ worker's prompt. `{owner}` and `{repo}` are gh's, filled when the command runs.
 You are the worker for #{ISSUE}. Execute directly; do not re-delegate.
 
 WORKTREE: {WORKTREE}. Every edit, build and commit happens there. Never edit,
-check out, stash, restore or clean anything outside it. Build with
-`CARGO_BUILD_JOBS=4`: the user works on this machine while you build. Temp
+check out, stash, restore or clean anything outside it. Run every cargo
+command through `tools/heavy` (`tools/heavy cargo test duplicate`): it waits
+for any other worker's heavy job and runs at the lowest priority with 4
+jobs, because the user works on this machine. Iterate with the narrowest
+command (one test, `cargo check`); `tools/check` (which takes the same turn)
+once, before you report. Temp
 files go in a directory of your own (`mktemp -d`), never a fixed `/tmp` path
 another worker could share.
 
