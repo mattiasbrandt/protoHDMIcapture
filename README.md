@@ -251,6 +251,13 @@ Resolution, position, scale and transform are kept, so a multi-monitor
 layout stays as it was. It works on Hyprland; elsewhere, and on Windows,
 the viewer says so and leaves the display alone.
 
+**On a bigger or wider monitor.** The picture keeps its shape: it is
+scaled to the largest size that fits, and black bars fill the rest (an
+ultrawide gets them at the sides; a 1080p feed on a 2560x1080 monitor is
+shown pixel for pixel, with no scaling at all). The colour detail a
+capture card sends at half width (4:2:2) is filled in with spline36, as
+mpv does.
+
 **On Hyprland**, blur, shadows and animations cost GPU time on a live feed
 for nothing. A window rule for the title `protoHDMIcapture` turns them off;
 with a Lua config (as Omarchy has) that is a `window` rule with `no_blur`,
