@@ -137,6 +137,11 @@ fn bilinear_p(y: vec2f) -> vec2f {
     return mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y) * ip.scale;
 }
 
+// A both-ends motion's weight falls by e per this much colour mismatch.
+const MATCH_SIGMA: f32 = 0.06;
+// A one-end motion's weight, against a perfect both-ends match's 1.
+const ONE_SIDED: f32 = 0.05;
+
 // How a motion fares: which ends agree, its samples, how well they match.
 struct Try {
     a: vec4f,
@@ -153,8 +158,10 @@ fn attempt(y: vec2f, u: vec2f) -> Try {
     t.a = textureSampleLevel(prev_frame, smp, (y - half_u) * inv, 0.0);
     t.b = textureSampleLevel(next_frame, smp, (y + half_u) * inv, 0.0);
     // Agreement within two flow-luma pixels (vectors are whole luma
-    // pixels; bilinear ones fall between).
-    let tolerance = 2.0 * ip.scale;
+    // pixels; bilinear ones fall between), widening with the motion's
+    // length (UnFlow's |v|²-scaled consistency bound): a long motion is not
+    // rejected for a miss that is small against it.
+    let tolerance = sqrt(4.0 * ip.scale * ip.scale + 0.02 * dot(u, u));
     // A moving sample taken from the mask would drag the HUD (ip.use_mask).
     let off_mask = ip.use_mask == 0u || dot(u, u) < 0.25 || !(masked(y - half_u) || masked(y + half_u));
     let trusted = dot(u, u) <= ip.max_motion * ip.max_motion && off_mask;
@@ -220,30 +227,29 @@ fn warped(y: vec2f, vn: vec2f, at_next: vec4f) -> vec4f {
     motions[2] = -vn;
     motions[3] = bilinear_p(y);
 
-    var best = 1e9;
-    var blended = vec4f(0.0);
-    var one_sided = vec4f(0.0);
-    var have_one_sided = false;
+    // Soft weights over the motions, not the best one alone: a motion
+    // seen at both ends weighs by how well its two samples match; one seen
+    // at one end only (a region uncovered or covered) weighs less, its one
+    // sample. Neighbouring pixels then change their answer gradually, not
+    // by a switch between motions (the shredding, #73).
+    var sum = vec3f(0.0);
+    var total = 0.0;
     for (var i = 0; i < 4; i++) {
         let t = attempt(y, motions[i]);
+        let fit = exp(-t.mismatch / MATCH_SIGMA);
         if (t.next_agrees && t.prev_agrees) {
-            if (t.mismatch < best) {
-                best = t.mismatch;
-                blended = 0.5 * (t.a + t.b);
-            }
-        } else if (!have_one_sided && t.next_agrees) {
-            one_sided = t.b;
-            have_one_sided = true;
-        } else if (!have_one_sided && t.prev_agrees) {
-            one_sided = t.a;
-            have_one_sided = true;
+            sum += fit * 0.5 * (t.a.rgb + t.b.rgb);
+            total += fit;
+        } else if (t.next_agrees) {
+            sum += ONE_SIDED * t.b.rgb;
+            total += ONE_SIDED;
+        } else if (t.prev_agrees) {
+            sum += ONE_SIDED * t.a.rgb;
+            total += ONE_SIDED;
         }
     }
-    if (best < 1e9) {
-        return vec4f(blended.rgb, 1.0);
-    }
-    if (have_one_sided) {
-        return vec4f(one_sided.rgb, 1.0);
+    if (total > 0.0) {
+        return vec4f(sum / total, 1.0);
     }
     return vec4f(one_way(y, at_next).rgb, 1.0);
 }
