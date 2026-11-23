@@ -990,8 +990,45 @@ impl Paint {
     }
     /// The palette's green when `ok`, a warning when not.
     fn good_warn(&self, t: &str, ok: bool) -> String {
-        if ok { self.wrap("32", t) } else { self.warn(t) }
+        if ok { self.good(t) } else { self.warn(t) }
     }
+    fn good(&self, t: &str) -> String {
+        self.wrap("32", t)
+    }
+    /// By a known threshold's verdict; no threshold, no colour.
+    fn level(&self, t: &str, level: Option<Level>) -> String {
+        match level {
+            Some(Level::Good) => self.good(t),
+            Some(Level::Warn) => self.warn(t),
+            Some(Level::Error) => self.error(t),
+            None => t.to_string(),
+        }
+    }
+}
+
+/// A value against a known threshold (#76): only thresholds the code, the
+/// docs or the hardware state; a value with none is not coloured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Level {
+    Good,
+    Warn,
+    Error,
+}
+
+/// A reading against the hardware's own limits: at or over `emergency` an
+/// error, at or over `crit` a warning, under both good; None with neither
+/// known.
+fn against_limits(v: f64, crit: Option<f64>, emergency: Option<f64>) -> Option<Level> {
+    if crit.is_none() && emergency.is_none() {
+        return None;
+    }
+    Some(if emergency.is_some_and(|e| v >= e) {
+        Level::Error
+    } else if crit.is_some_and(|c| v >= c) {
+        Level::Warn
+    } else {
+        Level::Good
+    })
 }
 
 fn num(v: &Value) -> Option<f64> {
@@ -1038,12 +1075,32 @@ fn gpu_section(out: &mut Vec<String>, g: &Value, p: &Paint) {
     if let (Some(used), Some(total)) = (num(&g["vram_used_mib"]), num(&g["vram_total_mib"])) {
         row(out, "VRAM", format!("{:.1} of {:.1} GB", used / 1024.0, total / 1024.0));
     }
-    if let Some(w) = mm("power_w", " W") {
-        row(out, "power", w);
+    // At the board's power cap (hwmon power1_cap) the clocks are held back:
+    // a warning; under it good (#76).
+    let cap = num(&g["limits"]["power_cap_w"]);
+    let capped = |w: f64| cap.map(|c| if w >= c { Level::Warn } else { Level::Good });
+    if let (Some(m), Some(x)) = (med("power_w"), num(&g["power_w"]["max"])) {
+        row(
+            out,
+            "power",
+            format!(
+                "{} {}{}{}",
+                p.level(&format!("{m:.0} W"), capped(m)),
+                p.dim("(max "),
+                p.level(&format!("{x:.0} W"), capped(x)),
+                p.dim(")")
+            ),
+        );
     }
+    // Each sensor against its own hwmon temp*_crit / temp*_emergency (#76).
     let temps: Vec<String> = [("edge", "edge_c"), ("junction", "junction_c"), ("memory", "memory_c")]
         .into_iter()
-        .filter_map(|(n, k)| med(k).map(|v| format!("{n} {v:.0} °C")))
+        .filter_map(|(n, k)| {
+            med(k).map(|v| {
+                let l = &g["limits"][k];
+                format!("{n} {}", p.level(&format!("{v:.0} °C"), against_limits(v, num(&l["crit"]), num(&l["emergency"]))))
+            })
+        })
         .collect();
     if !temps.is_empty() {
         row(out, "temperature", temps.join(" · "));
@@ -1131,7 +1188,7 @@ fn render(s: &Value, p: &Paint) -> String {
         &mut out,
         "signal",
         match (s["signal"].as_str(), s["signal_why"].as_str()) {
-            (Some("ok"), _) => "ok".into(),
+            (Some("ok"), _) => p.good("ok"),
             (Some("never"), None) => p.error("none since the feed opened"),
             (Some("stopped"), None) => p.error("stopped (source asleep or off?)"),
             (Some("never" | "stopped"), Some(why)) => p.error(&format!("no picture: {why}")),
@@ -1160,10 +1217,15 @@ fn render(s: &Value, p: &Paint) -> String {
             } else if v.is_null() {
                 p.dim("no frame presented yet")
             } else {
+                // dequeue -> presented against #5's go criteria (stats.rs);
+                // kernel -> presented has no stated threshold: uncoloured.
+                let gate = |k: &str, limit: f64| {
+                    (key == "dequeue_present").then(|| num(&v[k]).map(|x| if x <= limit { Level::Good } else { Level::Warn })).flatten()
+                };
                 format!(
-                    "median {} ms · p99 {} ms {}",
-                    n2(&v["median_ms"]),
-                    n2(&v["p99_ms"]),
+                    "median {} · p99 {} {}",
+                    p.level(&format!("{} ms", n2(&v["median_ms"])), gate("median_ms", crate::stats::GATE_MEDIAN_MS)),
+                    p.level(&format!("{} ms", n2(&v["p99_ms"])), gate("p99_ms", crate::stats::GATE_P99_MS)),
                     p.dim(&format!("({window}, {} frames)", int(&v["n"])))
                 )
             },
@@ -1189,9 +1251,14 @@ fn render(s: &Value, p: &Paint) -> String {
     match a["state"].as_str() {
         Some("running") => {
             row(&mut out, "linked", format!("{} → {}", a["source"].as_str().unwrap_or("?"), a["sink"].as_str().unwrap_or("?")));
+            // What the sound system granted against what was asked: more
+            // than asked is more delay than the audio sync expects, a
+            // warning; up to it good (#76).
+            let asked = num(&a["buffer_ms"]);
+            let within = |hi: f64| asked.map(|b| if hi <= b + 0.05 { Level::Good } else { Level::Warn });
             let granted = |v: &Value| match v.as_array().map(|r| (num(&r[0]), num(&r[1]))) {
-                Some((Some(lo), Some(hi))) if (lo - hi).abs() < 0.05 => format!("{lo:.1} ms"),
-                Some((Some(lo), Some(hi))) => format!("{lo:.1}..{hi:.1} ms"),
+                Some((Some(lo), Some(hi))) if (lo - hi).abs() < 0.05 => p.level(&format!("{lo:.1} ms"), within(hi)),
+                Some((Some(lo), Some(hi))) => p.level(&format!("{lo:.1}..{hi:.1} ms"), within(hi)),
                 _ => "?".into(),
             };
             row(
@@ -1813,6 +1880,100 @@ mod tests {
         assert!(!render(&s, &Paint { on: false }).contains('\x1b'), "plain without colour");
     }
 
+    fn good(t: &str) -> String {
+        format!("\x1b[32m{t}\x1b[0m")
+    }
+    fn warn(t: &str) -> String {
+        format!("\x1b[38;5;208m{t}\x1b[0m")
+    }
+    fn error(t: &str) -> String {
+        format!("\x1b[38;5;196m{t}\x1b[0m")
+    }
+    /// The coloured dashboard's line starting with `name`.
+    fn line(s: &Value, name: &str) -> String {
+        let text = render(s, &Paint { on: true });
+        text.lines().find(|l| l.contains(name)).unwrap_or_else(|| panic!("no {name:?} line in\n{text}")).to_string()
+    }
+
+    #[test]
+    fn dequeue_to_presented_is_held_to_the_go_criteria_and_kernel_to_presented_is_not() {
+        let mut s = sample();
+        assert!(line(&s, "dequeue→presented").contains(&good("9.31 ms")) && line(&s, "dequeue→presented").contains(&good("14.20 ms")));
+        s["dequeue_present"] = json!({ "median_ms": 18.0, "p99_ms": 40.0, "n": 599 });
+        assert!(line(&s, "dequeue→presented").contains(&warn("18.00 ms")) && line(&s, "dequeue→presented").contains(&warn("40.00 ms")));
+        // No stated threshold: plain (#76's inventory).
+        assert!(line(&s, "kernel→presented").contains("median 40.46 ms · p99 49.49 ms"));
+    }
+
+    #[test]
+    fn the_signal_is_green_when_ok_and_red_without_a_picture() {
+        let mut s = sample();
+        assert!(line(&s, "signal  ").contains(&good("ok")));
+        s["signal"] = json!("stopped");
+        assert!(line(&s, "signal  ").contains(&error("stopped (source asleep or off?)")));
+    }
+
+    #[test]
+    fn counts_are_green_at_zero_and_orange_above() {
+        let mut s = sample();
+        assert!(line(&s, "capture gaps").contains(&good("0")));
+        assert!(line(&s, "repeated").contains(&good("0")));
+        assert!(line(&s, "dropped").contains(&good("0")));
+        assert!(line(&s, "fps").contains(&good("59.9")));
+        assert!(line(&s, "underruns").contains(&good("0")) && line(&s, "underruns").contains(&warn("1")));
+        assert!(line(&s, "source").contains(&warn("3")));
+        s["gaps"] = json!(2);
+        s["repeated_window"] = json!(4);
+        s["dropped"] = json!({ "undecodable": 1, "unusable": 0 });
+        s["presented_fps"] = json!(50.0);
+        s["source"]["breaks"] = json!(0);
+        assert!(line(&s, "capture gaps").contains(&warn("2")));
+        assert!(line(&s, "repeated").contains(&warn("4")));
+        assert!(line(&s, "dropped").contains(&warn("1")));
+        assert!(line(&s, "fps").contains(&warn("50.0")));
+        assert!(line(&s, "source").contains(&good("0")));
+        s["framegen"] = json!({ "mode": "ffx", "generated": 10, "missed": 0, "withheld": 0 });
+        assert!(line(&s, "frame generation").contains(&good("0")));
+        s["framegen"]["missed"] = json!(2);
+        assert!(line(&s, "frame generation").contains(&warn("2")));
+    }
+
+    #[test]
+    fn the_granted_audio_buffer_is_held_to_what_was_asked() {
+        let mut s = sample();
+        // Asked 10 ms: in 10.0 is good, out up to 21.3 is over.
+        let l = line(&s, "buffer");
+        assert!(l.contains(&good("10.0 ms")) && l.contains(&warn("10.0..21.3 ms")), "{l}");
+        s["audio"]["granted_out_ms"] = json!([5.3, 5.3]);
+        assert!(line(&s, "buffer").contains(&good("5.3 ms")));
+    }
+
+    #[test]
+    fn gpu_readings_are_held_to_the_cards_own_limits() {
+        let mut s = sample();
+        let reading = |m: f64| json!({ "median": m, "max": m });
+        s["gpu"] = json!({
+            "source": "amdgpu sysfs", "samples": 10,
+            "power_w": reading(200.0), "edge_c": reading(60.0), "junction_c": reading(111.0), "memory_c": reading(114.0),
+            "limits": {
+                "edge_c": { "crit": 110.0, "emergency": 115.0 },
+                "junction_c": { "crit": 110.0, "emergency": 115.0 },
+                "memory_c": { "crit": 108.0, "emergency": 113.0 },
+                "power_cap_w": 330.0,
+            },
+        });
+        let t = line(&s, "temperature");
+        assert!(t.contains(&good("60 °C")) && t.contains(&warn("111 °C")) && t.contains(&error("114 °C")), "{t}");
+        assert!(line(&s, "power").contains(&good("200 W")));
+        s["gpu"]["power_w"] = reading(330.0);
+        assert!(line(&s, "power").contains(&warn("330 W")));
+        // No limits from the driver: plain.
+        s["gpu"]["limits"] = json!({});
+        assert!(line(&s, "temperature").contains("edge 60 °C · junction 111 °C"));
+        let l = line(&s, "power");
+        assert!(!l.contains("\x1b[32m") && !l.contains("38;5;"), "no cap, no colour: {l}");
+    }
+
     #[test]
     fn the_dashboards_text() {
         let text = render(&sample(), &Paint { on: false });
@@ -2028,6 +2189,7 @@ mod tests {
             junction_c: Some(51.0),
             memory_c: Some(60.0),
             fan_rpm: Some(0.0),
+            limits: crate::gpustat::Limits::default(),
         };
         shared.push(Instant::now(), crate::gpustat::Sample { card, ours_pct: Some(3.0), ours_vram: Some(450 << 20) });
         live.set_gpu(Some(shared));

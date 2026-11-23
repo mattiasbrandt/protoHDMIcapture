@@ -10,6 +10,12 @@ use std::time::Duration;
 use crate::dashboard::Live;
 use crate::present::Tag;
 
+/// #5's go criteria for dequeue -> presented, ms: the median within one
+/// 60 Hz refresh, p99 within two. The summary states them; the dashboard
+/// colours the line against them (#76).
+pub const GATE_MEDIAN_MS: f64 = 16.7;
+pub const GATE_P99_MS: f64 = 33.3;
+
 const WINDOW: Duration = Duration::from_secs(10);
 /// This many presents in a row discarded, with as many frame callbacks
 /// between them, and the presents are being replaced before display: the
@@ -289,7 +295,10 @@ impl Stats {
                 self.discarded
             );
         }
-        eprintln!("summary: dequeue->present {}  (gating: median <= 16.7, p99 <= 33.3)", fmt_full(&mut self.to_present));
+        eprintln!(
+            "summary: dequeue->present {}  (gating: median <= {GATE_MEDIAN_MS}, p99 <= {GATE_P99_MS})",
+            fmt_full(&mut self.to_present)
+        );
         eprintln!("summary: kernel->present  {}", fmt_full(&mut self.kernel_to_present));
         eprintln!("summary: get_current_texture wait {}", fmt(&mut self.acquire));
         if !self.gpu_scale.is_empty() {

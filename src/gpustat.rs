@@ -57,6 +57,26 @@ pub struct Card {
     pub junction_c: Option<f64>,
     pub memory_c: Option<f64>,
     pub fan_rpm: Option<f64>,
+    /// The limits the hardware reports (#76): what the dashboard colours
+    /// the readings against, never a guessed number.
+    pub limits: Limits,
+}
+
+/// The card's own limits: hwmon's `temp*_crit` and `temp*_emergency` per
+/// sensor, °C, and `power1_cap`, W.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Limits {
+    pub edge: Temp,
+    pub junction: Temp,
+    pub memory: Temp,
+    pub power_cap_w: Option<f64>,
+}
+
+/// One sensor's critical and emergency temperatures, °C.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Temp {
+    pub crit: Option<f64>,
+    pub emergency: Option<f64>,
 }
 
 /// The seam for a vendor's whole-card numbers.
@@ -112,15 +132,18 @@ impl Source for AmdSysfs {
         let d = &self.device;
         let num = |p: PathBuf| read_trim(&p).and_then(|s| s.parse::<f64>().ok());
         let hw = |f: &str| self.hwmon.as_ref().and_then(|h| num(h.join(f)));
-        // A temperature by its label (edge, junction, mem), not by number.
-        let temp = |label: &str| {
+        // A temperature's file by its label (edge, junction, mem), not by
+        // number: `temp{i}_{what}`, m°C.
+        let temp_file = |label: &str, what: &str| {
             let h = self.hwmon.as_ref()?;
             (1..=8).find_map(|i| {
                 (read_trim(&h.join(format!("temp{i}_label"))).as_deref() == Some(label))
-                    .then(|| num(h.join(format!("temp{i}_input"))).map(|m| m / 1000.0))
+                    .then(|| num(h.join(format!("temp{i}_{what}"))).map(|m| m / 1000.0))
                     .flatten()
             })
         };
+        let temp = |label: &str| temp_file(label, "input");
+        let limit = |label: &str| Temp { crit: temp_file(label, "crit"), emergency: temp_file(label, "emergency") };
         Card {
             busy_pct: num(d.join("gpu_busy_percent")),
             shader_mhz: read_trim(&d.join("pp_dpm_sclk")).and_then(|s| current_clock(&s)),
@@ -133,6 +156,12 @@ impl Source for AmdSysfs {
             junction_c: temp("junction"),
             memory_c: temp("mem"),
             fan_rpm: hw("fan1_input"),
+            limits: Limits {
+                edge: limit("edge"),
+                junction: limit("junction"),
+                memory: limit("mem"),
+                power_cap_w: hw("power1_cap").map(|uw| uw / 1e6),
+            },
         }
     }
 }
@@ -420,7 +449,15 @@ pub fn json(shared: &Shared) -> serde_json::Value {
         "junction_c": mm(&|s| s.card.junction_c),
         "memory_c": mm(&|s| s.card.memory_c),
         "fan_rpm": mm(&|s| s.card.fan_rpm),
+        "limits": limits_json(&last.card.limits),
     })
+}
+
+/// The hardware's limits as the dashboard's JSON (#76); absent ones null.
+fn limits_json(l: &Limits) -> serde_json::Value {
+    use serde_json::json;
+    let t = |t: &Temp| json!({ "crit": t.crit, "emergency": t.emergency });
+    json!({ "edge_c": t(&l.edge), "junction_c": t(&l.junction), "memory_c": t(&l.memory), "power_cap_w": l.power_cap_w })
 }
 
 /// `--stats`' lines for a run's samples: each number's median and max.
@@ -496,6 +533,12 @@ mod tests {
             write(&h.join(format!("temp{i}_label")), &format!("{label}\n"));
             write(&h.join(format!("temp{i}_input")), &format!("{milli}\n"));
         }
+        // This card's limits: edge and junction 110/115 °C, memory 108/113.
+        for (i, crit, emergency) in [(1, 110000, 115000), (2, 110000, 115000), (3, 108000, 113000)] {
+            write(&h.join(format!("temp{i}_crit")), &format!("{crit}\n"));
+            write(&h.join(format!("temp{i}_emergency")), &format!("{emergency}\n"));
+        }
+        write(&h.join("power1_cap"), "330000000\n");
         write(&h.join("fan1_input"), "0\n");
         fs::create_dir_all(drm.join("card1")).unwrap();
         std::os::unix::fs::symlink(&pci, drm.join("card1/device")).unwrap();
@@ -517,6 +560,11 @@ mod tests {
         assert_eq!(c.power_w, Some(49.0));
         assert_eq!((c.edge_c, c.junction_c, c.memory_c), (Some(49.0), Some(51.0), Some(60.0)));
         assert_eq!(c.fan_rpm, Some(0.0));
+        let t = |crit: f64, emergency: f64| Temp { crit: Some(crit), emergency: Some(emergency) };
+        assert_eq!(
+            c.limits,
+            Limits { edge: t(110.0, 115.0), junction: t(110.0, 115.0), memory: t(108.0, 113.0), power_cap_w: Some(330.0) }
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
