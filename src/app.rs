@@ -304,6 +304,10 @@ struct App {
     /// The adapter's kind, for frame generation's refusal when `g` turns
     /// it on mid-run (#83).
     device_type: Option<wgpu::DeviceType>,
+    /// The size of the monitor the window is on, in pixels, when the
+    /// toolkit tells (#85): the scaling suggestion's input. Read on every
+    /// relayout, so it follows a move to another monitor.
+    monitor_size: Option<(u32, u32)>,
 }
 
 /// Frame generation in the window (framegen.rs, #66): the schedule, and
@@ -617,6 +621,7 @@ impl Host for Winit {
             gamemode: GameMode::new(stats),
             adapter: None,
             device_type: None,
+            monitor_size: None,
         };
         app.opts.live.set_gamemode(app.gamemode.status());
         let delay_ms = app.delay_ms();
@@ -1025,11 +1030,24 @@ impl App {
         self.update_gpu();
     }
 
+    /// How the picture fits the monitor the window is on (#85); None while
+    /// the monitor is not known.
+    fn monitor_fit(&self) -> Option<scale::Fit> {
+        self.monitor_size.map(|m| scale::fit((self.format.width, self.format.height), m))
+    }
+
+    /// The picture is scaled into the window: the viewport is not the
+    /// frame's own size (#85).
+    fn scaled(&self) -> bool {
+        self.gfx.as_ref().is_some_and(|g| (g.viewport[2], g.viewport[3]) != (self.format.width, self.format.height))
+    }
+
     /// The viewport and the scaler for the surface's size and SCALING; after
     /// a resize and on c.
     fn relayout(&mut self) {
         let Some(gfx) = self.gfx.as_mut() else { return };
         let frame = (self.format.width, self.format.height);
+        self.monitor_size = gfx.window.current_monitor().map(|m| (m.size().width, m.size().height)).filter(|&(w, h)| w > 0 && h > 0);
         gfx.viewport = letterbox((gfx.config.width, gfx.config.height), frame);
         let [_, _, vw, vh] = gfx.viewport;
         gfx.filter = scale::filter(self.opts.live_changes.scaling(), frame, (vw, vh));
@@ -1395,9 +1413,10 @@ impl App {
                 label: None,
             });
         }
-        // Read every frame, so it follows c and frame generation turning
-        // on or off.
-        let label = overlay::enhancement_label(self.framegen.as_ref().map(|f| f.schedule.mode()), self.opts.live_changes.scaling());
+        // Read every frame, so it follows c, a resize and frame generation
+        // turning on or off.
+        let label =
+            overlay::enhancement_label(self.framegen.as_ref().map(|f| f.schedule.mode()), self.opts.live_changes.scaling(), self.scaled());
         if !self.overlay.visible(now) {
             // The label alone: it stays on while the overlay is hidden.
             return label.map(|l| SceneText {
@@ -1418,12 +1437,16 @@ impl App {
             }
             Some(Page::Panel) => {
                 let changes = self.opts.live_changes.changes(self.delay_ms());
+                // How the picture fits the monitor: dev builds only, for
+                // judging (#85); Upscaling's own row carries it later (#84).
+                let fit = self.monitor_fit().filter(|_| cfg!(feature = "dev")).map(|f| f.reason);
                 let id = &self.overlay.tips_id;
                 let p = self.opts.live_changes.picture();
                 Some(overlay::panel_lines(&overlay::Panel {
                     display: self.opts.live_changes.window().names().1,
                     levels: p.levels.as_str(),
                     scaling: self.opts.live_changes.scaling().as_str(),
+                    scaling_fit: fit.as_deref(),
                     framegen: cfg!(feature = "dev").then(|| self.framegen.as_ref().map_or("off", |f| f.schedule.mode().as_str())),
                     colour: [p.contrast, p.brightness, p.gamma, p.saturation],
                     audio: match &self.opts.audio {
@@ -1929,6 +1952,7 @@ mod tests {
             gamemode: GameMode::with(crate::gamemode::absent, false),
             adapter: None,
             device_type: None,
+            monitor_size: None,
             opts: Options {
                 audio: AudioSetup::Off("none".into()),
                 source: "ps5".into(),
@@ -1974,6 +1998,21 @@ mod tests {
             assert!(app.framegen.is_none(), "{first:?} refused on an integrated GPU");
             assert!(app.overlay.current_message(Instant::now()).unwrap().starts_with("Warning: "));
         }
+    }
+
+    #[test]
+    fn the_fit_follows_the_monitor() {
+        let (mut app, _) = app_with("SCALING=fast\n");
+        // Monitor not known: no fit line.
+        assert_eq!(app.monitor_fit(), None);
+        // A 4K monitor: enlarged 2x.
+        app.monitor_size = Some((3840, 2160));
+        let f = app.monitor_fit().unwrap();
+        assert!(f.enlarged && f.reason.contains("3840x2160"), "{f:?}");
+        // Moved to a 1080p monitor: pixel for pixel.
+        app.monitor_size = Some((1920, 1080));
+        let f = app.monitor_fit().unwrap();
+        assert!(f.one_to_one && !f.enlarged, "{f:?}");
     }
 
     #[test]

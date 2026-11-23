@@ -29,6 +29,10 @@
 //! (4:2:2, co-sited with the even pixel). The convert pass interpolates the
 //! odd pixels' chroma with spline36 (`chroma_taps`), mpv's default cscale,
 //! for every preset; it was linear before.
+//!
+//! The fit (#85): `fit` says how the picture fits a monitor (enlarged and
+//! how much, pixel for pixel, or scaled down, and where the bars go), for
+//! the overlay's Scaling row and Upscaling's suggestion (#84).
 
 /// SCALING, in the order c cycles them. `config` (mpv.conf's own scalers)
 /// has no meaning here and reads as balanced (ADR 0001).
@@ -57,6 +61,13 @@ impl Scaling {
         }
     }
 
+    /// Every preset, in `c`'s cycle from balanced (the branches' presets
+    /// too).
+    #[cfg(test)]
+    pub fn all() -> Vec<Self> {
+        std::iter::successors(Some(Self::Balanced), |s| Some(s.next()).filter(|n| *n != Self::Balanced)).collect()
+    }
+
     /// The overlay's c: settings.rows' order, without config.
     pub fn next(self) -> Self {
         match self {
@@ -75,6 +86,46 @@ pub fn chroma_taps() -> [f32; 6] {
     let w = [2.5, 1.5, 0.5, 0.5, 1.5, 2.5].map(|d| Function::Spline36.weight(d));
     let sum: f64 = w.iter().sum();
     w.map(|x| (x / sum) as f32)
+}
+
+/// How a frame fits a monitor fullscreen (#85): the letterboxed fit, black
+/// bars where the aspects differ.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fit {
+    /// The frame's scale into the monitor (the smaller of the two axes').
+    pub ratio: f64,
+    /// Enlarged: where an upscaler would help (Upscaling, #84).
+    pub enlarged: bool,
+    /// Shown pixel for pixel: every scaler gives the frame itself.
+    pub one_to_one: bool,
+    /// In words for the overlay: the scale, the monitor and the bars.
+    pub reason: String,
+}
+
+/// How `frame` fits a `monitor` shown fullscreen.
+pub fn fit(frame: (u32, u32), monitor: (u32, u32)) -> Fit {
+    let (fw, fh) = (f64::from(frame.0.max(1)), f64::from(frame.1.max(1)));
+    let (mw, mh) = (f64::from(monitor.0), f64::from(monitor.1));
+    let ratio = (mw / fw).min(mh / fh);
+    let on = format!("this {}x{} monitor", monitor.0, monitor.1);
+    let bars = if (mw / mh - fw / fh).abs() < 0.01 {
+        ""
+    } else if mw / mh > fw / fh {
+        ", black bars at the sides"
+    } else {
+        ", black bars above and below"
+    };
+    let one_to_one = (ratio - 1.0).abs() < 1e-6;
+    let reason = if one_to_one {
+        format!("shown pixel for pixel on {on}{bars}")
+    } else if ratio < 1.0 {
+        format!("scaled down to fit {on}{bars}")
+    } else if (ratio - ratio.round()).abs() < 1e-6 {
+        format!("enlarged exactly {ratio:.0}x on {on}{bars}")
+    } else {
+        format!("enlarged {ratio:.2}x on {on}{bars}")
+    };
+    Fit { ratio, enlarged: !one_to_one && ratio > 1.0, one_to_one, reason }
 }
 
 /// libplacebo's filter functions (src/filters.c).
@@ -402,6 +453,33 @@ mod tests {
         assert!(t[2] > 0.5 && t[1] < 0.0 && t[0] > 0.0, "{t:?}");
         // Not the old linear rule (0.5 and 0.5 from the two neighbours).
         assert!((t[2] - 0.5).abs() > 0.01, "{t:?}");
+    }
+
+    #[test]
+    fn the_fit_says_how_the_picture_meets_the_monitor() {
+        let hd = (1920, 1080);
+        // Pixel for pixel: a 1080p monitor, and a 2560x1080 ultrawide.
+        let f = fit(hd, (1920, 1080));
+        assert!(f.one_to_one && !f.enlarged, "{f:?}");
+        assert_eq!(f.reason, "shown pixel for pixel on this 1920x1080 monitor");
+        let f = fit(hd, (2560, 1080));
+        assert!(f.one_to_one && !f.enlarged, "{f:?}");
+        assert_eq!(f.reason, "shown pixel for pixel on this 2560x1080 monitor, black bars at the sides");
+        // Enlarged 1.33x: 2560x1440, and a 3440x1440 ultrawide with bars.
+        let f = fit(hd, (3440, 1440));
+        assert!(f.enlarged && !f.one_to_one, "{f:?}");
+        assert_eq!(f.reason, "enlarged 1.33x on this 3440x1440 monitor, black bars at the sides");
+        assert_eq!(fit(hd, (2560, 1440)).reason, "enlarged 1.33x on this 2560x1440 monitor");
+        // Exactly 2x: 4K, and 5120x2160 with bars.
+        assert_eq!(fit(hd, (3840, 2160)).reason, "enlarged exactly 2x on this 3840x2160 monitor");
+        assert!(fit(hd, (5120, 2160)).reason.ends_with("black bars at the sides"));
+        // Scaled down: not enlarged.
+        let f = fit(hd, (1280, 720));
+        assert!(!f.enlarged && !f.one_to_one, "{f:?}");
+        assert_eq!(f.reason, "scaled down to fit this 1280x720 monitor");
+        // A taller monitor: bars above and below.
+        assert!(fit(hd, (1920, 1200)).reason.ends_with("black bars above and below"));
+        assert_eq!(Scaling::all(), [Scaling::Balanced, Scaling::Fast, Scaling::HighQuality]);
     }
 
     #[test]

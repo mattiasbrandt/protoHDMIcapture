@@ -699,6 +699,7 @@ mod tests {
             display: "Fullscreen",
             levels: "auto",
             scaling: "balanced",
+            scaling_fit: None,
             framegen: None,
             colour: [0, 0, 0, 0],
             audio: overlay::Audio::Running { level: Some(Ok(crate::level::Level { volume: 80, mute: false })), delay_ms: 50 },

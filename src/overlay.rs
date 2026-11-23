@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use crate::capture::{Reason, Signal, Since};
 use crate::framegen::Mode;
-use crate::gpustat;
 use crate::scale::Scaling;
 use crate::sources::{self, Profile};
 
@@ -163,6 +162,10 @@ pub struct Panel<'a> {
     pub display: &'a str,
     pub levels: &'a str,
     pub scaling: &'a str,
+    /// How the picture fits the monitor the window is on (scale.rs `fit`,
+    /// #85), when the toolkit tells: a line under the Scaling row, in dev
+    /// builds (app.rs decides).
+    pub scaling_fit: Option<&'a str>,
     /// Frame generation's mode, or "off": a dev build's `g` row (#83);
     /// None, no row (a release build).
     pub framegen: Option<&'a str>,
@@ -182,6 +185,9 @@ pub fn panel_lines(p: &Panel) -> Vec<String> {
         format!("l     Levels       {}", p.levels),
         format!("c     Scaling      {}", p.scaling),
     ];
+    if let Some(fit) = p.scaling_fit {
+        lines.push(format!("                   {fit}"));
+    }
     if let Some(fg) = p.framegen {
         lines.push(format!("g     Framegen     {fg}"));
     }
@@ -251,21 +257,22 @@ pub fn tips_lines(id: &str, profile: Option<&Profile>) -> Vec<String> {
     out
 }
 
-/// The enhancement that runs (#80), for the window's top-right corner in
-/// dev builds, so a judging run and its screenshots say what is on: frame
-/// generation's mode and an enhancement SCALING preset (`gpustat::enhanced`),
-/// each by its own name. None on a plain run, and always in a release build.
-pub fn enhancement_label(framegen: Option<Mode>, scaling: Scaling) -> Option<String> {
+/// What runs on the picture (#80, #85), for the window's top-right corner
+/// in dev builds, so a judging run and its screenshots say what is on:
+/// frame generation's mode, and the SCALING preset whenever the picture is
+/// scaled (`scaled`: the viewport is not the frame's size; at 1:1 every
+/// preset is the frame itself), each by its own name. None when neither,
+/// and always in a release build (its Tab page's Scaling row names the
+/// preset).
+pub fn enhancement_label(framegen: Option<Mode>, scaling: Scaling, scaled: bool) -> Option<String> {
     if !cfg!(feature = "dev") {
         return None;
     }
-    let parts: Vec<String> = [
-        framegen.map(|m| format!("framegen {}", m.as_str())),
-        gpustat::enhanced(None, scaling).then(|| format!("scaling {}", scaling.as_str())),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let parts: Vec<String> =
+        [framegen.map(|m| format!("framegen {}", m.as_str())), scaled.then(|| format!("scaling {}", scaling.as_str()))]
+            .into_iter()
+            .flatten()
+            .collect();
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
@@ -274,25 +281,50 @@ mod tests {
     use super::*;
     use crate::level::Level;
 
-    /// Every SCALING preset, in `c`'s cycle (the branches' presets too).
-    fn presets() -> Vec<Scaling> {
-        std::iter::successors(Some(Scaling::Balanced), |s| Some(s.next()).filter(|n| *n != Scaling::Balanced)).collect()
+    #[test]
+    fn the_label_names_frame_generation_and_the_preset_while_scaled_in_dev_builds_only() {
+        let dev = cfg!(feature = "dev");
+        for scaling in Scaling::all() {
+            let preset = format!("scaling {}", scaling.as_str());
+            // 1:1, nothing on: no label; 1:1 with frame generation: its
+            // mode alone (the preset does nothing at 1:1).
+            assert_eq!(enhancement_label(None, scaling, false), None, "{scaling:?}");
+            // Scaled: the active preset, whichever it is (c changes it).
+            assert_eq!(enhancement_label(None, scaling, true), dev.then(|| preset.clone()), "{scaling:?}");
+            for mode in Mode::ALL {
+                let fg = format!("framegen {}", mode.as_str());
+                assert_eq!(enhancement_label(Some(mode), scaling, false), dev.then(|| fg.clone()), "{mode:?} {scaling:?}");
+                assert_eq!(enhancement_label(Some(mode), scaling, true), dev.then(|| format!("{fg} · {preset}")), "{mode:?} {scaling:?}");
+            }
+        }
+        // c moves it to the next preset's name.
+        let next = Scaling::Balanced.next();
+        assert_eq!(enhancement_label(None, next, true), dev.then(|| format!("scaling {}", next.as_str())));
     }
 
     #[test]
-    fn the_enhancement_label_names_what_runs_in_dev_builds_only() {
-        let dev = cfg!(feature = "dev");
-        for scaling in presets() {
-            let preset = gpustat::enhanced(None, scaling);
-            let want_preset = format!("scaling {}", scaling.as_str());
-            // A plain run (no frame generation, no enhancement preset): none.
-            assert_eq!(enhancement_label(None, scaling), (dev && preset).then(|| want_preset.clone()), "{scaling:?}");
-            for mode in Mode::ALL {
-                let fg = format!("framegen {}", mode.as_str());
-                let want = if preset { format!("{fg} · {want_preset}") } else { fg };
-                assert_eq!(enhancement_label(Some(mode), scaling), dev.then_some(want), "{mode:?} {scaling:?}");
-            }
-        }
+    fn the_scaling_row_says_how_the_picture_fits_the_monitor() {
+        let fit = crate::scale::fit((1920, 1080), (3840, 2160)).reason;
+        let lines = |fit: Option<&str>| {
+            panel_lines(&Panel {
+                display: "Fullscreen",
+                levels: "auto",
+                scaling: "balanced",
+                scaling_fit: fit,
+                framegen: None,
+                colour: [0; 4],
+                audio: Audio::Other("none".into()),
+                tips_name: String::new(),
+                changes: &[],
+            })
+        };
+        let with = lines(Some(&fit));
+        let at = with.iter().position(|l| l.starts_with("c     Scaling")).unwrap();
+        assert_eq!(with[at], "c     Scaling      balanced");
+        assert_eq!(with[at + 1], "                   enlarged exactly 2x on this 3840x2160 monitor");
+        // Monitor not known: no line.
+        let without = lines(None);
+        assert_eq!(without.len(), with.len() - 1);
     }
 
     fn panel(audio: Audio, changes: &[String]) -> Vec<String> {
@@ -300,6 +332,7 @@ mod tests {
             display: "Fullscreen",
             levels: "auto",
             scaling: "balanced",
+            scaling_fit: None,
             framegen: None,
             colour: [1, -2, 0, 3],
             audio,
@@ -348,6 +381,7 @@ mod tests {
                 display: "Fullscreen",
                 levels: "auto",
                 scaling: "balanced",
+                scaling_fit: None,
                 framegen: fg,
                 colour: [0; 4],
                 audio: Audio::Other("none".into()),
