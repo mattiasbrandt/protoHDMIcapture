@@ -20,6 +20,7 @@ mod keys;
 mod level;
 mod live_changes;
 mod mjpeg;
+mod nis;
 mod osd;
 mod overlay;
 mod pacing;

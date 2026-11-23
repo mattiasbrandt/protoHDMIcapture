@@ -140,7 +140,7 @@ its current value, and these keys:
 | Key | With the overlay open |
 |---|---|
 | **l** | levels: auto → limited → full (the range of the card's frames) |
-| **c** | scaling: balanced → fast → high-quality |
+| **c** | Upscaling: off → AMD FSR 1 → NVIDIA Image Scaling |
 | **r** | reset the colour |
 | **t** | the setup tips for the source; **←** / **→** browse the other source profiles |
 | **w** | save what changed since the feed started |
@@ -223,7 +223,8 @@ legacy reads the same rows.
 | `WINDOW` | `fullscreen` | `fullscreen`, `borderless` or `windowed` (see below); **f** cycles it |
 | `WINDOW_SIZE` | `1280x720` | the window's size when windowed |
 | `REFRESH` | `keep` | `match` switches the monitor to its refresh nearest `FPS` for the session and restores it after (Hyprland) |
-| `SCALING` | `balanced` | `balanced` (spline36 or mitchell), `fast` (bilinear, the least GPU time, softer) or `high-quality` (EWA Lanczos upscale, more GPU time); `config` is legacy's mpv.conf, read as balanced here. **c** cycles it |
+| `SCALING` | `balanced` | the resize filter, where Upscaling does not enlarge the picture: `balanced` (spline36 or mitchell), `fast` (bilinear, softer) or `high-quality` (EWA Lanczos); `config` is legacy's mpv.conf, read as balanced here |
+| `UPSCALING` | `off` | enlarges the picture with sharpening on a monitor bigger than the capture: `fsr` (AMD FSR 1) or `nis` (NVIDIA Image Scaling, up to 2x); the setup wizard turns it on with a dedicated GPU. **c** cycles it |
 | `LEVELS` | `auto` | the range of the card's frames: `limited` or `full` if blacks look crushed or washed out. `auto` reads YUYV as limited and MJPEG as full |
 | `BRIGHTNESS`, `CONTRAST`, `SATURATION`, `GAMMA` | `0` | colour adjustments, -100 to 100; keys **1**–**8** change them, **w** saves them |
 | `DEBUG` | `off` | `log` or `window`; see [Debugging](#debugging-and-the-dashboard). `--debug` is `window` for one run |

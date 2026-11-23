@@ -29,7 +29,9 @@ pub enum Action {
     /// The tips page's arrows: the previous (-1) or next (1) source profile.
     CycleTips(i32),
     CycleLevels,
-    CycleScaling,
+    /// c (#85): Upscaling's next method; the resize filter (SCALING) has
+    /// no key.
+    CycleUpscaling,
     /// g, dev builds (#83): frame generation off, then each judged
     /// approach, then off.
     CycleFramegen,
@@ -101,7 +103,7 @@ fn overlay(key: &Key, page: Option<Page>) -> Option<Action> {
         Key::Named(NamedKey::ArrowRight) if page == Some(Page::Tips) => Action::CycleTips(1),
         Key::Character(c) => match c.as_str() {
             "l" => Action::CycleLevels,
-            "c" => Action::CycleScaling,
+            "c" => Action::CycleUpscaling,
             "g" if cfg!(feature = "dev") => Action::CycleFramegen,
             "r" => Action::ResetColour,
             "w" => Action::Save,
@@ -281,7 +283,7 @@ mod tests {
     fn overlay_keys_only_while_it_is_open() {
         let table = [
             ("l", Action::CycleLevels),
-            ("c", Action::CycleScaling),
+            ("c", Action::CycleUpscaling),
             ("r", Action::ResetColour),
             ("w", Action::Save),
             ("t", Action::ToggleTips),

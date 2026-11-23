@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::capture::{Reason, Signal, Since};
 use crate::framegen::Mode;
-use crate::scale::Scaling;
+use crate::scale::{Scaling, Upscaling};
 use crate::sources::{self, Profile};
 
 /// Tells the window something to show from another thread: a message and
@@ -161,11 +161,12 @@ pub enum Audio {
 pub struct Panel<'a> {
     pub display: &'a str,
     pub levels: &'a str,
+    /// SCALING, the resize filter: a detail, without a key (#85).
     pub scaling: &'a str,
-    /// How the picture fits the monitor the window is on (scale.rs `fit`,
-    /// #85), when the toolkit tells: a line under the Scaling row, in dev
-    /// builds (app.rs decides).
-    pub scaling_fit: Option<&'a str>,
+    /// UPSCALING's method for people (`Upscaling::name`), and its line under
+    /// the row (`upscaling_hint`), #85.
+    pub upscaling: &'a str,
+    pub upscaling_hint: Option<&'a str>,
     /// Frame generation's mode, or "off": a dev build's `g` row (#83);
     /// None, no row (a release build).
     pub framegen: Option<&'a str>,
@@ -178,20 +179,22 @@ pub struct Panel<'a> {
 
 pub fn panel_lines(p: &Panel) -> Vec<String> {
     let [c, b, g, s] = p.colour;
-    let mut lines = vec![
-        "protoHDMIcapture".to_string(),
-        String::new(),
-        format!("f     Display      {}", p.display),
-        format!("l     Levels       {}", p.levels),
-        format!("c     Scaling      {}", p.scaling),
-    ];
-    if let Some(fit) = p.scaling_fit {
-        lines.push(format!("                   {fit}"));
+    // The GPU enhancements lead the page (#85); the picture's details follow.
+    let mut lines =
+        vec!["protoHDMIcapture".to_string(), String::new(), "GPU enhancements".to_string(), format!("c     Upscaling    {}", p.upscaling)];
+    if let Some(hint) = p.upscaling_hint {
+        lines.push(format!("                   {hint}"));
     }
     if let Some(fg) = p.framegen {
         lines.push(format!("g     Framegen     {fg}"));
     }
-    lines.extend([format!("1-8   Colour       contrast {c} · brightness {b} · gamma {g} · saturation {s}")]);
+    lines.extend([
+        String::new(),
+        format!("f     Display      {}", p.display),
+        format!("l     Levels       {}", p.levels),
+        format!("      Resizing     {}", p.scaling),
+        format!("1-8   Colour       contrast {c} · brightness {b} · gamma {g} · saturation {s}"),
+    ]);
     match &p.audio {
         Audio::Other(v) => lines.push(format!("      Audio        {}", if v.is_empty() { "?" } else { v })),
         Audio::Failed(why) => {
@@ -257,74 +260,100 @@ pub fn tips_lines(id: &str, profile: Option<&Profile>) -> Vec<String> {
     out
 }
 
+/// The line under Upscaling's row (#85), from how the picture fits the
+/// monitor (scale.rs `fit`): the overlay only suggests. `running` is the
+/// Upscaling that runs (Off where it does not enlarge).
+pub fn upscaling_hint(setting: Upscaling, running: Upscaling, fit: &crate::scale::Fit) -> Option<String> {
+    match (setting, running) {
+        (Upscaling::Off, _) if fit.enlarged => Some(format!("suggested: on, the picture is {}", fit.reason)),
+        (Upscaling::Off, _) => None,
+        (_, Upscaling::Off) if fit.enlarged => {
+            Some(format!("{} works up to 2x a side: the resize filter enlarges this one ({})", setting.name(), fit.reason))
+        }
+        (_, Upscaling::Off) => Some(format!("does nothing here: the picture is {}", fit.reason)),
+        _ => Some(format!("the picture is {}", fit.reason)),
+    }
+}
+
 /// What runs on the picture (#80, #85), for the window's top-right corner
 /// in dev builds, so a judging run and its screenshots say what is on:
-/// frame generation's mode, and the SCALING preset whenever the picture is
-/// scaled (`scaled`: the viewport is not the frame's size; at 1:1 every
-/// preset is the frame itself), each by its own name. None when neither,
-/// and always in a release build (its Tab page's Scaling row names the
-/// preset).
-pub fn enhancement_label(framegen: Option<Mode>, scaling: Scaling, scaled: bool) -> Option<String> {
+/// frame generation's mode, and the Upscaling that runs (`upscaling`, Off
+/// where the picture is not enlarged), else SCALING's preset whenever the
+/// picture is scaled (`scaled`; at 1:1 every preset is the frame itself),
+/// each by its own name. None when nothing, and always in a release build.
+pub fn enhancement_label(framegen: Option<Mode>, upscaling: Upscaling, scaling: Scaling, scaled: bool) -> Option<String> {
     if !cfg!(feature = "dev") {
         return None;
     }
-    let parts: Vec<String> =
-        [framegen.map(|m| format!("framegen {}", m.as_str())), scaled.then(|| format!("scaling {}", scaling.as_str()))]
-            .into_iter()
-            .flatten()
-            .collect();
+    let resize = if upscaling != Upscaling::Off {
+        Some(format!("upscaling {}", upscaling.as_str()))
+    } else {
+        scaled.then(|| format!("scaling {}", scaling.as_str()))
+    };
+    let parts: Vec<String> = [framegen.map(|m| format!("framegen {}", m.as_str())), resize].into_iter().flatten().collect();
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::level::Level;
 
     #[test]
-    fn the_label_names_frame_generation_and_the_preset_while_scaled_in_dev_builds_only() {
+    fn the_label_names_frame_generation_upscaling_and_the_resize_filter_in_dev_builds_only() {
         let dev = cfg!(feature = "dev");
-        for scaling in Scaling::all() {
+        for scaling in Scaling::ALL {
             let preset = format!("scaling {}", scaling.as_str());
-            // 1:1, nothing on: no label; 1:1 with frame generation: its
-            // mode alone (the preset does nothing at 1:1).
-            assert_eq!(enhancement_label(None, scaling, false), None, "{scaling:?}");
-            // Scaled: the active preset, whichever it is (c changes it).
-            assert_eq!(enhancement_label(None, scaling, true), dev.then(|| preset.clone()), "{scaling:?}");
+            // 1:1, nothing on: no label.
+            assert_eq!(enhancement_label(None, Upscaling::Off, scaling, false), None, "{scaling:?}");
+            // Scaled by the resize filter: its preset.
+            assert_eq!(enhancement_label(None, Upscaling::Off, scaling, true), dev.then(|| preset.clone()), "{scaling:?}");
+            // Upscaling runs: it, not the resize filter.
+            for up in [Upscaling::Fsr, Upscaling::Nis] {
+                let want = format!("upscaling {}", up.as_str());
+                assert_eq!(enhancement_label(None, up, scaling, true), dev.then(|| want.clone()), "{up:?}");
+            }
             for mode in Mode::ALL {
                 let fg = format!("framegen {}", mode.as_str());
-                assert_eq!(enhancement_label(Some(mode), scaling, false), dev.then(|| fg.clone()), "{mode:?} {scaling:?}");
-                assert_eq!(enhancement_label(Some(mode), scaling, true), dev.then(|| format!("{fg} · {preset}")), "{mode:?} {scaling:?}");
+                assert_eq!(enhancement_label(Some(mode), Upscaling::Off, scaling, false), dev.then(|| fg.clone()), "{mode:?}");
+                assert_eq!(
+                    enhancement_label(Some(mode), Upscaling::Fsr, scaling, true),
+                    dev.then(|| format!("{fg} · upscaling fsr")),
+                    "{mode:?}"
+                );
             }
         }
-        // c moves it to the next preset's name.
-        let next = Scaling::Balanced.next();
-        assert_eq!(enhancement_label(None, next, true), dev.then(|| format!("scaling {}", next.as_str())));
     }
-
     #[test]
-    fn the_scaling_row_says_how_the_picture_fits_the_monitor() {
-        let fit = crate::scale::fit((1920, 1080), (3840, 2160)).reason;
-        let lines = |fit: Option<&str>| {
-            panel_lines(&Panel {
-                display: "Fullscreen",
-                levels: "auto",
-                scaling: "balanced",
-                scaling_fit: fit,
-                framegen: None,
-                colour: [0; 4],
-                audio: Audio::Other("none".into()),
-                tips_name: String::new(),
-                changes: &[],
-            })
-        };
-        let with = lines(Some(&fit));
-        let at = with.iter().position(|l| l.starts_with("c     Scaling")).unwrap();
-        assert_eq!(with[at], "c     Scaling      balanced");
-        assert_eq!(with[at + 1], "                   enlarged exactly 2x on this 3840x2160 monitor");
-        // Monitor not known: no line.
-        let without = lines(None);
-        assert_eq!(without.len(), with.len() - 1);
+    fn upscalings_hint_only_suggests_and_says_when_it_does_nothing() {
+        let fit = |m| crate::scale::fit((1920, 1080), m);
+        let (k4, hd, small, wide) = (fit((3840, 2160)), fit((1920, 1080)), fit((1280, 720)), fit((5120, 2160)));
+        // Off, enlarged: suggested.
+        assert_eq!(
+            upscaling_hint(Upscaling::Off, Upscaling::Off, &k4).as_deref(),
+            Some("suggested: on, the picture is enlarged exactly 2x on this 3840x2160 monitor")
+        );
+        // Off, not enlarged: nothing to say.
+        assert_eq!(upscaling_hint(Upscaling::Off, Upscaling::Off, &hd), None);
+        assert_eq!(upscaling_hint(Upscaling::Off, Upscaling::Off, &small), None);
+        // On and running: the fit.
+        assert_eq!(
+            upscaling_hint(Upscaling::Fsr, Upscaling::Fsr, &k4).as_deref(),
+            Some("the picture is enlarged exactly 2x on this 3840x2160 monitor")
+        );
+        // On, 1:1 or a downscale: it does nothing.
+        assert_eq!(
+            upscaling_hint(Upscaling::Fsr, Upscaling::Off, &hd).as_deref(),
+            Some("does nothing here: the picture is shown pixel for pixel on this 1920x1080 monitor")
+        );
+        assert!(upscaling_hint(Upscaling::Nis, Upscaling::Off, &small).unwrap().starts_with("does nothing here"));
+        // NIS past 2x a side: the resize filter enlarges it.
+        assert!(
+            upscaling_hint(Upscaling::Nis, Upscaling::Off, &fit((4480, 2520))).unwrap().starts_with("NVIDIA Image Scaling works up to 2x")
+        );
+        assert_eq!(
+            upscaling_hint(Upscaling::Nis, Upscaling::Nis, &wide).as_deref(),
+            Some("the picture is enlarged exactly 2x on this 5120x2160 monitor, black bars at the sides")
+        );
     }
 
     fn panel(audio: Audio, changes: &[String]) -> Vec<String> {
@@ -332,7 +361,8 @@ mod tests {
             display: "Fullscreen",
             levels: "auto",
             scaling: "balanced",
-            scaling_fit: None,
+            upscaling: "off",
+            upscaling_hint: None,
             framegen: None,
             colour: [1, -2, 0, 3],
             audio,
@@ -352,9 +382,12 @@ mod tests {
             [
                 "protoHDMIcapture",
                 "",
+                "GPU enhancements",
+                "c     Upscaling    off",
+                "",
                 "f     Display      Fullscreen",
                 "l     Levels       auto",
-                "c     Scaling      balanced",
+                "      Resizing     balanced",
                 "1-8   Colour       contrast 1 · brightness -2 · gamma 0 · saturation 3",
                 "m 9 0 Audio        muted · volume 80%",
                 "^-/^+ Audio sync   50 ms   (alt -/+: 50 ms steps)",
@@ -367,21 +400,23 @@ mod tests {
             ]
         );
         let other = panel(Audio::Other("none".into()), &[]);
-        assert_eq!(other[6], "      Audio        none");
-        assert_eq!(other[9], "w     Save         nothing changed");
-        assert_eq!(panel(Audio::Failed("no card source".into()), &[])[6], "m 9 0 Audio        not running, see the log: no card source");
-        assert_eq!(panel(Audio::Running { level: None, delay_ms: 0 }, &[])[6], "m 9 0 Audio        …");
+        assert_eq!(other[9], "      Audio        none");
+        assert_eq!(other[12], "w     Save         nothing changed");
+        assert_eq!(panel(Audio::Failed("no card source".into()), &[])[9], "m 9 0 Audio        not running, see the log: no card source");
+        assert_eq!(panel(Audio::Running { level: None, delay_ms: 0 }, &[])[9], "m 9 0 Audio        …");
     }
 
     #[test]
-    fn a_dev_build_names_frame_generation_under_scaling() {
-        // A dev build passes the mode or "off" (#83); a release build none.
+    fn the_gpu_enhancements_lead_the_page() {
+        // Upscaling with its hint, then a dev build's frame generation (#83;
+        // a release build passes none), then the picture's details (#85).
         let with = |fg| {
             panel_lines(&Panel {
                 display: "Fullscreen",
                 levels: "auto",
                 scaling: "balanced",
-                scaling_fit: None,
+                upscaling: "AMD FSR 1",
+                upscaling_hint: Some("the picture is enlarged exactly 2x on this 3840x2160 monitor"),
                 framegen: fg,
                 colour: [0; 4],
                 audio: Audio::Other("none".into()),
@@ -390,10 +425,22 @@ mod tests {
             })
         };
         let on = with(Some("ffx-quality"));
-        assert_eq!(on[4], "c     Scaling      balanced");
-        assert_eq!(on[5], "g     Framegen     ffx-quality");
+        assert_eq!(
+            on[2..8],
+            [
+                "GPU enhancements",
+                "c     Upscaling    AMD FSR 1",
+                "                   the picture is enlarged exactly 2x on this 3840x2160 monitor",
+                "g     Framegen     ffx-quality",
+                "",
+                "f     Display      Fullscreen",
+            ]
+        );
         assert_eq!(with(Some("off"))[5], "g     Framegen     off");
         assert!(!with(None).iter().any(|l| l.contains("Framegen")));
+        // The resize filter has no key.
+        assert!(on.iter().any(|l| l == "      Resizing     balanced"));
+        assert!(!on.iter().any(|l| l.starts_with("c     Scaling")));
     }
 
     #[test]

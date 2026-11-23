@@ -33,6 +33,7 @@ use crate::gpustat;
 use crate::gputime::GpuTimer;
 use crate::keys::{self, Action};
 use crate::live_changes::LiveChanges;
+use crate::nis::{self, Nis};
 use crate::osd::{Osd, PageKind, Scene};
 use crate::overlay::{self, Notify, Overlay, Page};
 use crate::pacing::{Pacing, Waiting};
@@ -41,7 +42,7 @@ use crate::picture::{self, Colour};
 use crate::present::Presentation;
 use crate::present::{Feedback, Tag};
 use crate::run::{End, Host, Outcome, Plan, Quit, Slot, Wake, Waker};
-use crate::scale::{self, Axis, Filter};
+use crate::scale::{self, Axis, Filter, Upscaling};
 use crate::screenshot::Screenshot;
 use crate::settings::Settings;
 use crate::sources;
@@ -230,8 +231,14 @@ struct Gfx {
     scale_pipeline: wgpu::RenderPipeline,
     scale_bind_group: wgpu::BindGroup,
     filters: FilterPasses,
+    /// UPSCALING=fsr's FSR 1 passes (scale.rs).
+    sharp: SharpPasses,
     /// The scaler in use: None is the bilinear sampler.
     filter: Option<Filter>,
+    /// UPSCALING=nis's NVScaler pass (nis.rs), and whether it is in use
+    /// (then `filter` is None).
+    nis_pass: NisPass,
+    nis: Option<Nis>,
     /// Where the frame lands on the surface: x, y, width, height.
     viewport: [u32; 4],
     /// --stats, where the GPU can time its passes.
@@ -720,6 +727,29 @@ struct FilterPasses {
     down: Option<(wgpu::TextureView, wgpu::BindGroup)>,
 }
 
+/// UPSCALING=fsr's passes (scale.rs, #70): EASU from the frame into an
+/// intermediate texture at the viewport's size, then RCAS from it into the
+/// viewport.
+struct SharpPasses {
+    easu: wgpu::RenderPipeline,
+    rcas: wgpu::RenderPipeline,
+    /// The frame and `easu_buffer`.
+    easu_bind_group: wgpu::BindGroup,
+    easu_buffer: wgpu::Buffer,
+    rcas_buffer: wgpu::Buffer,
+    /// The intermediate texture and RCAS's bind group, made for the
+    /// viewport in `relayout` when UPSCALING=fsr enlarges.
+    up: Option<(wgpu::TextureView, wgpu::BindGroup)>,
+}
+
+/// UPSCALING=nis's pass (nis.rs, #71): the frame and the constants into the
+/// viewport, in the scale pass's place.
+struct NisPass {
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    buffer: wgpu::Buffer,
+}
+
 impl App {
     fn init(&mut self, event_loop: &ActiveEventLoop) -> Result<Gfx, String> {
         let (w, h) = (self.format.width, self.format.height);
@@ -947,6 +977,50 @@ impl App {
         });
         let filter_pipeline = pipeline(&device, "filter", scale::WGSL, &filter_layout, config.format);
         let filter_x_pipeline = pipeline(&device, "filter x", scale::WGSL, &filter_layout, scale::INTERMEDIATE);
+        // UPSCALING=fsr: the filters' layout (a texture and a uniform).
+        let fsr_uniform = |label| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: scale::FSR_UNIFORM_SIZE,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let (easu_buffer, rcas_buffer) = (fsr_uniform("easu"), fsr_uniform("rcas"));
+        let easu_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("easu"),
+            layout: &filter_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&rgb_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: easu_buffer.as_entire_binding() },
+            ],
+        });
+        let sharp = SharpPasses {
+            easu: pipeline(&device, "easu", &scale::fsr_shader(scale::FSR_EASU), &filter_layout, scale::INTERMEDIATE),
+            rcas: pipeline(&device, "rcas", &scale::fsr_shader(scale::FSR_RCAS), &filter_layout, config.format),
+            easu_bind_group,
+            easu_buffer,
+            rcas_buffer,
+            up: None,
+        };
+        let nis_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("nis"),
+            size: nis::UNIFORM_SIZE,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let nis_pass = NisPass {
+            pipeline: pipeline(&device, "nis", nis::WGSL, &filter_layout, config.format),
+            bind_group: device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("nis"),
+                layout: &filter_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&rgb_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: nis_buffer.as_entire_binding() },
+                ],
+            }),
+            buffer: nis_buffer,
+        };
 
         let screenshot = Screenshot::new(&device, w, h);
         let osd = Osd::new(&device, config.format);
@@ -973,7 +1047,10 @@ impl App {
                 down_buffer: filter_y_buffer,
                 down: None,
             },
+            sharp,
             filter: None,
+            nis_pass,
+            nis: None,
             viewport: [0, 0, 1, 1],
             timer,
             osd,
@@ -989,7 +1066,7 @@ impl App {
     /// enhancement is on (frame generation, an enhancement SCALING preset),
     /// not otherwise (#72, #77): called where either can change.
     fn update_gpu(&mut self) {
-        let on = gpustat::enhanced(self.framegen.as_ref().map(|f| f.schedule.mode()), self.opts.live_changes.scaling());
+        let on = gpustat::enhanced(self.framegen.as_ref().map(|f| f.schedule.mode()), self.upscaling_running());
         self.gamemode.set(on);
         let Some((vendor, device, name)) = self.adapter.clone() else { return };
         match self.gpu.set(on, || gpustat::source_for(vendor, device, &name), self.opts.stats, gpustat::PERIOD) {
@@ -1046,16 +1123,53 @@ impl App {
         self.gfx.as_ref().is_some_and(|g| (g.viewport[2], g.viewport[3]) != (self.format.width, self.format.height))
     }
 
-    /// The viewport and the scaler for the surface's size and SCALING; after
-    /// a resize and on c.
+    /// The viewport and the scaler for the surface's size, UPSCALING and
+    /// SCALING; after a resize, a move to another monitor and on c. Then
+    /// GPU use and GameMode follow whether Upscaling runs (`update_gpu`).
     fn relayout(&mut self) {
         let Some(gfx) = self.gfx.as_mut() else { return };
         let frame = (self.format.width, self.format.height);
         self.monitor_size = gfx.window.current_monitor().map(|m| (m.size().width, m.size().height)).filter(|&(w, h)| w > 0 && h > 0);
         gfx.viewport = letterbox((gfx.config.width, gfx.config.height), frame);
         let [_, _, vw, vh] = gfx.viewport;
-        gfx.filter = scale::filter(self.opts.live_changes.scaling(), frame, (vw, vh));
+        let scaling = self.opts.live_changes.scaling();
+        let upscaling = self.opts.live_changes.upscaling();
+        // UPSCALING (#85): NIS where NVScaler applies (1x to 2x a side), FSR
+        // 1 on any enlargement; else SCALING's filter (scale::filter).
+        gfx.nis = if upscaling == Upscaling::Nis { nis::nis(frame, (vw, vh)) } else { None };
+        if let Some(n) = &gfx.nis {
+            gfx.queue.write_buffer(&gfx.nis_pass.buffer, 0, &n.bytes((gfx.viewport[0], gfx.viewport[1])));
+        }
+        let fsr = scale::fsr(upscaling, frame, (vw, vh));
+        gfx.filter = if gfx.nis.is_some() || fsr { None } else { scale::filter(scaling, frame, (vw, vh)) };
         gfx.filters.down = None;
+        gfx.sharp.up = None;
+        if fsr {
+            let view = gfx
+                .device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("easu"),
+                    size: wgpu::Extent3d { width: vw, height: vh, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: scale::INTERMEDIATE,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&Default::default());
+            gfx.queue.write_buffer(&gfx.sharp.easu_buffer, 0, &scale::fsr_bytes(frame, (vw, vh)));
+            gfx.queue.write_buffer(&gfx.sharp.rcas_buffer, 0, &scale::fsr_bytes((vw, vh), (vw, vh)));
+            let bind = gfx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("rcas"),
+                layout: &gfx.filters.layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: gfx.sharp.rcas_buffer.as_entire_binding() },
+                ],
+            });
+            gfx.sharp.up = Some((view, bind));
+        }
         if let Some(f) = &gfx.filter {
             gfx.queue.write_buffer(&gfx.filters.buffer, 0, &f.bytes(frame, Axis::X));
             if !f.polar {
@@ -1087,10 +1201,28 @@ impl App {
         }
         if self.opts.stats {
             eprintln!(
-                "scaling: {} -> {vw}x{vh}, {}",
-                self.opts.live_changes.scaling().as_str(),
-                gfx.filter.as_ref().map_or("bilinear sampler", |f| f.name)
+                "scaling: upscaling {}, scaling {} -> {vw}x{vh}, {}",
+                upscaling.as_str(),
+                scaling.as_str(),
+                if gfx.nis.is_some() {
+                    "nvidia image scaling"
+                } else if gfx.sharp.up.is_some() {
+                    "fsr1 (easu + rcas)"
+                } else {
+                    gfx.filter.as_ref().map_or("bilinear sampler", |f| f.name)
+                }
             );
+        }
+        self.update_gpu();
+    }
+
+    /// The Upscaling that runs: UPSCALING where it enlarges the picture,
+    /// Off otherwise (1:1, a downscale, NIS past 2x).
+    fn upscaling_running(&self) -> Upscaling {
+        match &self.gfx {
+            Some(g) if g.nis.is_some() => Upscaling::Nis,
+            Some(g) if g.sharp.up.is_some() => Upscaling::Fsr,
+            _ => Upscaling::Off,
         }
     }
 
@@ -1152,10 +1284,10 @@ impl App {
                 self.opts.live_changes.cycle_levels();
                 self.picture_changed();
             }
-            Action::CycleScaling => {
-                self.opts.live_changes.cycle_scaling();
+            Action::CycleUpscaling => {
+                let up = self.opts.live_changes.cycle_upscaling();
                 self.relayout();
-                self.update_gpu();
+                self.overlay.message(format!("Upscaling: {}", up.name()), Duration::from_millis(1500), Instant::now());
             }
             Action::CycleFramegen => self.cycle_framegen(),
             Action::ResetColour => {
@@ -1419,8 +1551,12 @@ impl App {
         }
         // Read every frame, so it follows c, a resize and frame generation
         // turning on or off.
-        let label =
-            overlay::enhancement_label(self.framegen.as_ref().map(|f| f.schedule.mode()), self.opts.live_changes.scaling(), self.scaled());
+        let label = overlay::enhancement_label(
+            self.framegen.as_ref().map(|f| f.schedule.mode()),
+            self.upscaling_running(),
+            self.opts.live_changes.scaling(),
+            self.scaled(),
+        );
         if !self.overlay.visible(now) {
             // The label alone: it stays on while the overlay is hidden.
             return label.map(|l| SceneText {
@@ -1441,16 +1577,18 @@ impl App {
             }
             Some(Page::Panel) => {
                 let changes = self.opts.live_changes.changes(self.delay_ms());
-                // How the picture fits the monitor: dev builds only, for
-                // judging (#85); Upscaling's own row carries it later (#84).
-                let fit = self.monitor_fit().filter(|_| cfg!(feature = "dev")).map(|f| f.reason);
+                // Upscaling's line: what it does on this monitor, or a
+                // suggestion (#85); nothing while the monitor is not known.
+                let setting = self.opts.live_changes.upscaling();
+                let hint = self.monitor_fit().and_then(|f| overlay::upscaling_hint(setting, self.upscaling_running(), &f));
                 let id = &self.overlay.tips_id;
                 let p = self.opts.live_changes.picture();
                 Some(overlay::panel_lines(&overlay::Panel {
                     display: self.opts.live_changes.window().names().1,
                     levels: p.levels.as_str(),
                     scaling: self.opts.live_changes.scaling().as_str(),
-                    scaling_fit: fit.as_deref(),
+                    upscaling: setting.name(),
+                    upscaling_hint: hint.as_deref(),
                     framegen: cfg!(feature = "dev").then(|| self.framegen.as_ref().map_or("off", |f| f.schedule.mode().as_str())),
                     colour: [p.contrast, p.brightness, p.gamma, p.saturation],
                     audio: match &self.opts.audio {
@@ -1694,13 +1832,29 @@ impl App {
         }
         gfx.screenshot.copy(&mut encoder, &gfx.rgb);
         {
-            // An orthogonal filter: its first pass, across the rows.
-            let timestamps = match (&gfx.timer, &gfx.filters.down) {
-                (Some(t), Some(_)) => t.writes_split(1),
-                (Some(t), None) => [None, t.writes(1)],
+            // An orthogonal filter: its first pass, across the rows; FSR 1:
+            // EASU into its intermediate texture.
+            let two = gfx.filters.down.is_some() || gfx.sharp.up.is_some();
+            let timestamps = match (&gfx.timer, two) {
+                (Some(t), true) => t.writes_split(1),
+                (Some(t), false) => [None, t.writes(1)],
                 (None, _) => [None, None],
             };
-            let [first, last] = timestamps;
+            let [mut first, last] = timestamps;
+            if let Some((between, _)) = &gfx.sharp.up {
+                let attachments = target(between);
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("easu"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: first.take(),
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&gfx.sharp.easu);
+                pass.set_bind_group(0, &gfx.sharp.easu_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
             if let Some((between, _)) = &gfx.filters.down {
                 let attachments = target(between);
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1726,7 +1880,13 @@ impl App {
             });
             let [x, y, vw, vh] = gfx.viewport.map(|v| v as f32);
             pass.set_viewport(x, y, vw, vh, 0.0, 1.0);
-            if let Some((_, bind)) = &gfx.filters.down {
+            if gfx.nis.is_some() {
+                pass.set_pipeline(&gfx.nis_pass.pipeline);
+                pass.set_bind_group(0, &gfx.nis_pass.bind_group, &[]);
+            } else if let Some((_, bind)) = &gfx.sharp.up {
+                pass.set_pipeline(&gfx.sharp.rcas);
+                pass.set_bind_group(0, bind, &[]);
+            } else if let Some((_, bind)) = &gfx.filters.down {
                 pass.set_pipeline(&gfx.filters.into_viewport);
                 pass.set_bind_group(0, bind, &[]);
             } else if gfx.filter.is_some() {
@@ -2086,6 +2246,11 @@ mod tests {
             .collect()
     }
 
+    /// The panel's row whose label (after the key column) starts so.
+    fn row(app: &App, label: &str) -> String {
+        panel(app).into_iter().find(|l| l.get(6..).is_some_and(|r| r.starts_with(label))).unwrap_or_else(|| panic!("no {label} row"))
+    }
+
     fn framegen_row(app: &App) -> Option<String> {
         app.scene_text(Instant::now())
             .and_then(|t| t.page)
@@ -2117,7 +2282,7 @@ mod tests {
         if app.overlay.page.is_none() {
             press(app, "Tab");
         }
-        panel(app)[6].clone()
+        row(app, "Audio        ")
     }
 
     #[test]
@@ -2180,7 +2345,7 @@ mod tests {
         app.notice();
         assert_eq!(*script.starts.borrow(), [50, 60]);
         assert_eq!(app.overlay.current_message(Instant::now()), Some("Audio sync 60 ms"));
-        assert_eq!(panel(&app)[7], "^-/^+ Audio sync   60 ms   (alt -/+: 50 ms steps)");
+        assert_eq!(row(&app, "Audio sync"), "^-/^+ Audio sync   60 ms   (alt -/+: 50 ms steps)");
         assert!(!app.apply(Action::Level(LevelChange::Mute)));
         assert_eq!(script.starts.borrow().len(), 2, "a running one is not started again");
         // AUDIO=none: the keys do nothing.
@@ -2195,24 +2360,29 @@ mod tests {
         let (mut app, file) = app_with("# mine\nLEVELS=auto\nCONTRAST=2\n");
         assert!(!press(&mut app, "l"), "l only with the overlay open");
         assert!(press(&mut app, "Tab"));
-        let p = panel(&app);
-        // A dev build names frame generation under Scaling (#83); a release build has no row.
+        // A dev build names frame generation under Upscaling (#83, #85); a
+        // release build has no row.
         assert_eq!(framegen_row(&app), cfg!(feature = "dev").then(|| "g     Framegen     off".to_string()));
-        assert_eq!(p[3], "l     Levels       auto");
-        assert_eq!(p[5], "1-8   Colour       contrast 2 · brightness 0 · gamma 0 · saturation 0");
-        assert_eq!(p[6], "      Audio        none");
-        assert_eq!(p[8], "t     Setup tips   PlayStation 5");
-        assert_eq!(p[9], "w     Save         nothing changed");
+        assert_eq!(row(&app, "Upscaling"), "c     Upscaling    off");
+        assert_eq!(row(&app, "Resizing"), "      Resizing     balanced");
+        assert_eq!(row(&app, "Levels"), "l     Levels       auto");
+        assert_eq!(row(&app, "Colour"), "1-8   Colour       contrast 2 · brightness 0 · gamma 0 · saturation 0");
+        assert_eq!(row(&app, "Audio        "), "      Audio        none");
+        assert_eq!(row(&app, "Setup tips"), "t     Setup tips   PlayStation 5");
+        assert_eq!(row(&app, "Save"), "w     Save         nothing changed");
 
         assert!(press(&mut app, "l"));
+        // c: Upscaling's next method (#85).
         assert!(press(&mut app, "c"));
-        assert_eq!(panel(&app)[9], "w     Save         SCALING=fast LEVELS=limited", "settings.rows' order");
+        assert_eq!(app.overlay.current_message(Instant::now()), Some("Upscaling: AMD FSR 1"));
+        assert_eq!(row(&app, "Upscaling"), "c     Upscaling    AMD FSR 1");
+        assert_eq!(row(&app, "Save"), "w     Save         UPSCALING=fsr LEVELS=limited", "settings.rows' order");
         assert!(press(&mut app, "w"));
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "# mine\nLEVELS=limited\nCONTRAST=2\nSCALING=fast\n");
-        assert_eq!(app.overlay.current_message(Instant::now()), Some("Saved: SCALING=fast LEVELS=limited"));
-        assert_eq!(panel(&app)[9], "w     Save         nothing changed", "the save is the new baseline");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "# mine\nLEVELS=limited\nCONTRAST=2\nUPSCALING=fsr\n");
+        assert_eq!(app.overlay.current_message(Instant::now()), Some("Saved: UPSCALING=fsr LEVELS=limited"));
+        assert_eq!(row(&app, "Save"), "w     Save         nothing changed", "the save is the new baseline");
         assert!(press(&mut app, "r"));
-        assert_eq!(panel(&app)[9], "w     Save         CONTRAST=0");
+        assert_eq!(row(&app, "Save"), "w     Save         CONTRAST=0");
         assert!(press(&mut app, "t"));
         assert_eq!(app.overlay.page, Some(Page::Tips));
         assert!(press(&mut app, "Esc"));
@@ -2226,8 +2396,8 @@ mod tests {
         // f: the panel's Display line and w's WINDOW follow it.
         press(&mut app, "Tab");
         press(&mut app, "f");
-        assert_eq!(panel(&app)[2], "f     Display      Borderless");
-        assert!(panel(&app)[9].contains("WINDOW=borderless"));
+        assert_eq!(row(&app, "Display"), "f     Display      Borderless");
+        assert!(row(&app, "Save").contains("WINDOW=borderless"));
         press(&mut app, "f");
         assert_eq!(app.opts.live_changes.window(), WindowMode::Windowed { width: 1280, height: 720 });
         press(&mut app, "f");

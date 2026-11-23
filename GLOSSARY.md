@@ -129,6 +129,24 @@ frames, so a 30 fps source looks like 60. Each one is a **generated
 frame**; it costs about one refresh of delay.
 _Avoid_: interpolation (one way to do it), frame enhancer, motion smoothing
 
+**Upscaling**:
+Enlarging the picture with sharpening, on the GPU, when the monitor shows
+it bigger than the capture card sends it (a 1440p, 4K or ultrawide
+monitor): AMD FSR 1 or NVIDIA Image Scaling. At 1:1 or when shrinking it
+does nothing, and the resize filter (`SCALING`) scales.
+_Avoid_: sharp, super resolution, the resize filter (that is `SCALING`)
+
+**GPU enhancements**:
+Upscaling and frame generation together: what a gaming GPU adds to the
+picture. Shown in the GPU section of the dashboard and asked for with
+GameMode while one runs.
+_Avoid_: enhancement presets, filters
+
+**Resize filter**:
+`SCALING`: how the picture is resized into the window when Upscaling does
+not (balanced, fast, high-quality); the overlay's Resizing row.
+_Avoid_: scaler, upscaler
+
 **Repeated refresh**:
 A monitor refresh that showed the previous card frame again because no new
 one was ready: a dropped or late frame, seen as judder.

@@ -1,10 +1,19 @@
-//! SCALING: how the RGB frame is scaled into the letterboxed viewport. The
-//! presets name the scalers view.sh's player uses, and the filters are
-//! libplacebo 7.360's (mpv's gpu-next resolves the names there):
+//! SCALING, the resize filter: how the RGB frame is scaled into the
+//! letterboxed viewport when Upscaling does not. The presets name the
+//! scalers view.sh's player uses, and the filters are libplacebo 7.360's
+//! (mpv's gpu-next resolves the names there):
 //! - fast: the GPU's bilinear sampler, never widened (mpv's fast profile:
 //!   scale and dscale bilinear, correct-downscaling off);
 //! - balanced: spline36 up, mitchell down;
 //! - high-quality: ewa_lanczossharp up, mitchell down.
+//!
+//! UPSCALING (#85), a GPU enhancement: when the picture is enlarged it does
+//! the upscale (with sharpening) instead of SCALING:
+//! - fsr: AMD FSR 1 (EASU, then RCAS; #70), here. FSR 1 is an upscaler
+//!   only, so a downscale on either axis, and 1:1, are SCALING's.
+//! - nis: NVIDIA Image Scaling's NVScaler (nis.rs, #71), defined for 1x to
+//!   2x a side; past that, and down, SCALING's.
+//! - off: SCALING scales, as before.
 //!
 //! Each filter is sampled as `pl_filter_sample` does (kernel, blur, window)
 //! into a 256-entry table the shader interpolates linearly, as libplacebo's
@@ -34,8 +43,8 @@
 //! how much, pixel for pixel, or scaled down, and where the bars go), for
 //! the overlay's Scaling row and Upscaling's suggestion (#84).
 
-/// SCALING, in the order c cycles them. `config` (mpv.conf's own scalers)
-/// has no meaning here and reads as balanced (ADR 0001).
+/// SCALING, in settings.rows' order. `config` (mpv.conf's own scalers) has
+/// no meaning here and reads as balanced (ADR 0001).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scaling {
     Balanced,
@@ -44,6 +53,10 @@ pub enum Scaling {
 }
 
 impl Scaling {
+    /// Every preset, in settings.rows' order.
+    #[cfg(test)]
+    pub const ALL: [Self; 3] = [Self::Balanced, Self::Fast, Self::HighQuality];
+
     pub fn from_settings(v: &str) -> Result<Self, String> {
         Ok(match v {
             "balanced" | "config" => Self::Balanced,
@@ -60,20 +73,51 @@ impl Scaling {
             Self::HighQuality => "high-quality",
         }
     }
+}
 
-    /// Every preset, in `c`'s cycle from balanced (the branches' presets
-    /// too).
-    #[cfg(test)]
-    pub fn all() -> Vec<Self> {
-        std::iter::successors(Some(Self::Balanced), |s| Some(s.next()).filter(|n| *n != Self::Balanced)).collect()
+/// UPSCALING (#85), in the order c cycles it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Upscaling {
+    Off,
+    /// AMD FSR 1 (EASU + RCAS).
+    Fsr,
+    /// NVIDIA Image Scaling's NVScaler (nis.rs).
+    Nis,
+}
+
+impl Upscaling {
+    pub fn from_settings(v: &str) -> Result<Self, String> {
+        Ok(match v {
+            "off" => Self::Off,
+            "fsr" => Self::Fsr,
+            "nis" => Self::Nis,
+            other => return Err(format!("UPSCALING={other} is not off, fsr or nis")),
+        })
     }
 
-    /// The overlay's c: settings.rows' order, without config.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Fsr => "fsr",
+            Self::Nis => "nis",
+        }
+    }
+
+    /// The overlay's c: settings.rows' order.
     pub fn next(self) -> Self {
         match self {
-            Self::Balanced => Self::Fast,
-            Self::Fast => Self::HighQuality,
-            Self::HighQuality => Self::Balanced,
+            Self::Off => Self::Fsr,
+            Self::Fsr => Self::Nis,
+            Self::Nis => Self::Off,
+        }
+    }
+
+    /// The method's name for people: the overlay's row and the wizard.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Fsr => "AMD FSR 1",
+            Self::Nis => "NVIDIA Image Scaling",
         }
     }
 }
@@ -291,7 +335,8 @@ pub struct Filter {
 }
 
 /// The filter that scales `src` into `dst` pixels, or None for the bilinear
-/// sampler (fast, and every 1:1 copy).
+/// sampler (fast, and every 1:1 copy): SCALING's, where Upscaling does not
+/// scale.
 pub fn filter(scaling: Scaling, src: (u32, u32), dst: (u32, u32)) -> Option<Filter> {
     // sample_src_info: per axis up, down or neither; down wins.
     let rx = f64::from(dst.0) / f64::from(src.0);
@@ -330,6 +375,227 @@ pub fn filter(scaling: Scaling, src: (u32, u32), dst: (u32, u32)) -> Option<Filt
         let taps = |c: Config| c.cutoff_radius(0.0).ceil() as i32;
         Some(Filter { name, polar: false, radius: [cx.bound() as f32, cy.bound() as f32], taps: [taps(cx), taps(cy)], lut })
     }
+}
+
+/// UPSCALING=fsr enlarging `src` into `dst`: FSR 1's two passes, EASU
+/// into an intermediate texture at `dst` and RCAS from it into the
+/// viewport. Only an upscale: no axis down, one up (SCALING takes the
+/// rest).
+pub fn fsr(upscaling: Upscaling, src: (u32, u32), dst: (u32, u32)) -> bool {
+    let rx = f64::from(dst.0) / f64::from(src.0);
+    let ry = f64::from(dst.1) / f64::from(src.1);
+    let down = rx < 1.0 - 1e-6 || ry < 1.0 - 1e-6;
+    let up = rx > 1.0 + 1e-6 || ry > 1.0 + 1e-6;
+    upscaling == Upscaling::Fsr && up && !down
+}
+/// RCAS's sharpness in stops below its maximum: the FSR sample's default
+/// (`rcasAttenuation = 0.25f`, FidelityFX-FSR sample/src/VK/SampleRenderer.h).
+pub const FSR_SHARPNESS_STOPS: f32 = 0.25;
+
+/// The uniform `Fsr` in `FSR_EASU` and `FSR_RCAS`: the input's and the
+/// output's size, and RCAS's linear sharpness (`FsrRcasCon`: `exp2(-stops)`).
+pub fn fsr_bytes(src: (u32, u32), dst: (u32, u32)) -> Vec<u8> {
+    let mut b = Vec::with_capacity(FSR_UNIFORM_SIZE as usize);
+    for v in [src.0 as f32, src.1 as f32, dst.0 as f32, dst.1 as f32, (-FSR_SHARPNESS_STOPS).exp2(), 0.0, 0.0, 0.0] {
+        b.extend(v.to_ne_bytes());
+    }
+    b
+}
+
+/// Bytes in `fsr_bytes`.
+pub const FSR_UNIFORM_SIZE: u64 = 32;
+
+/// AMD FidelityFX Super Resolution 1.0 (ffx_fsr1.h, the non-packed 32-bit
+/// path), ported to WGSL. The four-texel gathers become `textureLoad`s
+/// clamped to the edge; the approximate reciprocals keep the original's bit
+/// tricks, so a flat area (a zero gradient) stays finite as there. RCAS's
+/// two high-precision reciprocals get guards against 0/0 in an all-black or
+/// all-white ring, where HLSL's max() would drop the NaN that WGSL leaves
+/// undefined, and its resolve divides exactly (the medium-precision
+/// reciprocal turned flat white 255 into 254).
+///
+/// Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+///
+/// Permission is hereby granted, free of charge, to any person obtaining a copy
+/// of this software and associated documentation files (the "Software"), to deal
+/// in the Software without restriction, including without limitation the rights
+/// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+/// copies of the Software, and to permit persons to whom the Software is
+/// furnished to do so, subject to the following conditions:
+///
+/// The above copyright notice and this permission notice shall be included in
+/// all copies or substantial portions of the Software.
+///
+/// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+/// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+/// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+/// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+/// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+/// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+/// THE SOFTWARE.
+const FSR_COMMON: &str = r#"
+// Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+// Ported from FidelityFX-FSR's ffx_fsr1.h (MIT); the notice is in scale.rs.
+struct Fsr {
+    in_size: vec2f,
+    out_size: vec2f,
+    sharpness: f32,
+};
+
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> fsr: Fsr;
+
+// ffx_a.h's APrxLoRcpF1 and APrxLoRsqF1.
+fn rcp_lo(a: f32) -> f32 { return bitcast<f32>(0x7ef07ebbu - bitcast<u32>(a)); }
+fn rsq_lo(a: f32) -> f32 { return bitcast<f32>(0x5f347d74u - (bitcast<u32>(a) >> 1u)); }
+
+fn texel(p: vec2i) -> vec3f {
+    return textureLoad(src, clamp(p, vec2i(0), vec2i(fsr.in_size) - 1), 0).rgb;
+}
+
+// Luma times 2, as FSR's.
+fn luma2(c: vec3f) -> f32 { return c.b * 0.5 + (c.r * 0.5 + c.g); }
+"#;
+
+/// EASU: the frame into the intermediate texture at the output's size.
+pub const FSR_EASU: &str = r#"
+fn easu_set(w: f32, la: f32, lb: f32, lc: f32, ld: f32, le: f32, dir: ptr<function, vec2f>, len: ptr<function, f32>) {
+    let dc = ld - lc;
+    let cb = lc - lb;
+    var len_x = rcp_lo(max(abs(dc), abs(cb)));
+    let dir_x = ld - lb;
+    (*dir).x += dir_x * w;
+    len_x = clamp(abs(dir_x) * len_x, 0.0, 1.0);
+    len_x *= len_x;
+    *len += len_x * w;
+    let ec = le - lc;
+    let ca = lc - la;
+    var len_y = rcp_lo(max(abs(ec), abs(ca)));
+    let dir_y = le - la;
+    (*dir).y += dir_y * w;
+    len_y = clamp(abs(dir_y) * len_y, 0.0, 1.0);
+    len_y *= len_y;
+    *len += len_y * w;
+}
+
+fn easu_tap(off: vec2f, dir: vec2f, len: vec2f, lob: f32, clp: f32, c: vec3f, ac: ptr<function, vec3f>, aw: ptr<function, f32>) {
+    var v = vec2f(off.x * dir.x + off.y * dir.y, off.x * -dir.y + off.y * dir.x);
+    v *= len;
+    let d2 = min(v.x * v.x + v.y * v.y, clp);
+    var wb = 2.0 / 5.0 * d2 - 1.0;
+    var wa = lob * d2 - 1.0;
+    wb *= wb;
+    wa *= wa;
+    wb = 25.0 / 16.0 * wb - (25.0 / 16.0 - 1.0);
+    let w = wb * wa;
+    *ac += c * w;
+    *aw += w;
+}
+
+@fragment fn fs(in: VOut) -> @location(0) vec4f {
+    // The output pixel's centre in the input, as FsrEasuCon maps it.
+    var pp = in.uv * fsr.in_size - 0.5;
+    let fp = floor(pp);
+    pp -= fp;
+    let f0 = vec2i(fp);
+    //    b c
+    //  e f g h
+    //  i j k l
+    //    n o
+    let b = texel(f0 + vec2i(0, -1));
+    let c = texel(f0 + vec2i(1, -1));
+    let e = texel(f0 + vec2i(-1, 0));
+    let f = texel(f0);
+    let g = texel(f0 + vec2i(1, 0));
+    let h = texel(f0 + vec2i(2, 0));
+    let i = texel(f0 + vec2i(-1, 1));
+    let j = texel(f0 + vec2i(0, 1));
+    let k = texel(f0 + vec2i(1, 1));
+    let l = texel(f0 + vec2i(2, 1));
+    let n = texel(f0 + vec2i(0, 2));
+    let o = texel(f0 + vec2i(1, 2));
+    let bl = luma2(b);
+    let cl = luma2(c);
+    let el = luma2(e);
+    let fl = luma2(f);
+    let gl = luma2(g);
+    let hl = luma2(h);
+    let il = luma2(i);
+    let jl = luma2(j);
+    let kl = luma2(k);
+    let ll = luma2(l);
+    let nl = luma2(n);
+    let ol = luma2(o);
+    var dir = vec2f(0.0);
+    var len = 0.0;
+    easu_set((1.0 - pp.x) * (1.0 - pp.y), bl, el, fl, gl, jl, &dir, &len);
+    easu_set(pp.x * (1.0 - pp.y), cl, fl, gl, hl, kl, &dir, &len);
+    easu_set((1.0 - pp.x) * pp.y, fl, il, jl, kl, nl, &dir, &len);
+    easu_set(pp.x * pp.y, gl, jl, kl, ll, ol, &dir, &len);
+    let dir2 = dir * dir;
+    var dir_r = dir2.x + dir2.y;
+    let zro = dir_r < 1.0 / 32768.0;
+    dir_r = select(rsq_lo(dir_r), 1.0, zro);
+    dir.x = select(dir.x, 1.0, zro);
+    dir *= dir_r;
+    len = len * 0.5;
+    len *= len;
+    let stretch = (dir.x * dir.x + dir.y * dir.y) * rcp_lo(max(abs(dir.x), abs(dir.y)));
+    let len2 = vec2f(1.0 + (stretch - 1.0) * len, 1.0 - 0.5 * len);
+    let lob = 0.5 + ((1.0 / 4.0 - 0.04) - 0.5) * len;
+    let clp = rcp_lo(lob);
+    let min4 = min(min(f, g), min(j, k));
+    let max4 = max(max(f, g), max(j, k));
+    var ac = vec3f(0.0);
+    var aw = 0.0;
+    easu_tap(vec2f(0.0, -1.0) - pp, dir, len2, lob, clp, b, &ac, &aw);
+    easu_tap(vec2f(1.0, -1.0) - pp, dir, len2, lob, clp, c, &ac, &aw);
+    easu_tap(vec2f(-1.0, 1.0) - pp, dir, len2, lob, clp, i, &ac, &aw);
+    easu_tap(vec2f(0.0, 1.0) - pp, dir, len2, lob, clp, j, &ac, &aw);
+    easu_tap(vec2f(0.0, 0.0) - pp, dir, len2, lob, clp, f, &ac, &aw);
+    easu_tap(vec2f(-1.0, 0.0) - pp, dir, len2, lob, clp, e, &ac, &aw);
+    easu_tap(vec2f(1.0, 1.0) - pp, dir, len2, lob, clp, k, &ac, &aw);
+    easu_tap(vec2f(2.0, 1.0) - pp, dir, len2, lob, clp, l, &ac, &aw);
+    easu_tap(vec2f(2.0, 0.0) - pp, dir, len2, lob, clp, h, &ac, &aw);
+    easu_tap(vec2f(1.0, 0.0) - pp, dir, len2, lob, clp, g, &ac, &aw);
+    easu_tap(vec2f(1.0, 2.0) - pp, dir, len2, lob, clp, o, &ac, &aw);
+    easu_tap(vec2f(0.0, 2.0) - pp, dir, len2, lob, clp, n, &ac, &aw);
+    return vec4f(min(max4, max(min4, ac / aw)), 1.0);
+}
+"#;
+
+/// RCAS: the intermediate texture sharpened into the viewport, at its size
+/// (`in_size` is the output's here).
+pub const FSR_RCAS: &str = r#"
+// FSR_RCAS_LIMIT.
+const RCAS_LIMIT: f32 = 0.25 - 1.0 / 16.0;
+
+@fragment fn fs(in: VOut) -> @location(0) vec4f {
+    let sp = vec2i(floor(in.uv * fsr.in_size));
+    //    b
+    //  d e f
+    //    h
+    let b = texel(sp + vec2i(0, -1));
+    let d = texel(sp + vec2i(-1, 0));
+    let e = texel(sp);
+    let f = texel(sp + vec2i(1, 0));
+    let h = texel(sp + vec2i(0, 1));
+    let mn4 = min(min(b, d), min(f, h));
+    let mx4 = max(max(b, d), max(f, h));
+    // FSR's limiters, with 0/0 guarded (see scale.rs).
+    let hit_min = min(mn4, e) / max(4.0 * mx4, vec3f(1e-6));
+    let hit_max = (1.0 - max(mx4, e)) / min(4.0 * mn4 - 4.0, vec3f(-1e-6));
+    let lobe3 = max(-hit_min, hit_max);
+    let lobe = max(-RCAS_LIMIT, min(max(max(lobe3.r, lobe3.g), lobe3.b), 0.0)) * fsr.sharpness;
+    // An exact division where FSR has APrxMedRcpF1, whose 0.9969 at 1
+    // took a level off flat white; 4 * lobe + 1 is at least 0.25.
+    return vec4f((lobe * (b + d + h + f) + e) / (4.0 * lobe + 1.0), 1.0);
+}
+"#;
+
+/// A pass of FSR 1, with the shared helpers: `FSR_EASU` or `FSR_RCAS`.
+pub fn fsr_shader(pass: &str) -> String {
+    format!("{FSR_COMMON}{pass}")
 }
 
 /// Which way a pass of an orthogonal filter runs (ignored for a polar one).
@@ -479,7 +745,6 @@ mod tests {
         assert_eq!(f.reason, "scaled down to fit this 1280x720 monitor");
         // A taller monitor: bars above and below.
         assert!(fit(hd, (1920, 1200)).reason.ends_with("black bars above and below"));
-        assert_eq!(Scaling::all(), [Scaling::Balanced, Scaling::Fast, Scaling::HighQuality]);
     }
 
     #[test]
@@ -535,6 +800,44 @@ mod tests {
         assert_eq!(at(Scaling::Balanced, (1280, 720)), Some("mitchell"));
         assert_eq!(at(Scaling::HighQuality, (1280, 720)), Some("mitchell"));
         assert_eq!(Scaling::from_settings("config"), Ok(Scaling::Balanced));
+    }
+
+    #[test]
+    fn upscaling_fsr_enlarges_and_leaves_the_rest_to_scaling() {
+        let fsr = |up, dst| fsr(up, (1920, 1080), dst);
+        assert!(fsr(Upscaling::Fsr, (2560, 1440)) && fsr(Upscaling::Fsr, (3840, 2160)), "an enlargement is FSR 1's");
+        assert!(!fsr(Upscaling::Fsr, (1920, 1080)), "1:1 is the frame itself");
+        assert!(!fsr(Upscaling::Fsr, (1280, 720)), "FSR 1 does not downscale");
+        // One axis down: down wins, SCALING's mitchell.
+        assert!(!fsr(Upscaling::Fsr, (2560, 1000)));
+        // Only UPSCALING=fsr.
+        assert!(!fsr(Upscaling::Off, (2560, 1440)) && !fsr(Upscaling::Nis, (2560, 1440)));
+    }
+
+    #[test]
+    fn upscaling_values_match_settings_rows_and_c_cycles_them() {
+        let rows = crate::settings::rows();
+        let row = rows.iter().find(|r| r.name == "UPSCALING").unwrap();
+        let order: Vec<&str> = std::iter::successors(Some(Upscaling::Off), |u| Some(u.next()).filter(|&n| n != Upscaling::Off))
+            .map(Upscaling::as_str)
+            .collect();
+        assert_eq!(order, ["off", "fsr", "nis"]);
+        assert_eq!(row.values, format!("enum:{}", order.join(",")));
+        assert_eq!(row.default, "off");
+        for v in order {
+            assert_eq!(Upscaling::from_settings(v).map(Upscaling::as_str), Ok(v));
+        }
+        assert!(Upscaling::from_settings("sharp").is_err());
+    }
+
+    #[test]
+    fn fsr_uniform_layout() {
+        let b = fsr_bytes((1920, 1080), (2560, 1440));
+        assert_eq!(b.len() as u64, FSR_UNIFORM_SIZE);
+        let f = |i: usize| f32::from_ne_bytes(b[i * 4..i * 4 + 4].try_into().unwrap());
+        assert_eq!([f(0), f(1), f(2), f(3)], [1920.0, 1080.0, 2560.0, 1440.0]);
+        // FsrRcasCon: exp2(-stops), 0.25 stops below the maximum.
+        assert!((f(4) - 0.840_896_4).abs() < 1e-6, "{}", f(4));
     }
 
     #[test]
@@ -848,12 +1151,220 @@ mod tests {
         }
     }
 
+    /// UPSCALING=fsr's two passes on the GPU: a hard edge comes out steeper
+    /// than the bilinear sampler's, flat, black and white areas stay exact
+    /// (RCAS's 0/0 guards), and their GPU time:
+    /// `cargo test --release -- --ignored --nocapture gpu_sharp`.
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn gpu_sharp_is_steeper_than_bilinear_and_keeps_flat_areas() {
+        use crate::app::{BACKENDS, pipeline, texture_entry, uniform_entry};
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = BACKENDS;
+        let instance = wgpu::Instance::new(desc);
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+            apply_limit_buckets: false,
+        }))
+        .expect("a GPU");
+        let required_features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features, ..Default::default() })).unwrap();
+        eprintln!("GPU: {}", adapter.get_info().name);
+
+        // Rows 0..360: black | white, a hard vertical edge at x = 960.
+        // Rows 360..720: flat grey 128. Rows 720..1080: all black, then all
+        // white from x = 960 (far from the edge: flat black and white).
+        let (w, h) = (1920u32, 1080u32);
+        let value = |x: u32, y: u32| -> u8 {
+            match y {
+                0..360 | 720.. => {
+                    if x < 960 {
+                        0
+                    } else {
+                        255
+                    }
+                }
+                _ => 128,
+            }
+        };
+        let src: Vec<u8> = (0..w * h).flat_map(|i| [value(i % w, i / w); 3].into_iter().chain([255])).collect();
+        let texture = |size: (u32, u32), format, usage| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+        };
+        let rgb = texture((w, h), wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+        queue.write_texture(
+            rgb.as_image_copy(),
+            &src,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        let rgb_view = rgb.create_view(&Default::default());
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[texture_entry(0, false), uniform_entry(1)],
+        });
+        let easu = pipeline(&device, "easu", &fsr_shader(FSR_EASU), &layout, INTERMEDIATE);
+        let rcas = pipeline(&device, "rcas", &fsr_shader(FSR_RCAS), &layout, wgpu::TextureFormat::Rgba8Unorm);
+        let bind = |view: &wgpu::TextureView, bytes: Vec<u8>| {
+            let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: FSR_UNIFORM_SIZE,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&uniform, 0, &bytes);
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: uniform.as_entire_binding() },
+                ],
+            })
+        };
+        let read = |buffer: &wgpu::Buffer| -> Vec<u8> {
+            buffer.map_async(wgpu::MapMode::Read, .., |r| r.unwrap());
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let v = buffer.get_mapped_range(..).unwrap().to_vec();
+            buffer.unmap();
+            v
+        };
+
+        for dst in [(2560u32, 1440u32), (3840, 2160)] {
+            assert!(fsr(Upscaling::Fsr, (w, h), dst));
+            let between = texture(dst, INTERMEDIATE, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+            let between_view = between.create_view(&Default::default());
+            let target =
+                texture(dst, wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+            let target_view = target.create_view(&Default::default());
+            let passes = [
+                (&easu, bind(&rgb_view, fsr_bytes((w, h), dst)), &between_view),
+                (&rcas, bind(&between_view, fsr_bytes(dst, dst)), &target_view),
+            ];
+            const RUNS: u32 = 120;
+            let queries = (!required_features.is_empty()).then(|| {
+                device.create_query_set(&wgpu::QuerySetDescriptor { label: None, ty: wgpu::QueryType::Timestamp, count: RUNS * 2 })
+            });
+            let row = (dst.0 * 4).next_multiple_of(256);
+            let out = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: u64::from(row * dst.1),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let times_size = u64::from(RUNS * 2 * 8);
+            let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: times_size,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let times = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: times_size,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = device.create_command_encoder(&Default::default());
+            for run in 0..RUNS {
+                for (i, (pipe, bind, view)) in passes.iter().enumerate() {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: None,
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: queries.as_ref().map(|q| wgpu::RenderPassTimestampWrites {
+                            query_set: q,
+                            beginning_of_pass_write_index: (i == 0).then_some(run * 2),
+                            end_of_pass_write_index: (i == 1).then_some(run * 2 + 1),
+                        }),
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(pipe);
+                    pass.set_bind_group(0, bind, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+            }
+            if let Some(q) = &queries {
+                encoder.resolve_query_set(q, 0..RUNS * 2, &resolve, 0);
+                encoder.copy_buffer_to_buffer(&resolve, 0, &times, 0, times_size);
+            }
+            encoder.copy_texture_to_buffer(
+                target.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &out,
+                    layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(dst.1) },
+                },
+                wgpu::Extent3d { width: dst.0, height: dst.1, depth_or_array_layers: 1 },
+            );
+            queue.submit([encoder.finish()]);
+            let pixels = read(&out);
+            let at = |x: u32, y: u32| pixels[(y * row + x * 4) as usize];
+
+            // The edge's steepest step between neighbours along a row in the
+            // middle of the edge band, against the bilinear sampler's at the
+            // same positions (computed here: a 0 | 255 step).
+            let y = dst.1 / 6;
+            let fsr_step = (1..dst.0).map(|x| i32::from(at(x, y)).abs_diff(i32::from(at(x - 1, y)))).max().unwrap();
+            let bilinear = |x: u32| {
+                let p = (f64::from(x) + 0.5) / f64::from(dst.0) * f64::from(w) - 0.5;
+                let (a, b) = (value(p.floor().max(0.0) as u32, 0), value((p.floor() + 1.0).min(f64::from(w - 1)) as u32, 0));
+                f64::from(a) + (f64::from(b) - f64::from(a)) * (p - p.floor())
+            };
+            let lin_step = (1..dst.0).map(|x| (bilinear(x) - bilinear(x - 1)).abs()).fold(0.0, f64::max);
+            // Flat grey, flat black and flat white, away from the edge.
+            let grey: Vec<u8> = (0..dst.0).step_by(7).map(|x| at(x, dst.1 / 2)).collect();
+            let low = dst.1 * 5 / 6;
+            let (black, white) = (at(dst.0 / 4, low), at(dst.0 * 3 / 4, low));
+            let gpu = if queries.is_some() {
+                let t = read(&times);
+                let ticks: Vec<u64> = t.as_chunks::<8>().0.iter().map(|c| u64::from_ne_bytes(*c)).collect();
+                let period = f64::from(queue.get_timestamp_period());
+                let mut ms: Vec<f64> = (0..RUNS as usize).map(|r| (ticks[r * 2 + 1] - ticks[r * 2]) as f64 * period / 1e6).collect();
+                ms.sort_by(f64::total_cmp);
+                format!("GPU median {:.3} ms, max {:.3} ms", ms[ms.len() / 2], ms[ms.len() - 1])
+            } else {
+                "no timestamps".into()
+            };
+            eprintln!(
+                "sharp {w}x{h} -> {}x{}: edge step {fsr_step} (bilinear {lin_step:.0}); grey {:?}..{:?}, black {black}, white {white}; {gpu}",
+                dst.0,
+                dst.1,
+                grey.iter().min(),
+                grey.iter().max()
+            );
+            assert!(f64::from(fsr_step) > lin_step * 1.1, "the edge is not steeper than bilinear's: {fsr_step} vs {lin_step:.0}");
+            assert!(grey.iter().all(|&v| v.abs_diff(128) <= 1), "flat grey moved: {:?}..{:?}", grey.iter().min(), grey.iter().max());
+            assert_eq!((black, white), (0, 255), "flat black and white stay exact");
+        }
+    }
+
     #[test]
     fn scaling_values_match_lib_settings_sh() {
         let rows = crate::settings::rows();
         let values = rows.iter().find(|r| r.name == "SCALING").unwrap().values.clone();
-        let order = [Scaling::Balanced, Scaling::Balanced.next(), Scaling::Balanced.next().next()].map(Scaling::as_str);
+        let order: Vec<&str> = Scaling::ALL.into_iter().map(Scaling::as_str).collect();
         assert_eq!(values, format!("enum:{},config", order.join(",")));
-        assert_eq!(Scaling::Balanced.next().next().next(), Scaling::Balanced);
+        assert_eq!(order, ["balanced", "fast", "high-quality"]);
+        for v in order {
+            assert_eq!(Scaling::from_settings(v).map(Scaling::as_str), Ok(v));
+        }
     }
 }

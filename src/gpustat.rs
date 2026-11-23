@@ -27,7 +27,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::framegen::Mode;
-use crate::scale::Scaling;
+use crate::scale::Upscaling;
 
 #[cfg(target_os = "linux")]
 mod nvml;
@@ -38,15 +38,12 @@ pub const PERIOD: Duration = Duration::from_millis(100);
 pub const WINDOW: Duration = Duration::from_secs(10);
 
 /// Whether a GPU enhancement is on, which is when GPU use is sampled and
-/// shown: frame generation runs, or SCALING is an enhancement preset (none
-/// on main yet: `sharp` and `ultra` add their arm here when they land).
-pub fn enhanced(framegen: Option<Mode>, scaling: Scaling) -> bool {
-    let preset = match scaling {
-        Scaling::Balanced | Scaling::Fast | Scaling::HighQuality => false,
-    };
-    framegen.is_some() || preset
+/// shown (and GameMode asked for, #77): frame generation runs, or
+/// Upscaling does (#85: `upscaling` is the one that runs, Off where the
+/// picture is not enlarged).
+pub fn enhanced(framegen: Option<Mode>, upscaling: Upscaling) -> bool {
+    framegen.is_some() || upscaling != Upscaling::Off
 }
-
 /// One reading of the whole card; None where the driver does not tell.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Card {
@@ -691,14 +688,16 @@ mod tests {
 
     #[test]
     fn only_a_gpu_enhancement_turns_it_on() {
-        for scaling in [Scaling::Balanced, Scaling::Fast, Scaling::HighQuality] {
-            assert!(!enhanced(None, scaling), "{scaling:?}: a plain run");
-            for mode in Mode::ALL {
-                assert!(enhanced(Some(mode), scaling), "{mode:?}");
+        assert!(!enhanced(None, Upscaling::Off), "a plain run");
+        for up in [Upscaling::Fsr, Upscaling::Nis] {
+            assert!(enhanced(None, up), "{up:?} on its own");
+        }
+        for mode in Mode::ALL {
+            for up in [Upscaling::Off, Upscaling::Fsr, Upscaling::Nis] {
+                assert!(enhanced(Some(mode), up), "{mode:?} {up:?}");
             }
         }
     }
-
     struct Fake;
     impl Source for Fake {
         fn name(&self) -> &str {
