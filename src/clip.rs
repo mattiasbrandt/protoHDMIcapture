@@ -15,6 +15,11 @@
 //!   card was opened with), then records, little-endian: a frame (tag 0,
 //!   captured ns, dequeued ns, the frame's bytes) or a gap (tag 1, from, to,
 //!   lost). About 250 MB a second at 1080p60.
+//! - **Metadata:** `<name>.json` beside the clip (`metadata`), written when
+//!   the recording ends, a quit signal included: what was recorded, from
+//!   which card, with which settings, and one object per frame (index,
+//!   times, mean luma) that later analysis can extend. A replay does not
+//!   need it.
 //! - **Replay:** a `FrameSource` handing the frames back at their recorded
 //!   intervals, with sequence numbers that jump where the recording had a
 //!   gap, looping at the end; `--seconds` ends the run.
@@ -274,18 +279,18 @@ struct Luma {
 }
 
 impl Luma {
-    fn add(&mut self, captured: Duration, yuyv: &[u8]) {
+    /// Adds a frame; its mean luma.
+    fn add(&mut self, captured: Duration, yuyv: &[u8]) -> f64 {
         let first = *self.first.get_or_insert(captured);
         let second = captured.saturating_sub(first).as_secs() as usize;
         if self.seconds.len() <= second {
             self.seconds.resize(second + 1, (0.0, 0));
         }
-        let (sum, n) = yuyv.iter().step_by(2).fold((0u64, 0u64), |(s, n), &y| (s + u64::from(y), n + 1));
-        if n > 0 {
-            let slot = &mut self.seconds[second];
-            slot.0 += sum as f64 / n as f64;
-            slot.1 += 1;
-        }
+        let mean = mean_luma(yuyv);
+        let slot = &mut self.seconds[second];
+        slot.0 += mean;
+        slot.1 += 1;
+        mean
     }
 
     /// One mean per second, rounded; "-" for a second with no frame.
@@ -296,6 +301,20 @@ impl Luma {
             .collect::<Vec<_>>()
             .join(" ")
     }
+}
+
+/// The mean of a YUYV frame's Y samples (0 for an empty frame).
+fn mean_luma(yuyv: &[u8]) -> f64 {
+    let (sum, n) = yuyv.iter().step_by(2).fold((0u64, 0u64), |(s, n), &y| (s + u64::from(y), n + 1));
+    if n == 0 { 0.0 } else { sum as f64 / n as f64 }
+}
+
+/// One frame of a recording, for the metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrameNote {
+    pub captured: Duration,
+    pub dequeued: Duration,
+    pub luma: f64,
 }
 
 /// What a recording did, for the report.
@@ -309,6 +328,99 @@ pub struct Recorded {
     pub behind: u64,
     /// The mean luma per second, as `Luma::line` writes it.
     pub luma: String,
+    /// Each frame, in clip order.
+    pub per_frame: Vec<FrameNote>,
+}
+
+/// What the metadata says about a recording besides its frames: filled by
+/// main from the settings and the card the run picked.
+#[derive(Debug, Clone, Default)]
+pub struct About {
+    /// `--note "<text>"`.
+    pub note: Option<String>,
+    /// The card's V4L2 name (or "the test pattern").
+    pub card: String,
+    /// USB vendor:product, where known.
+    pub usb_id: Option<String>,
+    /// The settings that shape the picture and pick the card, with their
+    /// values.
+    pub settings: Vec<(String, String)>,
+}
+
+/// The settings `About` keeps: the card's pins and the picture's.
+pub const SETTINGS: [&str; 15] = [
+    "SOURCE",
+    "DEV",
+    "CARD_SERIAL",
+    "CARD_PORT",
+    "RES",
+    "FPS",
+    "FMT",
+    "WINDOW",
+    "WINDOW_SIZE",
+    "SCALING",
+    "LEVELS",
+    "BRIGHTNESS",
+    "CONTRAST",
+    "SATURATION",
+    "GAMMA",
+];
+
+/// The metadata of a recording (`<name>.json`).
+pub fn metadata(about: &About, recorded: &str, seconds: u64, header: Header, r: &Recorded) -> serde_json::Value {
+    use serde_json::{Map, Value, json};
+    let settings: Map<String, Value> = about.settings.iter().map(|(k, v)| (k.clone(), Value::from(v.as_str()))).collect();
+    let frames: Vec<Value> = r
+        .per_frame
+        .iter()
+        .enumerate()
+        .map(|(i, f)| {
+            json!({
+                "index": i,
+                "captured_ns": f.captured.as_nanos() as u64,
+                "dequeued_ns": f.dequeued.as_nanos() as u64,
+                "luma": (f.luma * 100.0).round() / 100.0,
+            })
+        })
+        .collect();
+    json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "recorded": recorded,
+        "seconds": seconds,
+        "note": about.note,
+        "card": { "name": about.card, "usb_id": about.usb_id },
+        "format": { "width": header.width, "height": header.height, "fps": header.fps, "fmt": header.pixels.setting() },
+        "settings": settings,
+        "totals": { "frames": r.frames, "gaps": r.gaps, "behind": r.behind, "length_s": r.length.as_secs_f64() },
+        "frames": frames,
+    })
+}
+
+/// `<dir>/<name>.json` for the clip `<dir>/<name>.clip`.
+pub fn metadata_path(clip: &Path) -> PathBuf {
+    clip.with_extension("json")
+}
+
+/// Local date and time, ISO 8601 with its offset.
+#[cfg(not(unix))]
+fn now_local() -> String {
+    String::new()
+}
+
+/// Local date and time, ISO 8601 with its offset.
+#[cfg(unix)]
+fn now_local() -> String {
+    // SAFETY: time(NULL), and localtime_r and strftime into owned buffers.
+    unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() {
+            return String::new();
+        }
+        let mut buf = [0u8; 64];
+        let n = libc::strftime(buf.as_mut_ptr().cast(), buf.len(), c"%Y-%m-%dT%H:%M:%S%z".as_ptr(), &tm);
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    }
 }
 
 /// Records `source`'s frames into `path` until `stop` is set; the run's
@@ -336,7 +448,8 @@ pub fn record_into(source: &mut dyn FrameSource, path: &Path, stop: &AtomicBool)
                 done.frames += 1;
                 first.get_or_insert(f.captured);
                 last = f.captured;
-                luma.add(f.captured, f.data);
+                let mean = luma.add(f.captured, f.data);
+                done.per_frame.push(FrameNote { captured: f.captured, dequeued: f.dequeued, luma: mean });
                 w
             }
             Event::Gap { from, to, lost } => {
@@ -365,7 +478,7 @@ pub fn record_into(source: &mut dyn FrameSource, path: &Path, stop: &AtomicBool)
 
 /// `--record <name> --seconds N`: `source` headless into `dir/<name>.clip`
 /// for `seconds`, or until a quit signal; the report on stderr.
-pub fn record(mut source: Box<dyn FrameSource>, dir: &Path, name: &str, seconds: u64, quit: &Quit) -> Result<(), String> {
+pub fn record(mut source: Box<dyn FrameSource>, dir: &Path, name: &str, seconds: u64, about: &About, quit: &Quit) -> Result<(), String> {
     let path = path_for(dir, name)?;
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let format = source.format();
@@ -400,11 +513,17 @@ pub fn record(mut source: Box<dyn FrameSource>, dir: &Path, name: &str, seconds:
         return Err("the --seconds timer panicked".into());
     }
     let r = result?;
+    let recorded = now_local();
+    let meta = metadata_path(&path);
+    let json = metadata(about, &recorded, seconds, Header::of(format), &r);
+    let text = serde_json::to_string_pretty(&json).map_err(|e| format!("{}: {e}", meta.display()))?;
+    fs::write(&meta, text + "\n").map_err(|e| format!("{}: {e}", meta.display()))?;
     eprintln!("recorded {} frames, {} capture gaps, {:.1} s into {}", r.frames, r.gaps, r.length.as_secs_f64(), path.display());
     if r.behind > 0 {
         eprintln!("warning: {} frames took longer than a frame interval to write: the disk fell behind", r.behind);
     }
     eprintln!("mean luma per second: {}", r.luma);
+    eprintln!("metadata: {}", meta.display());
     Ok(())
 }
 
@@ -585,6 +704,54 @@ mod tests {
         assert!(frames.windows(2).all(|w| w[0] != w[1]));
         // The pattern is bright bars: a mean luma for each second.
         assert!(!recorded.luma.is_empty() && !recorded.luma.contains('-'), "{}", recorded.luma);
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn the_metadata_matches_its_clip() {
+        let d = dir();
+        let path = d.join("meta.clip");
+        let wide = Format { width: 64, ..FORMAT };
+        let mut source = Pattern::new(wide);
+        let stop = AtomicBool::new(false);
+        let r = thread::scope(|s| {
+            s.spawn(|| {
+                thread::sleep(ms(100));
+                stop.store(true, Ordering::Relaxed);
+            });
+            record_into(&mut source, &path, &stop).unwrap()
+        });
+        let about = About {
+            note: Some("GTA 6, standing still".into()),
+            card: "USB3 Video".into(),
+            usb_id: Some("345f:2130".into()),
+            settings: vec![("RES".into(), "64x2".into()), ("LEVELS".into(), "auto".into())],
+        };
+        let json = metadata(&about, "2026-11-23T20:00:00+0100", 20, Header::of(wide), &r);
+        // Through text and back, as the file holds it.
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string_pretty(&json).unwrap()).unwrap();
+        assert_eq!(v["note"], "GTA 6, standing still");
+        assert_eq!(v["card"]["usb_id"], "345f:2130");
+        assert_eq!(v["format"]["fmt"], "yuyv422");
+        assert_eq!(v["settings"]["LEVELS"], "auto");
+        assert_eq!(v["seconds"], 20);
+        assert_eq!(v["totals"]["frames"], r.frames);
+        let (_, back) = read_all(&path);
+        let clip: Vec<_> = back
+            .iter()
+            .filter_map(|r| {
+                if let Record::Frame { captured, dequeued, data } = r { Some((*captured, *dequeued, mean_luma(data))) } else { None }
+            })
+            .collect();
+        let frames = v["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), clip.len());
+        for (i, (f, (captured, dequeued, luma))) in frames.iter().zip(&clip).enumerate() {
+            assert_eq!(f["index"], i);
+            assert_eq!(f["captured_ns"], captured.as_nanos() as u64);
+            assert_eq!(f["dequeued_ns"], dequeued.as_nanos() as u64);
+            assert!((f["luma"].as_f64().unwrap() - luma).abs() < 0.01, "{f} vs {luma}");
+        }
+        assert_eq!(metadata_path(&path), d.join("meta.json"));
         fs::remove_dir_all(d).unwrap();
     }
 

@@ -167,6 +167,12 @@ release build has neither flag: protoHDMIcapture does not record.
 - **Size:** the frames are raw YUYV, about 250 MB a second at 1080p60, so
   a 20 s clip is about 5 GB. The recording is refused, with both numbers,
   when it would not fit with 1 GB to spare.
+- **Metadata:** `NAME.json` beside the clip: the version, when it was
+  recorded, the seconds asked, `--note "TEXT"` (say what was on screen,
+  e.g. "GTA 6, PS5 Pro, standing still"), the card's name and USB id, the
+  format, the card and picture settings, the totals, and one entry per
+  frame (index, capture and dequeue times, mean luma). A replay does not
+  need it; copy it along with a clip you keep.
 - **The report** at the end gives the frames, the capture gaps, the length,
   any frames the disk fell behind on, and the mean luma per second, so a
   game that dimmed while idle shows.

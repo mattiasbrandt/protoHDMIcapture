@@ -71,9 +71,11 @@ const USAGE: &str = concat!(
     usage!(),
     "
 
-  dev build (#64): [--record NAME --seconds N [--test-pattern]] [--replay FILE]
+  dev build (#64): [--record NAME --seconds N [--note TEXT] [--test-pattern]] [--replay FILE]
   --record NAME   no window: the card's frames into
-                  /var/tmp/protohdmicapture-clips/NAME.clip for --seconds
+                  /var/tmp/protohdmicapture-clips/NAME.clip for --seconds,
+                  and what was recorded into NAME.json beside it
+  --note TEXT     a note for NAME.json (\"GTA 6, standing still\")
   --replay FILE   a recorded clip instead of the card, looping"
 );
 
@@ -273,6 +275,9 @@ struct Args {
     /// --replay FILE (dev builds).
     #[cfg(feature = "dev")]
     replay: Option<std::path::PathBuf>,
+    /// --note TEXT (dev builds): kept in a recording's metadata.
+    #[cfg(feature = "dev")]
+    note: Option<String>,
 }
 
 /// None for anything USAGE does not allow: an unknown flag, a missing or
@@ -291,6 +296,8 @@ fn parse_args(args: &[String]) -> Option<Args> {
             "--record" => a.record = Some(it.next()?.clone()),
             #[cfg(feature = "dev")]
             "--replay" => a.replay = Some(it.next()?.into()),
+            #[cfg(feature = "dev")]
+            "--note" => a.note = Some(it.next()?.clone()),
             _ => return None,
         }
     }
@@ -322,6 +329,8 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
         record,
         #[cfg(feature = "dev")]
         replay,
+        #[cfg(feature = "dev")]
+        note,
     } = parse_args(args).ok_or(USAGE)?;
     let mut opts =
         app::Options { seconds, monitor, stats, ..app::Options::new(live_changes::LiveChanges::DEFAULT, Arc::new(dashboard::Live::new())) };
@@ -346,14 +355,27 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     let format = capture::Format::from_settings(s.get("RES"), s.get("FPS"), s.get("FMT"))?;
     // Dev builds (#64): a clip recorded headless, or replayed at its own format.
     #[cfg(feature = "dev")]
+    if note.is_some() && record.is_none() {
+        return Err("--note goes with --record".into());
+    }
+    #[cfg(feature = "dev")]
     if let Some(name) = record {
         let seconds = seconds.ok_or("--record needs --seconds N")?;
         if replay.is_some() {
             return Err("--record and --replay: one at a time".into());
         }
-        let source: Box<dyn capture::FrameSource> =
-            if test_pattern { Box::new(pattern::Pattern::new(format)) } else { open_card(&s, format)?.0 };
-        return Ok(clip::record(source, std::path::Path::new(clip::DIR), &name, seconds, quit)?);
+        let settings = clip::SETTINGS.iter().map(|k| (k.to_string(), s.get(k).to_string())).collect();
+        let mut about = clip::About { note, settings, ..Default::default() };
+        let source: Box<dyn capture::FrameSource> = if test_pattern {
+            about.card = "the test pattern".into();
+            Box::new(pattern::Pattern::new(format))
+        } else {
+            let (source, node) = open_card(&s, format)?;
+            about.card = node.card_type.clone();
+            about.usb_id = card::usb(&node).map(|u| u.id);
+            source
+        };
+        return Ok(clip::record(source, std::path::Path::new(clip::DIR), &name, seconds, &about, quit)?);
     }
     #[cfg(feature = "dev")]
     let (replay, format) = match replay {
@@ -641,6 +663,8 @@ mod tests {
                 record: None,
                 #[cfg(feature = "dev")]
                 replay: None,
+                #[cfg(feature = "dev")]
+                note: None,
             })
         );
         // The last of a repeated flag wins.
@@ -654,6 +678,7 @@ mod tests {
         assert_eq!((a.record.as_deref(), a.seconds), (Some("gta-still"), Some(20)));
         assert_eq!(parse(&["--replay", "/x/a.clip"]).unwrap().replay, Some("/x/a.clip".into()));
         assert_eq!(parse(&["--record"]), None);
+        assert_eq!(parse(&["--record", "a", "--note", "PS5 Pro"]).unwrap().note.as_deref(), Some("PS5 Pro"));
         assert!(super::USAGE.contains("--record NAME") && super::USAGE.contains("--replay FILE"));
     }
 
