@@ -23,12 +23,16 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 /// A block whose sum of absolute luma differences exceeds this makes the
-/// frame new on its own. `HI`, `LO` and `FRAC` are mpdecimate's defaults
-/// (`hi=64*12`, `lo=64*5`, `frac=0.33`), untuned until the first card run:
-/// MJPEG and card noise sit somewhere between them and real motion.
-pub const HI: u32 = 64 * 12;
+/// frame new on its own. Tuned on the first card recording (#65, #66: MS2130,
+/// YUYV 1080p60, GTA 6 with the character standing still, 1201 frames):
+/// a true duplicate's largest block stayed under 128, a new frame with
+/// little change sat at 400-768, and mpdecimate's defaults (`hi=64*12`,
+/// `lo=64*5`) called those duplicates (547 new frames of 600). Anything
+/// from 128 to 256 gave exactly 600 (30 fps, 597 holds of 2); these sit in
+/// that plateau, twice the noise. MJPEG's noise is not measured yet.
+pub const HI: u32 = 64 * 4;
 /// A block over this counts towards `FRAC`.
-pub const LO: u32 = 64 * 5;
+pub const LO: u32 = 64 * 2;
 /// More than this share of the blocks over `LO` makes the frame new.
 pub const FRAC: f64 = 0.33;
 /// The block's side, in pixels.
@@ -338,10 +342,11 @@ mod tests {
     fn noise_under_lo_stays_a_duplicate() {
         let mut d = detector();
         d.classify(&flat(100));
-        // ±4 on every pixel: 8×8×4 = 256 a block, under LO (320).
+        // ±1 on every pixel: 8×8×1 = 64 a block, under LO (128); the
+        // card's own noise measured under 128.
         let mut noisy = flat(100);
         for (i, px) in noisy.as_chunks_mut::<2>().0.iter_mut().enumerate() {
-            px[0] = if i % 2 == 0 { 104 } else { 96 };
+            px[0] = if i % 2 == 0 { 101 } else { 99 };
         }
         assert_eq!(d.classify(&noisy), D);
     }
@@ -351,7 +356,7 @@ mod tests {
         let mut d = detector();
         d.classify(&flat(100));
         let mut moved = flat(100);
-        // One 8×8 block, each pixel +13: 832 > HI (768).
+        // One 8×8 block, each pixel +13: 832 > HI (256).
         for y in 8..16 {
             for x in 16..24 {
                 moved[(y * W + x) * 2] = 113;
@@ -364,13 +369,13 @@ mod tests {
     fn many_blocks_over_lo_are_new_and_few_are_not() {
         let blocks = (W / 8) * (H / 8); // 32
         let raise = |n: usize| {
-            // +6 on each pixel of the first n blocks: 384, over LO, under HI.
+            // +3 on each pixel of the first n blocks: 192, over LO, under HI.
             let mut f = flat(100);
             for b in 0..n {
                 let (bx, by) = (b % (W / 8), b / (W / 8));
                 for y in by * 8..by * 8 + 8 {
                     for x in bx * 8..bx * 8 + 8 {
-                        f[(y * W + x) * 2] = 106;
+                        f[(y * W + x) * 2] = 103;
                     }
                 }
             }
@@ -385,7 +390,7 @@ mod tests {
 
     #[test]
     fn a_slow_fade_adds_up_against_the_last_new_frame() {
-        // Each step is +2 a pixel (128 a block, under LO); against the last
+        // Each step is +2 a pixel (128 a block, not over LO); against the last
         // new frame the steps add up until one is new.
         let mut d = detector();
         assert_eq!(d.classify(&flat(100)), N);
