@@ -227,6 +227,9 @@ pub struct Totals {
     pub torn: u64,
     pub max_tears: u32,
     pub worst_psnr: f64,
+    /// The largest difference in any channel of any pixel, generated
+    /// against real (8-bit): what a test of the frames' colour reads.
+    pub max_channel: u8,
 }
 
 /// The window's GPU work for the score: the convert pass, the frames a
@@ -431,7 +434,7 @@ pub fn run(opts: &Options) -> Result<Totals, String> {
     if opts.every == 0 {
         return Err("--every N: N is 1 or more".into());
     }
-    let mut reader = Reader::open(&opts.clip)?;
+    let reader = Reader::open(&opts.clip)?;
     let header = reader.header();
     let size = (header.width, header.height);
     let hud = opts.hud.as_deref().map(|v| Rect::parse(v, size.0, size.1)).transpose()?;
@@ -439,8 +442,15 @@ pub fn run(opts: &Options) -> Result<Totals, String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let gpu = Gpu::new(size)?;
-    let mut generator = framegen::generator(opts.mode, &gpu.device)
+    let generator = framegen::generator(opts.mode, &gpu.device)
         .ok_or_else(|| format!("--framegen {}: runs no generator to score", opts.mode.as_str()))?;
+    score(opts, reader, hud, gpu, generator)
+}
+
+/// The score with `generator` on `gpu` (tests bring their own).
+fn score(opts: &Options, mut reader: Reader, hud: Option<Rect>, gpu: Gpu, mut generator: Box<dyn Generator>) -> Result<Totals, String> {
+    let header = reader.header();
+    let size = (header.width, header.height);
     let mut detector = Detector::new(size.0, size.1);
     // The frames the chain holds: (clip index, slot).
     let mut chain: Triples<(usize, usize)> = Triples::new();
@@ -478,6 +488,8 @@ pub fn run(opts: &Options) -> Result<Totals, String> {
         }
         let got_px = gpu.read(&gpu.out)?;
         let real_px = gpu.read(&gpu.frames[s1])?;
+        let channel = got_px.iter().zip(&real_px).map(|(g, r)| g.abs_diff(*r)).max().unwrap_or(0);
+        totals.max_channel = totals.max_channel.max(channel);
         let (got, real) = (luma(&got_px), luma(&real_px));
         let (picture, tears) = region(&got, &real, size.0, whole);
         let hud_region = hud.map(|r| region(&got, &real, size.0, r).0);
@@ -680,6 +692,126 @@ mod tests {
         v.sort_by(worse);
         let got: Vec<(u32, f64)> = v.iter().map(|x| (x.picture.tear_blocks, x.picture.sq_err)).collect();
         assert_eq!(got, [(3, 50.0), (3, 1.0), (1, 10.0), (0, 99.0)]);
+    }
+
+    /// A YUYV clip of `frames` (Y, U, V per pixel pair, by frame) at
+    /// 60 Hz, each picture twice (2:2), at `path`.
+    fn clip(path: &Path, (w, h): (u32, u32), frames: &[Vec<u8>]) {
+        use crate::clip::{Header, Writer};
+        use std::time::Duration;
+        let format = crate::capture::Format { width: w, height: h, fps: 60.0, pixels: crate::capture::Pixels::Yuyv };
+        let mut writer = Writer::create(path, Header::of(format)).unwrap();
+        for (n, f) in frames.iter().enumerate() {
+            for d in 0..2u64 {
+                let t = Duration::from_micros(n as u64 * 33_333 + d * 16_667);
+                writer.frame(t, t, f).unwrap();
+            }
+        }
+        writer.finish().unwrap();
+    }
+
+    /// A generator of one fragment pass over `prev` and `next`, as the
+    /// branches' copy and blend are (#67).
+    struct TestPass(wgpu::RenderPipeline, wgpu::BindGroupLayout);
+
+    impl TestPass {
+        fn new(device: &wgpu::Device, body: &str) -> Self {
+            let shader = format!(
+                "@group(0) @binding(0) var prev: texture_2d<f32>;\n@group(0) @binding(1) var next: texture_2d<f32>;\n\
+                 @fragment fn fs(in: VOut) -> @location(0) vec4f {{ let at = vec2u(in.pos.xy); let p = textureLoad(prev, at, 0); let n = textureLoad(next, at, 0); return {body}; }}"
+            );
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("score test pass"),
+                entries: &[crate::app::texture_entry(0, false), crate::app::texture_entry(1, false)],
+            });
+            let pipeline = crate::app::pipeline(device, "score test pass", &shader, &layout, wgpu::TextureFormat::Rgba8Unorm);
+            Self(pipeline, layout)
+        }
+    }
+
+    impl Generator for TestPass {
+        fn generate(
+            &mut self,
+            device: &wgpu::Device,
+            _: &wgpu::Queue,
+            encoder: &mut wgpu::CommandEncoder,
+            frames: Pair<'_>,
+            _: Option<crate::gputime::PassTimes<'_>>,
+        ) -> bool {
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("score test pass"),
+                layout: &self.1,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(frames.prev) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(frames.next) },
+                ],
+            });
+            let attachments = [Some(wgpu::RenderPassColorAttachment {
+                view: frames.out,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+            })];
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("score test pass"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.0);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+            true
+        }
+    }
+
+    /// The frames a generator gets are the window's: on a still, coloured
+    /// picture whose brightness steps evenly from new frame to new frame,
+    /// the mean of N0 and N2 is N1, and `next` alone is N2, within a
+    /// level per channel, in every triple of a long chain.
+    /// `cargo test --release --features dev -- --ignored score_`.
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn score_hands_generators_the_windows_frames() {
+        let (w, h) = (64u32, 32u32);
+        let dir = std::env::temp_dir().join(format!("phc-score-colour-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ramp.clip");
+        // Warm on the left, cool on the right, in every frame, no channel
+        // clipped at 0 or 255; luma 60, 70, 80, ... a new frame (each 10 levels over the last: new by the
+        // detector). Twelve new frames: five chained triples.
+        let frames: Vec<Vec<u8>> = (0..12u32)
+            .map(|k| {
+                (0..h)
+                    .flat_map(|_| 0..w / 2)
+                    .flat_map(|m| {
+                        let y = (60 + 10 * k) as u8;
+                        let (u, v) = if m < w / 4 { (115, 141) } else { (141, 115) };
+                        [y, u, y, v]
+                    })
+                    .collect()
+            })
+            .collect();
+        clip(&path, (w, h), &frames);
+        let opts = Options { clip: path.clone(), mode: Mode::Copy, every: 1, worst: 0, out: None, hud: None };
+        for (name, body, want) in [("mean", "mix(p, n, 0.5)", 1u8), ("next", "n", 0)] {
+            let gpu = Gpu::new((w, h)).unwrap();
+            let generator: Box<dyn Generator> = Box::new(TestPass::new(&gpu.device, body));
+            let t = score(&opts, Reader::open(&path).unwrap(), None, gpu, generator).unwrap();
+            assert_eq!(t.triples, 5, "{name}");
+            if name == "mean" {
+                // The mean of N0 and N2 is N1 (rounding: a level).
+                assert!(t.max_channel <= want, "{name}: off by {} in a channel", t.max_channel);
+            } else {
+                // `next` is N2: 10 luma levels over N1, so never N1 itself,
+                // and the same picture: about 10 levels a channel, no more.
+                assert!((8..=14).contains(&t.max_channel), "{name}: off by {} in a channel", t.max_channel);
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// `copy` on a synthetic clip, end to end on the GPU: a square moving
