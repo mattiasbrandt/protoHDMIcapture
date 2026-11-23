@@ -29,6 +29,9 @@ use std::time::{Duration, Instant};
 use crate::framegen::Mode;
 use crate::scale::Scaling;
 
+#[cfg(target_os = "linux")]
+mod nvml;
+
 /// How often the sampler reads.
 pub const PERIOD: Duration = Duration::from_millis(100);
 /// What the dashboard's numbers cover.
@@ -100,23 +103,31 @@ impl AmdSysfs {
     /// The card under `drm` (`/sys/class/drm`) whose PCI vendor and device
     /// ids are wgpu's adapter's.
     pub fn find(drm: &Path, vendor: u32, device: u32) -> Option<Self> {
-        let mut cards: Vec<PathBuf> = fs::read_dir(drm)
-            .ok()?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("card") && !n.contains('-')))
-            .map(|e| e.path().join("device"))
-            .collect();
-        cards.sort();
-        let id = |p: &Path, f: &str| read_trim(&p.join(f)).and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok());
-        let dev = cards.into_iter().find(|d| id(d, "vendor") == Some(vendor) && id(d, "device") == Some(device))?;
+        let (dev, pdev) = drm_card(drm, vendor, device)?;
         let hwmon = fs::read_dir(dev.join("hwmon")).ok().and_then(|r| {
             let mut v: Vec<PathBuf> = r.filter_map(|e| e.ok()).map(|e| e.path()).collect();
             v.sort();
             v.into_iter().next()
         });
-        let pdev = fs::canonicalize(&dev).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
         Some(Self { device: dev, hwmon, pdev })
     }
+}
+
+/// The card under `drm` (`/sys/class/drm`) whose PCI vendor and device ids
+/// are wgpu's adapter's: its `device` directory, and its PCI address
+/// (`0000:03:00.0`) where the link resolves.
+fn drm_card(drm: &Path, vendor: u32, device: u32) -> Option<(PathBuf, Option<String>)> {
+    let mut cards: Vec<PathBuf> = fs::read_dir(drm)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("card") && !n.contains('-')))
+        .map(|e| e.path().join("device"))
+        .collect();
+    cards.sort();
+    let id = |p: &Path, f: &str| read_trim(&p.join(f)).and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok());
+    let dev = cards.into_iter().find(|d| id(d, "vendor") == Some(vendor) && id(d, "device") == Some(device))?;
+    let pdev = fs::canonicalize(&dev).ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+    Some((dev, pdev))
 }
 
 impl Source for AmdSysfs {
@@ -180,13 +191,27 @@ fn current_clock(table: &str) -> Option<f64> {
 
 /// The whole-card source for wgpu's adapter, or why there is none.
 pub fn source_for(vendor: u32, device: u32, name: &str) -> Result<Box<dyn Source>, String> {
-    if cfg!(target_os = "linux") && vendor == 0x1002 {
+    if cfg!(target_os = "linux") && vendor == AMD {
         return AmdSysfs::find(Path::new("/sys/class/drm"), vendor, device)
             .map(|s| Box::new(s) as Box<dyn Source>)
             .ok_or_else(|| format!("{name}: its amdgpu sysfs files were not found"));
     }
-    Err(format!("{name}: whole-GPU numbers are read for amdgpu on Linux only so far"))
+    #[cfg(target_os = "linux")]
+    if vendor == NVIDIA {
+        let (_, pdev) = drm_card(Path::new("/sys/class/drm"), vendor, device)
+            .ok_or_else(|| format!("{name}: its PCI device was not found under /sys/class/drm"))?;
+        let pdev = pdev.ok_or_else(|| format!("{name}: its PCI address could not be read"))?;
+        return nvml::Lib::open(nvml::LIBRARY, &pdev)
+            .map(|lib| Box::new(nvml::Nvml::new(lib, Some(pdev))) as Box<dyn Source>)
+            .map_err(|e| format!("{name}: {e}"));
+    }
+    Err(format!("{name}: whole-GPU numbers are read for amdgpu and NVIDIA (NVML) on Linux only so far"))
 }
+
+/// PCI vendor ids (wgpu's `AdapterInfo::vendor`).
+pub const AMD: u32 = 0x1002;
+#[cfg(target_os = "linux")]
+pub const NVIDIA: u32 = 0x10de;
 
 /// The process's own use, summed over its DRM clients on one card.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

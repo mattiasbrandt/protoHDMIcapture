@@ -158,8 +158,11 @@ gst or ffplay are legacy's.
 - **The dashboard's GPU section**, the last 10 s at 10 Hz, as nvtop and
   amdgpu_top read them:
   - `busy`, `clocks`, `VRAM`, `power`, `temperature` and `fan`: the whole
-    card, from amdgpu's sysfs and hwmon (other drivers: "not available",
-    with why);
+    card, from amdgpu's sysfs and hwmon, or on NVIDIA from NVML
+    (`libnvidia-ml.so.1`, loaded at run time: busy, clocks, VRAM, power and
+    its limit, the die temperature and its slowdown/shutdown limits; no fan
+    in RPM; written from NVML's API and not yet confirmed on NVIDIA
+    hardware, #87); other drivers: "not available", with why;
   - `protoHDMIcapture`: its own share of the GPU's engines and its VRAM,
     from its DRM file descriptors (`/proc/self/fdinfo`, `drm-engine-*`).
 - **`--stats`**:
