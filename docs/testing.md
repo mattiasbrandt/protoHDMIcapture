@@ -285,6 +285,39 @@ protoHDMIcapture does not record.
 - **Keep a clip** by copying it to `~/.local/share/protohdmicapture/clips/`.
   Clips are game footage and gigabytes: never commit one.
 
+## Scoring frame generation on a clip (dev builds, #81)
+
+How close a generator's in-between picture comes to a real one, on a
+kept clip, headless: no card, no window, no monitor.
+
+```bash
+target/release/protohdmicapture --framegen-score CLIP --framegen MODE \
+    [--every N] [--worst K] [--out DIR] [--hud X,Y,W,H]
+```
+
+- **The test:** three new frames in a row, N0, N1 and N2 (duplicates
+  skipped by the recorder's detector). The generator makes the picture
+  halfway between N0 and N2, and it is compared with the real N1. Twice
+  the live gap, so harsher than the window, but the same for every
+  approach. The triples are chained (N0 N1 N2, then N2 N3 N4), so a
+  generator's state from pair to pair carries as in the window; a gap in
+  the clip starts the chain again. `--every N` scores every Nth triple
+  only, with the chain broken between them.
+- **The scores**, on luma: PSNR over the picture, and **tear blocks**:
+  16×16 blocks off by more than 24 levels on average, the local failures
+  a person sees (a tear, a seam), which PSNR averages away. `--hud`
+  scores a rectangle on its own (the GTA 6 minimap at 1080p is about
+  `32,883,302,170`).
+- **`--out DIR`** writes the worst K triples (`--worst`, 5): N1, the
+  generated picture and the error map (the error ×4, tear blocks
+  outlined red), as PNGs. Never next to the clip: it is footage.
+- **`copy` is the floor**: it shows N0 for N1, which is what no
+  interpolation costs. On `gta6-driving-01` (2026-11-23): PSNR 19.36 dB,
+  1424 tear blocks a triple, 97 % of triples torn, the minimap 28.20 dB.
+- Each frame goes through the window's convert pass at the picture
+  controls' defaults; a pair a generator declines (a scene cut) is not
+  scored, and counted. The whole 30 s clip takes about 15 s.
+
 ## Signals
 
 - **Run a signal test in the foreground.** A job started with `&` from a

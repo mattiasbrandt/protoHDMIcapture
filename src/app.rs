@@ -394,7 +394,7 @@ struct VOut {
 /// macropixel, Y0 U Y1 V for two pixels; chroma is sited with the even pixel
 /// and interpolated for the odd one. Then LEVELS and the colour values
 /// (picture.rs).
-fn convert_shader(width: u32) -> String {
+pub(crate) fn convert_shader(width: u32) -> String {
     let last = width / 2 - 1;
     format!(
         r#"{wgsl}

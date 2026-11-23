@@ -30,6 +30,8 @@ mod present;
 mod pw;
 mod run;
 mod scale;
+#[cfg(feature = "dev")]
+mod score;
 mod screenshot;
 mod session;
 mod settings;
@@ -75,6 +77,11 @@ const USAGE: &str = concat!(
     "
 
   dev build (#64): [--record NAME --seconds N [--note TEXT]] [--replay FILE] [--framegen MODE]
+  dev build (#81): --framegen-score CLIP --framegen MODE [--every N] [--worst K] [--out DIR] [--hud X,Y,W,H]
+  --framegen-score CLIP  headless: MODE's generator scored on CLIP,
+                  the picture halfway between new frames N0 and N2 against
+                  the real N1 (PSNR, tear blocks); every Nth triple, the
+                  worst K (5) to DIR as PNGs, the HUD rectangle on its own
   --record NAME   the card's frames (or --test-pattern's) into
                   /var/tmp/protohdmicapture-clips/NAME.clip while the
                   window shows them as in any run, for --seconds or until
@@ -303,6 +310,20 @@ struct Args {
     /// --framegen MODE (dev builds, #66), checked once the flags parse.
     #[cfg(feature = "dev")]
     framegen: Option<String>,
+    /// --framegen-score CLIP and its flags (dev builds, #81).
+    #[cfg(feature = "dev")]
+    score: Score,
+}
+
+/// --framegen-score CLIP's flags (dev builds, #81).
+#[cfg(feature = "dev")]
+#[derive(Debug, Default, PartialEq)]
+struct Score {
+    clip: Option<std::path::PathBuf>,
+    every: Option<usize>,
+    worst: Option<usize>,
+    out: Option<std::path::PathBuf>,
+    hud: Option<String>,
 }
 
 /// None for anything USAGE does not allow: an unknown flag, a missing or
@@ -325,6 +346,16 @@ fn parse_args(args: &[String]) -> Option<Args> {
             "--note" => a.note = Some(it.next()?.clone()),
             #[cfg(feature = "dev")]
             "--framegen" => a.framegen = Some(it.next()?.clone()),
+            #[cfg(feature = "dev")]
+            "--framegen-score" => a.score.clip = Some(it.next()?.into()),
+            #[cfg(feature = "dev")]
+            "--every" => a.score.every = Some(it.next()?.parse().ok()?),
+            #[cfg(feature = "dev")]
+            "--worst" => a.score.worst = Some(it.next()?.parse().ok()?),
+            #[cfg(feature = "dev")]
+            "--out" => a.score.out = Some(it.next()?.into()),
+            #[cfg(feature = "dev")]
+            "--hud" => a.score.hud = Some(it.next()?.clone()),
             _ => return None,
         }
     }
@@ -343,6 +374,40 @@ fn record_flags(record: Option<&str>, note: Option<&str>, seconds: Option<u64>, 
     }
 }
 
+/// --framegen-score's flags (#81): the score's options, or None for a
+/// viewer run. Its own flags go with it only, and it runs alone: no
+/// window, no card, so no viewer flag either.
+#[cfg(feature = "dev")]
+fn score_flags(a: &Args) -> Result<Option<score::Options>, String> {
+    let s = &a.score;
+    let Some(clip) = &s.clip else {
+        if s.every.is_some() || s.worst.is_some() || s.out.is_some() || s.hud.is_some() {
+            return Err("--every, --worst, --out and --hud go with --framegen-score".into());
+        }
+        return Ok(None);
+    };
+    let viewer = a.seconds.is_some()
+        || a.monitor.is_some()
+        || a.stats
+        || a.test_pattern
+        || a.debug
+        || a.record.is_some()
+        || a.replay.is_some()
+        || a.note.is_some();
+    if viewer {
+        return Err("--framegen-score runs alone, headless: no viewer flag with it".into());
+    }
+    let mode = a.framegen.as_deref().ok_or("--framegen-score needs --framegen MODE")?;
+    Ok(Some(score::Options {
+        clip: clip.clone(),
+        mode: framegen::Mode::from_flag(mode)?,
+        every: s.every.unwrap_or(1),
+        worst: s.worst.unwrap_or(score::WORST),
+        out: s.out.clone(),
+        hud: s.hud.clone(),
+    }))
+}
+
 fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     // First run: no settings file, so the wizard, as view.sh offers it
     // (not for a measurement run, nor for the wizard's own children).
@@ -358,6 +423,12 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
 
     // The viewer's numbers, from here on: the dashboard serves these. The
     // wizard's feed windows (--setup, or the first run above) had their own.
+    let parsed = parse_args(args).ok_or(USAGE)?;
+    // The frame-generation score (#81): headless, and nothing else.
+    #[cfg(feature = "dev")]
+    if let Some(opts) = score_flags(&parsed)? {
+        return Ok(score::run(&opts).map(drop)?);
+    }
     let Args {
         seconds,
         monitor,
@@ -372,7 +443,9 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
         note,
         #[cfg(feature = "dev")]
         framegen,
-    } = parse_args(args).ok_or(USAGE)?;
+        // --framegen-score's flags, handled above.
+        ..
+    } = parsed;
     let mut opts =
         app::Options { seconds, monitor, stats, ..app::Options::new(live_changes::LiveChanges::DEFAULT, Arc::new(dashboard::Live::new())) };
     #[cfg(feature = "dev")]
@@ -721,6 +794,8 @@ mod tests {
                 note: None,
                 #[cfg(feature = "dev")]
                 framegen: None,
+                #[cfg(feature = "dev")]
+                score: Default::default(),
             })
         );
         // The last of a repeated flag wins.
@@ -754,12 +829,38 @@ mod tests {
         assert!(!super::USAGE.contains("no window"));
     }
 
+    #[cfg(feature = "dev")]
+    #[test]
+    fn the_score_runs_alone_with_its_own_flags() {
+        let score = |args: &[&str]| super::score_flags(&parse(args).unwrap());
+        // A viewer run: no score.
+        assert_eq!(score(&["--framegen", "copy"]), Ok(None));
+        let o = score(&["--framegen-score", "/c/a.clip", "--framegen", "copy", "--every", "3", "--out", "/o", "--hud", "1,2,3,4"])
+            .unwrap()
+            .unwrap();
+        assert_eq!((o.clip.to_str(), o.mode, o.every, o.worst), (Some("/c/a.clip"), crate::framegen::Mode::Copy, 3, crate::score::WORST));
+        assert_eq!((o.out.as_deref().and_then(|p| p.to_str()), o.hud.as_deref()), (Some("/o"), Some("1,2,3,4")));
+        assert_eq!(score(&["--framegen-score", "/c/a.clip"]), Err("--framegen-score needs --framegen MODE".into()));
+        for viewer in [&["--stats"][..], &["--seconds", "5"], &["--replay", "/x"], &["--monitor", "DP-1"], &["--record", "n"]] {
+            let mut args = vec!["--framegen-score", "/c/a.clip", "--framegen", "copy"];
+            args.extend_from_slice(viewer);
+            assert_eq!(score(&args), Err("--framegen-score runs alone, headless: no viewer flag with it".into()), "{viewer:?}");
+        }
+        for own in [&["--every", "2"][..], &["--worst", "1"], &["--out", "/o"], &["--hud", "1,2,3,4"]] {
+            assert_eq!(score(own), Err("--every, --worst, --out and --hud go with --framegen-score".into()), "{own:?}");
+        }
+        assert_eq!(parse(&["--every", "two"]), None);
+        assert!(super::USAGE.contains("--framegen-score CLIP"));
+    }
+
     #[cfg(not(feature = "dev"))]
     #[test]
     fn a_release_build_has_no_dev_flags() {
         assert_eq!(parse(&["--record", "x", "--seconds", "1"]), None);
         assert_eq!(parse(&["--replay", "x"]), None);
+        assert_eq!(parse(&["--framegen-score", "x"]), None);
         assert!(!super::USAGE.contains("--record"));
+        assert!(!super::USAGE.contains("--framegen-score"));
     }
 
     #[test]
