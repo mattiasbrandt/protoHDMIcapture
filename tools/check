@@ -97,8 +97,9 @@ fi
 
 # A path a comment or doc names must exist: a renamed or deleted file
 # leaves its old path behind (src/desktop.rs named a harness that never was).
+# Untracked files count, so a new doc is checked before it is staged.
 step "named repo paths exist"
-git grep -ohE '(^|[^/[:alnum:]_.-])(tools|legacy|docs|vendor|capture-cards|sources|\.github)/[[:alnum:]_./-]+\.(sh|rs|md|py|lua|yml|patch|rows)' -- src docs '*.md' tools \
+git grep --untracked -ohE '(^|[^/[:alnum:]_.-])(tools|legacy|docs|vendor|capture-cards|sources|\.github)/[[:alnum:]_./-]+\.(sh|rs|md|py|lua|yml|patch|rows)' -- src docs '*.md' tools \
     | sed -E 's|^[^/[:alnum:]_.-]||' | sort -u | while read -r p; do
     [ -e "$p" ] || echo "$p"
 done | grep . && bad "a named path does not exist"
