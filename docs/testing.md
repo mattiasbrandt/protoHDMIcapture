@@ -234,6 +234,25 @@ window closes. A plain run never registers.
   happens; `--stats` says `note: GameMode not available: …` once.
 - **The ignored test** registers this process with the running gamemoded:
   `tools/heavy cargo test registers_with_the_running_gamemoded -- --ignored`.
+- **On NVIDIA** (from GameMode's source; not tried here, #87): its GPU part
+  runs `nvidia-settings` through `gpuclockctl` to set the PowerMizer mode
+  and clock offsets. The `[gpu]` section in `/etc/gamemode.ini`:
+
+  ```ini
+  [gpu]
+  apply_gpu_optimisations=accept-responsibility
+  gpu_device=<n>
+  nv_powermizer_mode=1          ; 1 Prefer Maximum Performance (0 Adaptive, 2 Auto)
+  ; nv_core_clock_mhz_offset=0  ; offsets need Coolbits (nvidia-xconfig)
+  ; nv_mem_clock_mhz_offset=0
+  ```
+
+  It needs an X display: `gpuclockctl` refuses without `DISPLAY` and
+  `XAUTHORITY`, and `nvidia-settings` is an X client, so on a Wayland
+  session it works only through XWayland, if at all (unverified). GameMode's
+  CPU part does not depend on X. Check with `nvidia-smi` (its clocks and
+  performance state) while an enhancement runs. protoHDMIcapture never
+  writes `gamemode.ini` or NVIDIA settings.
 
 ## Real-time audio (#76)
 
