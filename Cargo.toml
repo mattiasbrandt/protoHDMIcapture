@@ -77,6 +77,11 @@ debug = 1
 [patch.crates-io]
 linuxvideo = { path = "vendor/linuxvideo" }
 
+# dev: the developer-only clip recorder and replay (#64, src/clip.rs).
+# Never in a release build: protoHDMIcapture does not record.
+[features]
+dev = []
+
 [dev-dependencies]
 jpeg-encoder = "0.7.1"
 

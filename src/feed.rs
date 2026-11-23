@@ -103,6 +103,10 @@ pub struct Start {
     pub format: Format,
     /// --test-pattern: the pattern instead of the card.
     pub test_pattern: bool,
+    /// --replay (dev builds, #64): a recorded clip instead of the card;
+    /// `format` is the clip's.
+    #[cfg(feature = "dev")]
+    pub replay: Option<crate::clip::Replay>,
 }
 
 /// Where a viewer's feed gets what it opens: the machine's in main.rs,
@@ -186,9 +190,26 @@ impl Feed {
         log: Option<&mut DebugLog>,
         quit: &Quit,
     ) -> Result<bool, Fatal> {
-        let Start { run_dir, settings: s, mut opts, format, test_pattern } = start;
+        let Start {
+            run_dir,
+            settings: s,
+            mut opts,
+            format,
+            test_pattern,
+            #[cfg(feature = "dev")]
+            replay,
+        } = start;
         let live = opts.live.clone();
-        let (source, node): (Box<dyn FrameSource>, _) = if test_pattern {
+        #[cfg(feature = "dev")]
+        let replayed = replay.map(|r| {
+            eprintln!("video: replaying {} ({}x{} {} fps)", r.path().display(), format.width, format.height, format.fps);
+            Box::new(r) as Box<dyn FrameSource>
+        });
+        #[cfg(not(feature = "dev"))]
+        let replayed: Option<Box<dyn FrameSource>> = None;
+        let (source, node): (Box<dyn FrameSource>, _) = if let Some(r) = replayed {
+            (r, None)
+        } else if test_pattern {
             eprintln!("video: the test pattern at {}x{} {} fps", format.width, format.height, format.fps);
             (Box::new(Pattern::new(format)), None)
         } else {
@@ -441,7 +462,15 @@ mod tests {
             let settings = Settings::resolve_with(&move |k| (k == "CONFIG_FILE").then(|| path.clone()));
             assert!(settings.errors().is_empty(), "{:?}", settings.errors());
             let opts = app::Options::new(LiveChanges::DEFAULT, Arc::new(Live::new()));
-            Start { run_dir: dir.to_path_buf(), settings, opts, format: FORMAT, test_pattern }
+            Start {
+                run_dir: dir.to_path_buf(),
+                settings,
+                opts,
+                format: FORMAT,
+                test_pattern,
+                #[cfg(feature = "dev")]
+                replay: None,
+            }
         }
 
         /// What the stand-ins saw: the order of the steps that left a mark,

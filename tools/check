@@ -82,6 +82,19 @@ else
     else
         step "protoHDMIcapture: clippy for Windows skipped (rustup target add $win)"
     fi
+    # The dev feature (#64: the clip recorder and replay) in its own target
+    # dir, so the default build above, which the fixtures run, is never
+    # replaced by a dev binary.
+    step "protoHDMIcapture --features dev: build, test, clippy"
+    dev_target="${CARGO_TARGET_DIR:-target}/dev"
+    cargo build --features dev --target-dir "$dev_target" --quiet || bad "protoHDMIcapture --features dev: cargo build"
+    dev_log=$(mktemp)
+    if ! cargo test --features dev --target-dir "$dev_target" --quiet >"$dev_log" 2>&1; then
+        grep -E '^test .* FAILED$|panicked at|^error' "$dev_log"
+        bad "protoHDMIcapture --features dev: cargo test"
+    fi
+    rm -f "$dev_log"
+    cargo clippy --features dev --target-dir "$dev_target" --all-targets --quiet -- -D warnings || bad "protoHDMIcapture --features dev: cargo clippy"
 fi
 
 # State shared by every window run in the process carries its reason (#25):

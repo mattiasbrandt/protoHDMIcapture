@@ -149,6 +149,33 @@ gst or ffplay are legacy's.
   scheme_current`; put the value back in a `finally`. Hidden settings
   such as IDLEDISABLE show only with `powercfg /qh`, not `/query`.
 
+## Recording a clip (dev builds)
+
+For trying frame generation and upscaling on the same card frames every
+time (#63, #64), a dev build records them headless and replays them. A
+release build has neither flag: protoHDMIcapture does not record.
+
+- **Build:** `cargo build --features dev`.
+- **Record:** `target/debug/protohdmicapture --record NAME --seconds N`.
+  It runs headless: no window, no audio, no dashboard. The card is the
+  one a normal run opens, at RES, FPS and FMT; add `--test-pattern` to
+  record the pattern instead. It is a card run: brief it and wait for a
+  go, like any other.
+- **Where clips go:** `/var/tmp/protohdmicapture-clips/NAME.clip`. That is
+  on disk, and systemd empties it after 30 days; `/tmp` is RAM-backed on
+  many desktops. An existing clip is never written over.
+- **Size:** the frames are raw YUYV, about 250 MB a second at 1080p60, so
+  a 20 s clip is about 5 GB. The recording is refused, with both numbers,
+  when it would not fit with 1 GB to spare.
+- **The report** at the end gives the frames, the capture gaps, the length,
+  any frames the disk fell behind on, and the mean luma per second, so a
+  game that dimmed while idle shows.
+- **Replay:** `target/debug/protohdmicapture --replay FILE`. It plays the
+  normal window at the clip's own size and rate, looping, with `--stats`,
+  `--seconds` and the dashboard as usual; RES, FPS and FMT are not used.
+- **Keep a clip** by copying it to `~/.local/share/protohdmicapture/clips/`.
+  Clips are game footage and gigabytes: never commit one.
+
 ## Signals
 
 - **Run a signal test in the foreground.** A job started with `&` from a

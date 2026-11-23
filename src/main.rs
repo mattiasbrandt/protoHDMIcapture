@@ -5,6 +5,8 @@ mod audio;
 mod capture;
 mod capture_cards;
 mod card;
+#[cfg(feature = "dev")]
+mod clip;
 mod dashboard;
 mod debuglog;
 mod desktop;
@@ -40,7 +42,10 @@ use std::sync::Arc;
 
 use settings::Settings;
 
-const USAGE: &str = "usage: protohdmicapture [--setup | --settings | --dashboard | -h | --help | -V | --version] [--debug] [--menu]
+/// The usage text; a dev build (#64) adds its flags.
+macro_rules! usage {
+    () => {
+        "usage: protohdmicapture [--setup | --settings | --dashboard | -h | --help | -V | --version] [--debug] [--menu]
        measurements: [--seconds N] [--monitor NAME] [--stats] [--test-pattern]
 
   (none)          the card's feed, with the settings file (--settings shows it)
@@ -56,7 +61,21 @@ const USAGE: &str = "usage: protohdmicapture [--setup | --settings | --dashboard
   --seconds N     end the feed after N seconds
   --monitor NAME  open the window on monitor NAME (Hyprland only)
   --stats         print the latency numbers every 10 s, and a summary
-  --test-pattern  colour bars instead of the card";
+  --test-pattern  colour bars instead of the card"
+    };
+}
+#[cfg(not(feature = "dev"))]
+const USAGE: &str = usage!();
+#[cfg(feature = "dev")]
+const USAGE: &str = concat!(
+    usage!(),
+    "
+
+  dev build (#64): [--record NAME --seconds N [--test-pattern]] [--replay FILE]
+  --record NAME   no window: the card's frames into
+                  /var/tmp/protohdmicapture-clips/NAME.clip for --seconds
+  --replay FILE   a recorded clip instead of the card, looping"
+);
 
 /// Called first thing in main, before any thread exists.
 /// - MANGOHUD=0, as view.sh does for mpv: MangoHud is an implicit Vulkan
@@ -248,6 +267,12 @@ struct Args {
     test_pattern: bool,
     /// As view.sh's: DEBUG=window, as if from the environment.
     debug: bool,
+    /// --record NAME (dev builds): the clip's name.
+    #[cfg(feature = "dev")]
+    record: Option<String>,
+    /// --replay FILE (dev builds).
+    #[cfg(feature = "dev")]
+    replay: Option<std::path::PathBuf>,
 }
 
 /// None for anything USAGE does not allow: an unknown flag, a missing or
@@ -262,6 +287,10 @@ fn parse_args(args: &[String]) -> Option<Args> {
             "--stats" => a.stats = true,
             "--test-pattern" => a.test_pattern = true,
             "--debug" => a.debug = true,
+            #[cfg(feature = "dev")]
+            "--record" => a.record = Some(it.next()?.clone()),
+            #[cfg(feature = "dev")]
+            "--replay" => a.replay = Some(it.next()?.into()),
             _ => return None,
         }
     }
@@ -283,7 +312,17 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
 
     // The viewer's numbers, from here on: the dashboard serves these. The
     // wizard's feed windows (--setup, or the first run above) had their own.
-    let Args { seconds, monitor, stats, test_pattern, debug } = parse_args(args).ok_or(USAGE)?;
+    let Args {
+        seconds,
+        monitor,
+        stats,
+        test_pattern,
+        debug,
+        #[cfg(feature = "dev")]
+        record,
+        #[cfg(feature = "dev")]
+        replay,
+    } = parse_args(args).ok_or(USAGE)?;
     let mut opts =
         app::Options { seconds, monitor, stats, ..app::Options::new(live_changes::LiveChanges::DEFAULT, Arc::new(dashboard::Live::new())) };
 
@@ -305,11 +344,39 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     }
     opts.live_changes = live_changes::LiveChanges::read(&s)?;
     let format = capture::Format::from_settings(s.get("RES"), s.get("FPS"), s.get("FMT"))?;
+    // Dev builds (#64): a clip recorded headless, or replayed at its own format.
+    #[cfg(feature = "dev")]
+    if let Some(name) = record {
+        let seconds = seconds.ok_or("--record needs --seconds N")?;
+        if replay.is_some() {
+            return Err("--record and --replay: one at a time".into());
+        }
+        let source: Box<dyn capture::FrameSource> =
+            if test_pattern { Box::new(pattern::Pattern::new(format)) } else { open_card(&s, format)?.0 };
+        return Ok(clip::record(source, std::path::Path::new(clip::DIR), &name, seconds, quit)?);
+    }
+    #[cfg(feature = "dev")]
+    let (replay, format) = match replay {
+        Some(path) => {
+            let r = clip::Replay::open(&path)?;
+            let f = capture::FrameSource::format(&r);
+            (Some(r), f)
+        }
+        None => (None, format),
+    };
 
     // One video window at a time, with view.sh too (docs/run-dir.md): the
     // feed's start and end, in their order (feed.rs).
     opts.desktop = desktop::detect()?;
-    let start = feed::Start { run_dir: session::run_dir(), settings: s, opts, format, test_pattern };
+    let start = feed::Start {
+        run_dir: session::run_dir(),
+        settings: s,
+        opts,
+        format,
+        test_pattern,
+        #[cfg(feature = "dev")]
+        replay,
+    };
     let parts = feed::Parts {
         open_card: Box::new(open_card),
         loopback: Box::new(audio),
@@ -564,10 +631,38 @@ mod tests {
         assert_eq!(parse(&[]), Some(Args::default()));
         assert_eq!(
             parse(&["--seconds", "30", "--monitor", "DP-1", "--stats", "--test-pattern", "--debug"]),
-            Some(Args { seconds: Some(30), monitor: Some("DP-1".into()), stats: true, test_pattern: true, debug: true })
+            Some(Args {
+                seconds: Some(30),
+                monitor: Some("DP-1".into()),
+                stats: true,
+                test_pattern: true,
+                debug: true,
+                #[cfg(feature = "dev")]
+                record: None,
+                #[cfg(feature = "dev")]
+                replay: None,
+            })
         );
         // The last of a repeated flag wins.
         assert_eq!(parse(&["--seconds", "1", "--seconds", "2"]).unwrap().seconds, Some(2));
+    }
+
+    #[cfg(feature = "dev")]
+    #[test]
+    fn a_dev_build_takes_record_and_replay() {
+        let a = parse(&["--record", "gta-still", "--seconds", "20"]).unwrap();
+        assert_eq!((a.record.as_deref(), a.seconds), (Some("gta-still"), Some(20)));
+        assert_eq!(parse(&["--replay", "/x/a.clip"]).unwrap().replay, Some("/x/a.clip".into()));
+        assert_eq!(parse(&["--record"]), None);
+        assert!(super::USAGE.contains("--record NAME") && super::USAGE.contains("--replay FILE"));
+    }
+
+    #[cfg(not(feature = "dev"))]
+    #[test]
+    fn a_release_build_has_no_dev_flags() {
+        assert_eq!(parse(&["--record", "x", "--seconds", "1"]), None);
+        assert_eq!(parse(&["--replay", "x"]), None);
+        assert!(!super::USAGE.contains("--record"));
     }
 
     #[test]
