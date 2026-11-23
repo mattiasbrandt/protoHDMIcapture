@@ -170,6 +170,12 @@ gst or ffplay are legacy's.
     refresh interval: how much of the frame budget protoHDMIcapture
     spends; under 10 % at 1080p60 on a gaming GPU leaves headroom for
     picture quality).
+- **When the GPU ran slow** (`--stats` summary, #82): `GPU p99 after the
+  first 2 s` leaves out the window's start (opening, a refresh switch,
+  resizes, GameMode registering), and `slow GPU frames, PASS` lists the
+  time ranges where a pass took over 1.5x its median. A range at the start
+  is settling; one at a script's screenshot is the compositor's copy; spread
+  evenly, it is a real cost.
 - **`refreshes between presents`** (`--stats` summary): how many refreshes
   passed from one present to the next. A 60 fps feed is all 1s; a 30 fps
   source in new-frames-only all 2s. A 3 next to a 1 is a present that

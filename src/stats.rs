@@ -77,10 +77,9 @@ pub struct Stats {
     kernel_to_present: Vec<Duration>,
     acquire: Vec<Duration>,
     /// GPU time of the convert and the scale pass, where measured, and of
-    /// a frame generator's passes in the frames that ran one.
-    gpu_convert: Vec<Duration>,
-    gpu_scale: Vec<Duration>,
-    gpu_generate: Vec<Duration>,
+    /// a frame generator's passes in the frames that ran one, each with
+    /// when it was read (#82: when a pass ran slow).
+    gpu_times: Vec<GpuSample>,
     /// CPU time of drawing the overlay (layout, tessellation, upload), in
     /// the frames that drew one (#53: cache it if this is costly).
     overlay: Vec<Duration>,
@@ -121,9 +120,7 @@ impl Stats {
             to_present: Vec::with_capacity(64 * 1024),
             kernel_to_present: Vec::with_capacity(64 * 1024),
             acquire: Vec::with_capacity(64 * 1024),
-            gpu_convert: Vec::with_capacity(64 * 1024),
-            gpu_generate: Vec::new(),
-            gpu_scale: Vec::with_capacity(64 * 1024),
+            gpu_times: Vec::with_capacity(64 * 1024),
             overlay: Vec::with_capacity(64 * 1024),
             submitted: 0,
             presented: 0,
@@ -154,11 +151,10 @@ impl Stats {
         }
     }
 
-    pub fn gpu(&mut self, t: crate::gputime::Times) {
+    /// One frame's pass times, read back at `at` (the monotonic clock).
+    pub fn gpu(&mut self, t: crate::gputime::Times, at: Duration) {
         if self.verbose {
-            self.gpu_convert.push(t.convert);
-            self.gpu_scale.push(t.scale);
-            self.gpu_generate.extend(t.generate);
+            self.gpu_times.push(GpuSample { at: at.saturating_sub(self.start), times: t });
         }
     }
 
@@ -310,21 +306,23 @@ impl Stats {
         );
         eprintln!("summary: kernel->present  {}", fmt_full(&mut self.kernel_to_present));
         eprintln!("summary: get_current_texture wait {}", fmt(&mut self.acquire));
-        if !self.gpu_scale.is_empty() {
-            eprintln!(
-                "summary: GPU time ({} frames)  convert {}  | scale {}",
-                self.gpu_scale.len(),
-                fmt(&mut self.gpu_convert),
-                fmt(&mut self.gpu_scale)
-            );
+        let passes = gpu_passes(&self.gpu_times);
+        let [convert, scale, generate] = &passes;
+        let all = |p: &Pass| p.iter().map(|(_, d)| *d).collect::<Vec<Duration>>();
+        let (mut gpu_convert, mut gpu_scale, mut gpu_generate) = (all(convert), all(scale), all(generate));
+        if !gpu_scale.is_empty() {
+            eprintln!("summary: GPU time ({} frames)  convert {}  | scale {}", gpu_scale.len(), fmt(&mut gpu_convert), fmt(&mut gpu_scale));
         }
-        if !self.gpu_generate.is_empty() {
-            eprintln!("summary: GPU time ({} frames)  frame generation {}", self.gpu_generate.len(), fmt(&mut self.gpu_generate));
+        if !gpu_generate.is_empty() {
+            eprintln!("summary: GPU time ({} frames)  frame generation {}", gpu_generate.len(), fmt(&mut gpu_generate));
+        }
+        for line in gpu_timing_lines(&passes) {
+            eprintln!("{line}");
         }
         if let Some(line) = framegen_line(&self.live) {
             eprintln!("{line}");
         }
-        if let Some(line) = gpu_share(&mut self.gpu_convert, &mut self.gpu_scale, &mut self.gpu_generate, self.refresh) {
+        if let Some(line) = gpu_share(&mut gpu_convert, &mut gpu_scale, &mut gpu_generate, self.refresh) {
             eprintln!("{line}");
         }
         if !self.overlay.is_empty() {
@@ -344,6 +342,99 @@ impl Stats {
             eprintln!("summary: refreshes between presents (refreshes x presents) {}", gaps.join(" "));
         }
     }
+}
+
+/// One frame's GPU pass times and when they were read, from the run's start.
+struct GpuSample {
+    at: Duration,
+    times: crate::gputime::Times,
+}
+
+/// One pass's samples: (when, how long), in the order they were read.
+type Pass = Vec<(Duration, Duration)>;
+
+/// The passes' samples: convert, scale, and frame generation (only the
+/// frames that ran it).
+fn gpu_passes(samples: &[GpuSample]) -> [Pass; 3] {
+    let convert = samples.iter().map(|s| (s.at, s.times.convert)).collect();
+    let scale = samples.iter().map(|s| (s.at, s.times.scale)).collect();
+    let generate = samples.iter().filter_map(|s| s.times.generate.map(|g| (s.at, g))).collect();
+    [convert, scale, generate]
+}
+
+/// The first seconds of a run (the window opening, a refresh switch,
+/// resizes, GameMode registering) that the settled p99 leaves out (#82).
+const SETTLING: Duration = Duration::from_secs(2);
+/// A pass ran slow: over this many times its median (#82)...
+const SLOW: f64 = 1.5;
+/// ...and over its median by at least this much, so a 20 µs pass's timer
+/// jitter is not a slow frame.
+const SLOW_FLOOR: Duration = Duration::from_micros(20);
+/// Slow samples closer together than this are one range.
+const SLOW_JOIN: Duration = Duration::from_millis(500);
+/// Ranges named per pass; the rest are counted.
+const SLOW_RANGES: usize = 5;
+
+/// When a pass ran slow (#82): the samples over `SLOW` times its median as
+/// time ranges (from, to, how many), in the order they happened.
+fn slow_ranges(pass: &Pass) -> Vec<(Duration, Duration, usize)> {
+    let mut all: Vec<Duration> = pass.iter().map(|(_, d)| *d).collect();
+    let Some((median_ms, _)) = percentiles(&mut all) else { return Vec::new() };
+    let median = Duration::from_secs_f64(median_ms / 1e3);
+    let limit = median.mul_f64(SLOW).max(median + SLOW_FLOOR);
+    let mut ranges: Vec<(Duration, Duration, usize)> = Vec::new();
+    for &(at, d) in pass {
+        if d <= limit {
+            continue;
+        }
+        match ranges.last_mut() {
+            Some((_, to, n)) if at.saturating_sub(*to) <= SLOW_JOIN => {
+                *to = at;
+                *n += 1;
+            }
+            _ => ranges.push((at, at, 1)),
+        }
+    }
+    ranges
+}
+
+/// `--stats`' lines on when the GPU ran slow (#82): each pass's p99 after
+/// the first `SETTLING`, and the time ranges of its slow samples. A window
+/// run's p99 is twice its median while a headless test's is not; these say
+/// whether the slow frames are the start, a moment (a screenshot) or spread.
+fn gpu_timing_lines(passes: &[Pass; 3]) -> Vec<String> {
+    let names = ["convert", "scale", "frame generation"];
+    let mut settled: Vec<String> = Vec::new();
+    let mut lines = Vec::new();
+    for (name, pass) in names.iter().zip(passes) {
+        if pass.is_empty() {
+            continue;
+        }
+        let mut after: Vec<Duration> = pass.iter().filter(|(at, _)| *at >= SETTLING).map(|(_, d)| *d).collect();
+        settled.push(match percentiles(&mut after) {
+            Some((_, p99)) => format!("{name} {p99:.2} ms"),
+            None => format!("{name} no samples"),
+        });
+        let ranges = slow_ranges(pass);
+        if ranges.is_empty() {
+            continue;
+        }
+        let mut named: Vec<String> = ranges
+            .iter()
+            .take(SLOW_RANGES)
+            .map(|(from, to, n)| format!("{:.1}–{:.1} s ×{n}", from.as_secs_f64(), to.as_secs_f64()))
+            .collect();
+        if ranges.len() > SLOW_RANGES {
+            let rest = &ranges[SLOW_RANGES..];
+            named.push(format!("+{} more in {} ranges", rest.iter().map(|r| r.2).sum::<usize>(), rest.len()));
+        }
+        let total: usize = ranges.iter().map(|r| r.2).sum();
+        lines.push(format!("summary: slow GPU frames, {name} (over {SLOW}x its median): {total} of {}: {}", pass.len(), named.join(", ")));
+    }
+    if !settled.is_empty() {
+        lines.insert(0, format!("summary: GPU p99 after the first {} s  {}", SETTLING.as_secs(), settled.join("  | ")));
+    }
+    lines
 }
 
 /// protoHDMIcapture's GPU share of a refresh: the medians of its passes
@@ -376,6 +467,59 @@ mod tests {
     use crate::dashboard::Live;
 
     const REFRESH: Duration = Duration::from_micros(16_681);
+
+    /// A run's GPU samples, one a refresh for `secs`, whose scale pass
+    /// takes `slow` where `is_slow(at)` holds and 0.1 ms elsewhere.
+    fn run(secs: u64, slow: Duration, is_slow: impl Fn(Duration) -> bool) -> Vec<GpuSample> {
+        let n = (Duration::from_secs(secs).as_nanos() / REFRESH.as_nanos()) as u32;
+        (0..n)
+            .map(|i| {
+                let at = REFRESH * i;
+                let scale = if is_slow(at) { slow } else { Duration::from_micros(100) };
+                GpuSample { at, times: crate::gputime::Times { convert: Duration::from_micros(30), scale, generate: None } }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_slow_start_is_left_out_of_the_settled_p99_and_named() {
+        // The first 2 s at twice the time, as a window's start can run (#82).
+        let samples = run(30, Duration::from_micros(200), |at| at < Duration::from_secs(2));
+        let passes = gpu_passes(&samples);
+        let mut scale: Vec<Duration> = passes[1].iter().map(|(_, d)| *d).collect();
+        let (_, p99) = percentiles(&mut scale).unwrap();
+        assert!((p99 - 0.2).abs() < 1e-9, "the whole run's p99 shows the doubling: {p99}");
+        let lines = gpu_timing_lines(&passes);
+        assert_eq!(lines[0], "summary: GPU p99 after the first 2 s  convert 0.03 ms  | scale 0.10 ms", "{lines:?}");
+        assert_eq!(lines[1], "summary: slow GPU frames, scale (over 1.5x its median): 120 of 1798: 0.0–2.0 s ×120", "{lines:?}");
+        assert_eq!(lines.len(), 2, "the convert pass never ran slow: {lines:?}");
+    }
+
+    #[test]
+    fn a_burst_mid_run_is_named_where_it_happened() {
+        // The run script's screenshots at 10–11 s (#82).
+        let burst = |at: Duration| at >= Duration::from_secs(10) && at < Duration::from_secs(11);
+        let samples = run(30, Duration::from_micros(200), burst);
+        let lines = gpu_timing_lines(&gpu_passes(&samples));
+        assert_eq!(lines[1], "summary: slow GPU frames, scale (over 1.5x its median): 60 of 1798: 10.0–11.0 s ×60", "{lines:?}");
+        // A 30 µs pass at 48 µs is 1.6x its median but 18 µs over it:
+        // timer jitter, not slow (`SLOW_FLOOR`).
+        let mut jitter = run(30, Duration::from_micros(100), |_| false);
+        for s in jitter.iter_mut().filter(|s| burst(s.at)) {
+            s.times.convert = Duration::from_micros(48);
+        }
+        assert_eq!(gpu_timing_lines(&gpu_passes(&jitter)).len(), 1, "only the settled p99 line");
+    }
+
+    #[test]
+    fn slow_ranges_past_the_cap_are_counted() {
+        let every_two_s = |at: Duration| at.as_millis() % 2000 < 20;
+        let samples = run(30, Duration::from_micros(200), every_two_s);
+        let lines = gpu_timing_lines(&gpu_passes(&samples));
+        // 15 bursts, 2 s apart: 5 named, the other 10 counted.
+        assert_eq!(lines[1].matches(" s ×").count(), 5, "{lines:?}");
+        assert!(lines[1].ends_with(" more in 10 ranges"), "{lines:?}");
+    }
 
     #[test]
     fn the_overlays_cpu_time_is_kept_only_for_stats() {

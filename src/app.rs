@@ -1413,7 +1413,7 @@ impl App {
         if let Some(timer) = gfx.timer.as_mut()
             && let Some(times) = timer.take()?
         {
-            self.pacing.stats().gpu(times);
+            self.pacing.stats().gpu(times, now_monotonic());
         }
         let Some(feedback) = gfx.feedback.as_mut() else { return Ok(()) };
         for o in feedback.drain()? {
