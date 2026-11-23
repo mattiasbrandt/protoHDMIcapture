@@ -316,6 +316,12 @@ source profile each in [sources/](sources/): [PlayStation 5](sources/ps5.md)
 - **The sound comes before or after the picture.** Tune the audio sync with
   **ctrl −/+** and save it with **w**; console menu clicks make a good test.
   Re-tune after changing the capture card or the display.
+- **Frame generation or an upscaler takes longer than expected.** The GPU
+  clocks down for a 60 Hz load. protoHDMIcapture asks GameMode for
+  performance while one is on; for the GPU part GameMode needs your opt-in
+  in `/etc/gamemode.ini` (its `[gpu]` section is ignored in
+  `~/.config/gamemode.ini`). How to set it and check it:
+  [docs/testing.md](docs/testing.md#gamemode-77).
 - **Not in the `video` group?** The desktop session gets access to
   `/dev/video*` anyway (logind), but a system service does not.
 

@@ -28,6 +28,7 @@ use crate::capture::{Format, FrameSource, Signal, now_monotonic};
 use crate::desktop::Desktop;
 use crate::duplicate::Kind;
 use crate::framegen::{self, Generator, Mode, Pair, Schedule, Show};
+use crate::gamemode::GameMode;
 use crate::gpustat;
 use crate::gputime::GpuTimer;
 use crate::keys::{self, Action};
@@ -289,6 +290,9 @@ struct App {
     /// GPU use (gpustat.rs, #72), sampled only while a GPU enhancement is
     /// on.
     gpu: gpustat::Monitor,
+    /// GameMode (gamemode.rs, #77), asked for only while a GPU enhancement
+    /// is on; unregistered when the window closes.
+    gamemode: GameMode,
     /// The adapter's PCI vendor and device ids and its name, for the GPU
     /// use's source.
     adapter: Option<(u32, u32, String)>,
@@ -572,6 +576,7 @@ impl Host for Winit {
             keys.set_notify(notify.clone());
         }
         let start = now_monotonic();
+        let stats = opts.stats;
         let mut app = App {
             window_no,
             frame_wake: self.frame_wake.clone(),
@@ -591,8 +596,10 @@ impl Host for Winit {
             end: end.clone(),
             framegen: None,
             gpu: gpustat::Monitor::new(std::path::Path::new("/proc/self/fdinfo")),
+            gamemode: GameMode::new(stats),
             adapter: None,
         };
+        app.opts.live.set_gamemode(app.gamemode.status());
         let delay_ms = app.delay_ms();
         app.opts.live_changes.mark_baseline(delay_ms);
         // Ended before it began (a signal as the run started): no window.
@@ -950,11 +957,12 @@ impl App {
 
     /// The viewport and the scaler for the surface's size and SCALING; after
     /// a resize and on c.
-    /// GPU use sampled and shown while a GPU enhancement is on (frame
-    /// generation, an enhancement SCALING preset), not otherwise (#72):
-    /// called where either can change.
+    /// GPU use sampled and shown, and GameMode asked for, while a GPU
+    /// enhancement is on (frame generation, an enhancement SCALING preset),
+    /// not otherwise (#72, #77): called where either can change.
     fn update_gpu(&mut self) {
         let on = gpustat::enhanced(self.framegen.as_ref().map(|f| f.schedule.mode()), self.opts.live_changes.scaling());
+        self.gamemode.set(on);
         let Some((vendor, device, name)) = self.adapter.clone() else { return };
         match self.gpu.set(on, || gpustat::source_for(vendor, device, &name), self.opts.stats, gpustat::PERIOD) {
             Ok(shown) => {
@@ -1832,6 +1840,7 @@ mod tests {
             end: End::new(Arc::new(|_| {})),
             framegen: None,
             gpu: gpustat::Monitor::new(&dir),
+            gamemode: GameMode::with(crate::gamemode::absent, false),
             adapter: None,
             opts: Options {
                 audio: AudioSetup::Off("none".into()),
@@ -1852,17 +1861,20 @@ mod tests {
         app.update_gpu();
         assert!(!app.gpu.running());
         assert!(!app.opts.live.gpu_shown());
+        assert!(!app.gamemode.wanted(), "a plain run never asks GameMode (#77)");
         // Frame generation on: sampled, shown (this GPU's whole-card
         // numbers are not read: the section says why).
         app.framegen = Some(Framegen::new(Mode::Copy));
         app.update_gpu();
         assert!(app.gpu.running());
         assert!(app.opts.live.gpu_shown());
+        assert!(app.gamemode.wanted());
         // Off again mid-run: stopped, gone.
         app.framegen = None;
         app.update_gpu();
         assert!(!app.gpu.running());
         assert!(!app.opts.live.gpu_shown());
+        assert!(!app.gamemode.wanted());
     }
 
     #[test]

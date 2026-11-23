@@ -2032,6 +2032,7 @@ version = "0.5.1"
 dependencies = [
  "cpal",
  "ctrlc",
+ "dbus",
  "egui",
  "egui-wgpu",
  "embed-resource",

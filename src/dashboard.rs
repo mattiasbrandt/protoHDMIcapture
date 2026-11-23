@@ -126,6 +126,8 @@ pub struct Live {
     /// GPU use (gpustat.rs, #72), while a GPU enhancement is on; None: no
     /// GPU section.
     gpu: Mutex<Option<Arc<crate::gpustat::Shared>>>,
+    /// GameMode (gamemode.rs, #77), shown in the GPU section.
+    gamemode: Mutex<Option<Arc<Mutex<crate::gamemode::Status>>>>,
     /// The compositor discards every present while frame callbacks keep
     /// coming: another present replaces ours before display (a
     /// frame-generation layer inserting its own, #72), so no latency can
@@ -180,6 +182,7 @@ impl Live {
             missed: AtomicU64::new(0),
             withheld: AtomicU64::new(0),
             gpu: Mutex::new(None),
+            gamemode: Mutex::new(None),
             replaced: AtomicBool::new(false),
         }
     }
@@ -188,6 +191,11 @@ impl Live {
     /// it is off (gpustat.rs `Monitor`).
     pub fn set_gpu(&self, gpu: Option<Arc<crate::gpustat::Shared>>) {
         *self.gpu.lock().expect("the GPU section's lock is never poisoned") = gpu;
+    }
+
+    /// The window's GameMode status (gamemode.rs), for the GPU section.
+    pub fn set_gamemode(&self, status: Arc<Mutex<crate::gamemode::Status>>) {
+        *self.gamemode.lock().expect("the GameMode row's lock is never poisoned") = Some(status);
     }
 
     /// The GPU section is shown.
@@ -482,7 +490,13 @@ impl Rolling {
                 None => Value::Null,
             },
             "gpu": match &*live.gpu.lock().expect("the GPU section's lock is never poisoned") {
-                Some(g) => crate::gpustat::json(g),
+                Some(g) => {
+                    let mut j = crate::gpustat::json(g);
+                    if let Some(status) = &*live.gamemode.lock().expect("the GameMode row's lock is never poisoned") {
+                        j["gamemode"] = status.lock().expect("the GameMode status's lock is never poisoned").json();
+                    }
+                    j
+                }
                 None => Value::Null,
             },
             "latency_replaced": live.replaced.load(Ordering::Relaxed),
@@ -1076,6 +1090,20 @@ fn gpu_section(out: &mut Vec<String>, g: &Value, p: &Paint) {
         .collect();
     if !clocks.is_empty() {
         row(out, "clocks", clocks.join(" · "));
+    }
+    // GameMode (#77), next to the clocks it is asked to raise: active is
+    // good, none on the system dim, a refusal or failed call a warning.
+    let gm = &g["gamemode"];
+    let why = gm["why"].as_str().unwrap_or("?");
+    match gm["state"].as_str() {
+        Some("active") => row(out, "GameMode", p.good("active for protoHDMIcapture")),
+        Some("asking") => row(out, "GameMode", p.dim("asking")),
+        Some("registered") => {
+            row(out, "GameMode", p.warn(&format!("registered, not active (status {})", gm["query"].as_i64().unwrap_or(-1))))
+        }
+        Some("unavailable") => row(out, "GameMode", p.dim(&format!("not available: {why}"))),
+        Some("failed") => row(out, "GameMode", p.warn(&format!("Warning: {why}"))),
+        _ => {}
     }
     if let (Some(used), Some(total)) = (num(&g["vram_used_mib"]), num(&g["vram_total_mib"])) {
         // Near-full VRAM makes the driver evict to system RAM (stutter): the
@@ -2255,6 +2283,31 @@ mod tests {
             ],
             "{text}"
         );
+        // GameMode (#77): its row under the clocks, for each status; none
+        // while it is off.
+        use crate::gamemode::Status;
+        let status = Arc::new(Mutex::new(Status::Off));
+        live.set_gamemode(status.clone());
+        let row = |live: &Live| {
+            render(&Rolling::new(live).snapshot(live), &Paint { on: false })
+                .lines()
+                .find(|l| l.starts_with("  GameMode"))
+                .map(str::to_string)
+        };
+        assert_eq!(row(&live), None);
+        for (s, shown) in [
+            (Status::Asking, "asking"),
+            (Status::Active, "active for protoHDMIcapture"),
+            (Status::Registered(1), "registered, not active (status 1)"),
+            (Status::Unavailable("no daemon".into()), "not available: no daemon"),
+            (Status::Failed("RegisterGame answered -1".into()), "Warning: RegisterGame answered -1"),
+        ] {
+            *status.lock().unwrap() = s;
+            assert_eq!(row(&live), Some(format!("  GameMode          {shown}")));
+        }
+        let text = render(&Rolling::new(&live).snapshot(&live), &Paint { on: false });
+        let after_clocks = text.lines().skip_while(|l| !l.starts_with("  clocks")).nth(1);
+        assert_eq!(after_clocks.map(|l| l.starts_with("  GameMode")), Some(true), "{text}");
         live.set_gpu(None);
         assert!(Rolling::new(&live).snapshot(&live)["gpu"].is_null());
     }

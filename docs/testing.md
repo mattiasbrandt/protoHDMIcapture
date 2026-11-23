@@ -182,6 +182,38 @@ gst or ffplay are legacy's.
   callback, then the real frame over it in the same refresh (Mailbox), so
   our feedback is always "discarded" and its generated frame never shows.
 
+## GameMode (#77)
+
+With amdgpu's power level on `auto`, the driver clocks the GPU only as high
+as a paced 60 Hz load needs, so a GPU enhancement takes longer paced than
+back to back (#75's upscaler: 7.2 ms against 12.4 ms). While an
+enhancement is on, protoHDMIcapture asks Feral's GameMode for performance
+(`RegisterGame` over D-Bus) and unregisters when it turns off or the
+window closes. A plain run never registers.
+
+- **What it changes is GameMode's config, never protoHDMIcapture's.** Its
+  CPU settings (governor, renice, core pinning) come from any
+  `gamemode.ini`. Its GPU part is read only from **`/etc/gamemode.ini`**:
+  gamemoded ignores `[gpu]` in `~/.config/gamemode.ini` ("not configurable
+  from unsafe config files"). To let it raise an AMD GPU's clocks:
+
+  ```ini
+  [gpu]
+  apply_gpu_optimisations=accept-responsibility
+  gpu_device=<n>          ; the N of /sys/class/drm/cardN
+  amd_performance_level=high
+  ```
+- **To check it**, with an enhancement on: the dashboard's GPU section has
+  a `GameMode` row (`active for protoHDMIcapture`, `not available: …`, or a
+  warning) under the clocks; `gamemoded -s` says `gamemode is active`; and
+  `cat /sys/class/drm/card<n>/device/power_dpm_force_performance_level`
+  reads `high` (back to `auto` once it is off). With `--stats` stderr says
+  `gamemode: active for protoHDMIcapture`.
+- **No GameMode** (not installed, not running, not Linux): nothing
+  happens; `--stats` says `note: GameMode not available: …` once.
+- **The ignored test** registers this process with the running gamemoded:
+  `tools/heavy cargo test registers_with_the_running_gamemoded -- --ignored`.
+
 ## Real-time audio (#76)
 
 The dashboard's `priority` line (orange) says the audio thread was
