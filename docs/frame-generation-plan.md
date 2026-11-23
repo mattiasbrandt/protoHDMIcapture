@@ -87,17 +87,18 @@ reports its share of new frames and its brightness per second, so a clip
 that went idle or dark is flagged. The fallback is the user playing while
 the agent records.
 
-**Judging.** The user judges by eye; there is no objective score, since
-GTA 6 gives no 60 fps ground truth. The agent replays the same clips
-through each branch and tabulates:
-- GPU ms per generated frame (`--stats`);
-- generated and missed frames;
-- screenshots of the same moments (HUD, a fast pan, a scene cut).
-
-Then one card session: the user watches each branch live and picks.
-Latency is measured in the same session. `fg-ffx` passes if real frames'
-kernel → presented median stays within 44.9 ms (`docs/testing.md`) +
-16.7 ms + its GPU time.
+**Judging, in three stages** (decided 2026-11-23). The user judges by eye;
+there is no objective score, since GTA 6 gives no 60 fps ground truth.
+1. **The kept clip (first check, the agent's).** Each branch replays
+   `gta6-standing-03` (`--replay`): GPU ms per generated frame or upscale
+   (`--stats`), generated, missed and held counts, and screenshots of the
+   same moments. A branch that fails here goes no further.
+2. **A live card run per approach (the agent's, the user lines the game
+   up).** The same numbers on the live PS5 signal, plus real latency:
+   `fg-ffx` passes if real frames' kernel → presented median stays within
+   44.9 ms (`docs/testing.md`) + 16.7 ms + its GPU time.
+3. **The user's hands-on session, last.** The user plays with each
+   approach live and picks the winners.
 
 **The losers.** Their issues close as not planned, with the scores kept
 on them.
