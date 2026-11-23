@@ -122,7 +122,9 @@ gst or ffplay are legacy's.
   window opens on; without it, both follow focus.
 - **The baseline** (2026-10-16, `78951f6`, MS2130 1080p60, DP-1 at
   59.97 Hz, 2 min): kernel → presented median
-  44.9 ms, p99 53.7 ms, 2 repeated refreshes. Re-measure against it after a
+  44.9 ms, p99 53.7 ms, 2 repeated refreshes. The dashboard colours
+  kernel → presented against it (plus 16.7 ms while frame generation makes
+  frames; `src/stats.rs`). Re-measure against it after a
   change to pacing, the event loop or the present path; count the repeated
   refreshes too (they come in bursts every ~37 s at 60.00 against 59.97 Hz,
   so run at least 2 minutes). `27c31d3` (draw in `about_to_wait`, two-pass

@@ -15,6 +15,15 @@ use crate::present::Tag;
 /// colours the line against them (#76).
 pub const GATE_MEDIAN_MS: f64 = 16.7;
 pub const GATE_P99_MS: f64 = 33.3;
+/// kernel -> presented as measured on the reference setup (docs/testing.md
+/// "The baseline": MS2130 1080p60, DP-1 at 59.97 Hz). Not a rule for every
+/// card and monitor, but the user chose it as the dashboard's threshold
+/// (#76); frame generation adds a refresh (`FRAMEGEN_EXTRA_MS`).
+pub const BASELINE_KERNEL_MEDIAN_MS: f64 = 44.9;
+pub const BASELINE_KERNEL_P99_MS: f64 = 53.7;
+/// What frame generation adds by design: the generated frame takes the
+/// duplicate's refresh, so the real one shows a refresh later.
+pub const FRAMEGEN_EXTRA_MS: f64 = 16.7;
 
 const WINDOW: Duration = Duration::from_secs(10);
 /// This many presents in a row discarded, with as many frame callbacks

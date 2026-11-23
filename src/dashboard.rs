@@ -1031,6 +1031,11 @@ fn against_limits(v: f64, crit: Option<f64>, emergency: Option<f64>) -> Option<L
     })
 }
 
+/// VRAM used as a share of the total: orange from here, red from
+/// `VRAM_ERROR` (#76, the user's choice).
+const VRAM_WARN: f64 = 0.90;
+const VRAM_ERROR: f64 = 0.97;
+
 fn num(v: &Value) -> Option<f64> {
     v.as_f64()
 }
@@ -1073,7 +1078,17 @@ fn gpu_section(out: &mut Vec<String>, g: &Value, p: &Paint) {
         row(out, "clocks", clocks.join(" · "));
     }
     if let (Some(used), Some(total)) = (num(&g["vram_used_mib"]), num(&g["vram_total_mib"])) {
-        row(out, "VRAM", format!("{:.1} of {:.1} GB", used / 1024.0, total / 1024.0));
+        // Near-full VRAM makes the driver evict to system RAM (stutter): the
+        // user's thresholds (#76).
+        let share = if total > 0.0 { used / total } else { 0.0 };
+        let level = if share >= VRAM_ERROR {
+            Level::Error
+        } else if share >= VRAM_WARN {
+            Level::Warn
+        } else {
+            Level::Good
+        };
+        row(out, "VRAM", p.level(&format!("{:.1} of {:.1} GB", used / 1024.0, total / 1024.0), Some(level)));
     }
     // At the board's power cap (hwmon power1_cap) the clocks are held back:
     // a warning; under it good (#76).
@@ -1217,15 +1232,22 @@ fn render(s: &Value, p: &Paint) -> String {
             } else if v.is_null() {
                 p.dim("no frame presented yet")
             } else {
-                // dequeue -> presented against #5's go criteria (stats.rs);
-                // kernel -> presented has no stated threshold: uncoloured.
-                let gate = |k: &str, limit: f64| {
-                    (key == "dequeue_present").then(|| num(&v[k]).map(|x| if x <= limit { Level::Good } else { Level::Warn })).flatten()
+                // dequeue -> presented against #5's go criteria; kernel ->
+                // presented against the reference baseline, a refresh more
+                // while frame generation makes frames (stats.rs, #76).
+                use crate::stats::{BASELINE_KERNEL_MEDIAN_MS, BASELINE_KERNEL_P99_MS, FRAMEGEN_EXTRA_MS, GATE_MEDIAN_MS, GATE_P99_MS};
+                let generating = s["framegen"]["mode"].as_str().is_some_and(|m| m != "new-only");
+                let extra = if generating { FRAMEGEN_EXTRA_MS } else { 0.0 };
+                let (median, p99) = if key == "dequeue_present" {
+                    (GATE_MEDIAN_MS, GATE_P99_MS)
+                } else {
+                    (BASELINE_KERNEL_MEDIAN_MS + extra, BASELINE_KERNEL_P99_MS + extra)
                 };
+                let gate = |k: &str, limit: f64| num(&v[k]).map(|x| if x <= limit { Level::Good } else { Level::Warn });
                 format!(
                     "median {} · p99 {} {}",
-                    p.level(&format!("{} ms", n2(&v["median_ms"])), gate("median_ms", crate::stats::GATE_MEDIAN_MS)),
-                    p.level(&format!("{} ms", n2(&v["p99_ms"])), gate("p99_ms", crate::stats::GATE_P99_MS)),
+                    p.level(&format!("{} ms", n2(&v["median_ms"])), gate("median_ms", median)),
+                    p.level(&format!("{} ms", n2(&v["p99_ms"])), gate("p99_ms", p99)),
                     p.dim(&format!("({window}, {} frames)", int(&v["n"])))
                 )
             },
@@ -1896,13 +1918,25 @@ mod tests {
     }
 
     #[test]
-    fn dequeue_to_presented_is_held_to_the_go_criteria_and_kernel_to_presented_is_not() {
+    fn dequeue_to_presented_is_held_to_the_go_criteria() {
         let mut s = sample();
         assert!(line(&s, "dequeue→presented").contains(&good("9.31 ms")) && line(&s, "dequeue→presented").contains(&good("14.20 ms")));
         s["dequeue_present"] = json!({ "median_ms": 18.0, "p99_ms": 40.0, "n": 599 });
         assert!(line(&s, "dequeue→presented").contains(&warn("18.00 ms")) && line(&s, "dequeue→presented").contains(&warn("40.00 ms")));
-        // No stated threshold: plain (#76's inventory).
-        assert!(line(&s, "kernel→presented").contains("median 40.46 ms · p99 49.49 ms"));
+    }
+
+    #[test]
+    fn kernel_to_presented_is_held_to_the_baseline_a_refresh_more_with_frame_generation() {
+        let mut s = sample();
+        assert!(line(&s, "kernel→presented").contains(&good("40.46 ms")) && line(&s, "kernel→presented").contains(&good("49.49 ms")));
+        s["kernel_present"] = json!({ "median_ms": 60.0, "p99_ms": 66.0, "n": 599 });
+        assert!(line(&s, "kernel→presented").contains(&warn("60.00 ms")) && line(&s, "kernel→presented").contains(&warn("66.00 ms")));
+        // Frame generation's refresh is allowed for: 44.9 + 16.7, 53.7 + 16.7.
+        s["framegen"] = json!({ "mode": "ffx", "generated": 10, "missed": 0, "withheld": 0 });
+        assert!(line(&s, "kernel→presented").contains(&good("60.00 ms")) && line(&s, "kernel→presented").contains(&good("66.00 ms")));
+        // New-frames-only makes no frames: the plain baseline.
+        s["framegen"] = json!({ "mode": "new-only", "generated": 0, "missed": 0, "withheld": 10 });
+        assert!(line(&s, "kernel→presented").contains(&warn("60.00 ms")));
     }
 
     #[test]
@@ -1972,6 +2006,17 @@ mod tests {
         assert!(line(&s, "temperature").contains("edge 60 °C · junction 111 °C"));
         let l = line(&s, "power");
         assert!(!l.contains("\x1b[32m") && !l.contains("38;5;"), "no cap, no colour: {l}");
+    }
+
+    #[test]
+    fn vram_is_orange_from_90_percent_and_red_from_97() {
+        let mut s = sample();
+        s["gpu"] = json!({ "source": "amdgpu sysfs", "samples": 10, "vram_used_mib": 2048.0, "vram_total_mib": 16384.0 });
+        assert!(line(&s, "VRAM").contains(&good("2.0 of 16.0 GB")));
+        s["gpu"]["vram_used_mib"] = json!(14745.6); // 90 %
+        assert!(line(&s, "VRAM").contains(&warn("14.4 of 16.0 GB")));
+        s["gpu"]["vram_used_mib"] = json!(15892.48); // 97 %
+        assert!(line(&s, "VRAM").contains(&error("15.5 of 16.0 GB")));
     }
 
     #[test]
