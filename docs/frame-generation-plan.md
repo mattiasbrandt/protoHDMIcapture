@@ -56,7 +56,7 @@ Out of scope:
   decides, and it stays off by default. An integrated GPU, a GPU without
   the room, or a 60 fps source get the reason instead.
 - **The README describes the feature** (#84): what it does and does not do,
-  its delay, where it looks worse, `sharp`, GameMode's GPU opt-in, and
+  its delay, where it looks worse, Upscaling, GameMode's GPU opt-in, and
   what could come later (the "Later" list below and round two's findings).
 
 ## The shape
@@ -94,8 +94,8 @@ setting that does nothing yet.
 | #67 | `fg-blend` | Blend the two frames: the baseline, and a check that the seam works |
 | #68 | `fg-ffx` | AMD FidelityFX Optical Flow (SDK v1.1.4, MIT) ported to WGSL, plus an interpolation pass: the main candidate |
 | #69 | `fg-layer` | No code: openfg, afmf-linux and lsfg-vk over the new-frames-only mode, enabled by environment variable for protoHDMIcapture only |
-| #70 | `up-fsr1` | FSR 1 as `SCALING=sharp` |
-| #71 | `up-nis` | NVIDIA Image Scaling as `SCALING=sharp` |
+| #70 | `up-fsr1` | FSR 1 as `SCALING=sharp` (round one; now `UPSCALING=fsr`, #85) |
+| #71 | `up-nis` | NVIDIA Image Scaling as `SCALING=sharp` (round one; now `UPSCALING=nis`, #85) |
 
 Branches stay local.
 
