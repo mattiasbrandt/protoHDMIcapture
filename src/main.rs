@@ -94,8 +94,9 @@ const USAGE: &str = concat!(
   --framegen MODE frame generation (#66): copy (the last new frame, a
                   refresh late), blend (the two new frames half and half,
                   #67), new-only (duplicates not presented), ffx
-                  (FidelityFX optical flow, #68) or ffx-quality (the
-                  same, more GPU time on the picture, #73)"
+                  (FidelityFX optical flow, #68), ffx-quality (the same,
+                  more GPU time on the picture, #73) or rife (RIFE v4.6
+                  interpolation, #74)"
 );
 
 /// Called first thing in main, before any thread exists.

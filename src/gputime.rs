@@ -12,7 +12,7 @@ use std::time::Duration;
 const PASSES: u32 = 3;
 /// The generator's index (`PassTimes`).
 const GENERATE: u32 = 2;
-const QUERIES: u32 = PASSES * 2;
+pub(crate) const QUERIES: u32 = PASSES * 2;
 const BYTES: u64 = QUERIES as u64 * 8;
 
 /// The readback's state, shared with the map callback.
@@ -51,6 +51,13 @@ pub struct PassTimes<'a> {
 }
 
 impl PassTimes<'_> {
+    /// A generator's timestamps into `queries` alone, for its own timing
+    /// test (rife.rs); `generate_span` reads them back.
+    #[cfg(test)]
+    pub fn for_test(queries: &wgpu::QuerySet) -> PassTimes<'_> {
+        PassTimes { queries }
+    }
+
     /// The writes for a render pass of the generator's: `first` and `last`
     /// say which ends it carries (a one-pass generator: both).
     pub fn render(&self, first: bool, last: bool) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
@@ -71,6 +78,12 @@ impl PassTimes<'_> {
             end_of_pass_write_index: last.then_some(GENERATE * 2 + 1),
         })
     }
+}
+
+/// The generator's start and end ticks in a resolved `QUERIES` buffer.
+#[cfg(test)]
+pub fn generate_span(ticks: &[u64]) -> (u64, u64) {
+    (ticks[(GENERATE * 2) as usize], ticks[(GENERATE * 2 + 1) as usize])
 }
 
 impl GpuTimer {
