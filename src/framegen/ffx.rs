@@ -1,4 +1,4 @@
-//! The `ffx` generator (#68), its flow so far: AMD FidelityFX Optical Flow (SDK v1.1.4,
+//! The `ffx` generator (#68): AMD FidelityFX Optical Flow (SDK v1.1.4,
 //! MIT; the WGSL ports in `ffx/` keep AMD's notice) finds where each 8x8
 //! block of the new frame was in the previous one, and an interpolation
 //! pass after afmf-linux's (MIT) warps both frames halfway along that flow.
@@ -41,6 +41,7 @@
 //!   histograms to their own buffer (copied after the pass) instead of
 //!   overwriting what other workgroups of the same dispatch still read.
 
+use crate::framegen::{Generator, Pair};
 use crate::gputime::PassTimes;
 
 /// The SDK's pyramid depth (`advancedAlgorithmIterations`).
@@ -52,6 +53,13 @@ const SCALE: u32 = 2;
 /// The coarsest level is at least this many luma pixels on its short side
 /// (the search reads 4-pixel words and 8x8 blocks).
 const MIN_LEVEL_SIDE: u32 = 8;
+/// Motion beyond this (frame pixels between the two frames) is not
+/// believed and blends the frames unmoved: afmf-linux's value, half of
+/// what its search reaches at half resolution.
+const MAX_MOTION: f32 = 128.0;
+/// A pixel equal in both frames within this on a moving block is a HUD and
+/// is kept (afmf-linux's default, one 8-bit step).
+const HUD: f32 = 1.0 / 255.0;
 /// The scene-change buffer's slots (common.wgsl).
 const SCD_SLOTS: u64 = 8;
 /// Nine histograms of 256 bins.
@@ -139,6 +147,9 @@ struct Pipelines {
     search: wgpu::ComputePipeline,
     filter: wgpu::ComputePipeline,
     scale: wgpu::ComputePipeline,
+    interpolate: wgpu::RenderPipeline,
+    interpolate_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
 }
 
 /// The buffers for one frame size, and the bind groups that do not change
@@ -162,6 +173,7 @@ struct State {
     scd: wgpu::Buffer,
     /// Level 0's parameters (the luma pass's).
     luma_params: wgpu::Buffer,
+    interpolate_params: wgpu::Buffer,
     /// Per frame, per level from 1: the 2x2 reduction into it.
     down: [Vec<wgpu::BindGroup>; 2],
     /// Per frame: its histograms.
@@ -210,6 +222,22 @@ impl State {
             })
             .collect();
         let luma_params = uniform(device, "ffx luma", &params(src, flow_sizes[0], (0, 0), src, 0, n));
+        let interpolate_params = {
+            let f = |v: f32| v.to_le_bytes();
+            let i = |v: u32| (v as i32).to_le_bytes();
+            let bytes: Vec<u8> = [
+                f(size.0 as f32),
+                f(size.1 as f32),
+                f((BLOCK * SCALE) as f32),
+                f(SCALE as f32),
+                i(flow_sizes[0].0),
+                i(flow_sizes[0].1),
+                f(MAX_MOTION),
+                f(HUD),
+            ]
+            .concat();
+            uniform(device, "ffx interpolate", &bytes)
+        };
         fn b(buffer: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
             buffer.as_entire_binding()
         }
@@ -258,6 +286,7 @@ impl State {
             filtered_histogram,
             scd,
             luma_params,
+            interpolate_params,
             down,
             histograms,
             divergence,
@@ -276,6 +305,29 @@ pub struct Ffx {
 
 impl Ffx {
     pub fn new(device: &wgpu::Device) -> Self {
+        let interpolate_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("ffx interpolate"),
+            entries: &[
+                crate::app::uniform_entry(0),
+                crate::app::texture_entry(1, true),
+                crate::app::texture_entry(2, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                read_only_storage(4),
+                read_only_storage(5),
+            ],
+        });
+        let interpolate = crate::app::pipeline(
+            device,
+            "ffx interpolate",
+            &format!("{COMMON}{}", include_str!("ffx/interpolate.wgsl")),
+            &interpolate_layout,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
         let pipelines = Pipelines {
             luma: compute(device, "ffx luma", include_str!("ffx/luma.wgsl")),
             down: compute(device, "ffx down", include_str!("ffx/down.wgsl")),
@@ -284,6 +336,16 @@ impl Ffx {
             search: compute(device, "ffx search", include_str!("ffx/search.wgsl")),
             filter: compute(device, "ffx filter", include_str!("ffx/filter.wgsl")),
             scale: compute(device, "ffx scale", include_str!("ffx/scale.wgsl")),
+            interpolate,
+            interpolate_layout,
+            sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("ffx"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                ..Default::default()
+            }),
         };
         Self { pipelines, state: None }
     }
@@ -291,7 +353,7 @@ impl Ffx {
     /// The flow from `next` back to `prev` and the scene-change test, into
     /// the state's buffers (level 0's filtered flow, the scene-change
     /// slots).
-    pub fn flow(
+    fn flow(
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
@@ -371,6 +433,63 @@ impl Ffx {
                 pass.dispatch_workgroups(gx, gy, 1);
             }
         }
+    }
+}
+
+fn read_only_storage(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }
+}
+
+impl Generator for Ffx {
+    fn generate(
+        &mut self,
+        device: &wgpu::Device,
+        _: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        frames: Pair<'_>,
+        times: Option<PassTimes<'_>>,
+    ) -> bool {
+        self.flow(device, encoder, frames.prev, frames.next, times.as_ref());
+        let (p, s) = (&self.pipelines, self.state.as_ref().expect("made by flow"));
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ffx interpolate"),
+            layout: &p.interpolate_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: s.interpolate_params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(frames.prev) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(frames.next) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&p.sampler) },
+                wgpu::BindGroupEntry { binding: 4, resource: s.flow_filtered[0].as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: s.scd.as_entire_binding() },
+            ],
+        });
+        let attachments = [Some(wgpu::RenderPassColorAttachment {
+            view: frames.out,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+        })];
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("ffx interpolate"),
+            color_attachments: &attachments,
+            depth_stencil_attachment: None,
+            timestamp_writes: times.as_ref().and_then(|t| t.render(false, true)),
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&p.interpolate);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.draw(0..3, 0..1);
+        true
     }
 }
 
@@ -480,7 +599,8 @@ mod tests {
             let out = self.texture(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
             let views = [&prev, &next, &out].map(|t| t.create_view(&Default::default()));
             let mut encoder = self.device.create_command_encoder(&Default::default());
-            ffx.flow(&self.device, &mut encoder, &views[0], &views[1], None);
+            let frames = Pair { prev: &views[0], next: &views[1], out: &views[2] };
+            assert!(ffx.generate(&self.device, &self.queue, &mut encoder, frames, None));
             let (w, h) = self.size;
             let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: None,
@@ -548,7 +668,8 @@ mod tests {
         assert!(right * 100 >= inner.len() * 95, "{right} of {} blocks at (-4, -2): {:?}", inner.len(), &inner[..16]);
     }
 
-    /// A dark picture, then an unrelated bright one: a scene change.
+    /// A dark picture, then an unrelated bright one: a scene change, and the
+    /// generated frame is the new frame itself (the real frame).
     #[test]
     #[ignore = "needs a GPU"]
     fn gpu_ffx_a_cut_shows_the_new_frame() {
@@ -556,11 +677,43 @@ mod tests {
         let mut ffx = Ffx::new(&rig.device);
         let (w, h) = SIZE;
         let next = picture(w, h, (0, 0), 99, 160, 96);
-        rig.generate(&mut ffx, &picture(w, h, (0, 0), 3, 0, 90), &next);
+        let out = rig.generate(&mut ffx, &picture(w, h, (0, 0), 3, 0, 90), &next);
         assert!(rig.scene_changed(&ffx), "dark to bright, unrelated: a cut");
+        assert!(out == next, "the new frame, texel for texel");
         // And the same pair moved, not cut, right after: the detector
         // judges each pair on its own.
         rig.generate(&mut ffx, &picture(w, h, (0, 0), 7, 0, 256), &picture(w, h, (8, 4), 7, 0, 256));
         assert!(!rig.scene_changed(&ffx));
+    }
+
+    /// The generated frame of a picture moved by (8, 4) is the picture
+    /// moved by (4, 2), texel for texel away from the edges; a plain blend
+    /// of the two frames is not.
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn gpu_ffx_generates_the_halfway_picture() {
+        let rig = Rig::new(SIZE, wgpu::Features::empty());
+        let mut ffx = Ffx::new(&rig.device);
+        let (w, h) = SIZE;
+        let (prev, next) = (picture(w, h, (0, 0), 7, 0, 256), picture(w, h, (8, 4), 7, 0, 256));
+        let out = rig.generate(&mut ffx, &prev, &next);
+        let halfway = picture(w, h, (4, 2), 7, 0, 256);
+        let border = 32;
+        let inner = |px: &[u8]| -> Vec<[u8; 4]> {
+            (border..h - border)
+                .flat_map(|y| (border..w - border).map(move |x| ((y * w + x) * 4) as usize))
+                .map(|i| [px[i], px[i + 1], px[i + 2], px[i + 3]])
+                .collect()
+        };
+        let (got, want) = (inner(&out), inner(&halfway));
+        let exact = got.iter().zip(&want).filter(|(a, b)| a == b).count();
+        assert!(exact * 100 >= got.len() * 99, "{exact} of {} pixels exact", got.len());
+        let blend: Vec<_> = inner(&prev)
+            .iter()
+            .zip(inner(&next))
+            .map(|(a, b)| [0, 1, 2, 3].map(|k| (u16::from(a[k]) + u16::from(b[k])).div_ceil(2) as u8))
+            .collect();
+        let blend_exact = blend.iter().zip(&want).filter(|(a, b)| a == b).count();
+        assert!(blend_exact * 2 < got.len(), "the test tells motion from a blend: {blend_exact} of {}", got.len());
     }
 }
