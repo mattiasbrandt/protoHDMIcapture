@@ -42,7 +42,7 @@ use crate::picture::{self, Colour};
 use crate::present::Presentation;
 use crate::present::{Feedback, Tag};
 use crate::run::{End, Host, Outcome, Plan, Quit, Slot, Wake, Waker};
-use crate::scale::{self, Axis, Filter, Upscaling};
+use crate::scale::{self, Axis, Filter, UpscaleTo, Upscaling};
 use crate::screenshot::Screenshot;
 use crate::settings::Settings;
 use crate::sources;
@@ -454,16 +454,14 @@ const SCALE: &str = r#"
 }
 "#;
 
-/// The frame at the largest size that fits the surface, centred, in whole
-/// pixels as mpv places it: x, y, width, height.
-fn letterbox(surface: (u32, u32), frame: (u32, u32)) -> [u32; 4] {
-    let (sw, sh) = (f64::from(surface.0), f64::from(surface.1));
-    let (w, h) = (f64::from(frame.0), f64::from(frame.1));
-    let scale = (sw / w).min(sh / h);
-    let (vw, vh) = ((w * scale).round().clamp(1.0, sw), (h * scale).round().clamp(1.0, sh));
-    [((sw - vw) / 2.0).round() as u32, ((sh - vh) / 2.0).round() as u32, vw as u32, vh as u32]
+/// The frame at UPSCALE_TO's size (scale.rs `upscale_size`: `fit` is the
+/// largest that fits the surface), centred, in whole pixels as mpv places
+/// it: x, y, width, height.
+fn letterbox(surface: (u32, u32), frame: (u32, u32), to: UpscaleTo) -> [u32; 4] {
+    let (vw, vh) = scale::upscale_size(frame, surface, to);
+    let centre = |s: u32, v: u32| ((f64::from(s) - f64::from(v)) / 2.0).round().max(0.0) as u32;
+    [centre(surface.0, vw), centre(surface.1, vh), vw, vh]
 }
-
 /// The graphics backends offered to wgpu. DX12 on Windows: with Vulkan
 /// also offered, wgpu took Intel's Vulkan driver on a UHD 620, which
 /// crashed the viewer at its first frame (#19).
@@ -1089,6 +1087,26 @@ impl App {
     /// made on the first card frame that needs it, the last frame is
     /// converted again for the new path, and GameMode and the GPU section
     /// follow (`update_gpu`).
+    /// c (#85): the next output size this window fits, shown at once with
+    /// a short message on the picture.
+    fn cycle_upscale_size(&mut self) {
+        let Some(gfx) = &self.gfx else { return };
+        let (frame, surface) = ((self.format.width, self.format.height), (gfx.config.width, gfx.config.height));
+        let steps = scale::upscale_steps(frame, surface);
+        let next = scale::next_upscale(frame, surface, self.opts.live_changes.upscale_to());
+        self.opts.live_changes.set_upscale_to(next);
+        self.relayout();
+        let (w, h) = scale::upscale_size(frame, surface, next);
+        let text = if steps.len() == 1 {
+            format!("Upscaling: {w}x{h}, the only size this window fits")
+        } else if (w, h) == frame {
+            format!("Upscaling: {w}x{h}, pixel for pixel")
+        } else {
+            format!("Upscaling: {w}x{h}")
+        };
+        self.overlay.message(text, Duration::from_millis(1500), Instant::now());
+    }
+
     fn cycle_framegen(&mut self) {
         let mut next = framegen::cycle(self.framegen.as_ref().map(|f| f.schedule.mode()), &framegen::judged());
         let refused = match (next, self.device_type, self.adapter.as_ref()) {
@@ -1116,12 +1134,6 @@ impl App {
         self.update_gpu();
     }
 
-    /// How the picture fits the monitor the window is on (#85); None while
-    /// the monitor is not known.
-    fn monitor_fit(&self) -> Option<scale::Fit> {
-        self.monitor_size.map(|m| scale::fit((self.format.width, self.format.height), m))
-    }
-
     /// The picture is scaled into the window: the viewport is not the
     /// frame's own size (#85).
     fn scaled(&self) -> bool {
@@ -1141,7 +1153,7 @@ impl App {
             w.monitor = self.monitor_size;
             w.gpu = self.adapter.as_ref().map(|(_, _, name)| (name.clone(), self.device_type == Some(wgpu::DeviceType::DiscreteGpu)));
         }
-        gfx.viewport = letterbox((gfx.config.width, gfx.config.height), frame);
+        gfx.viewport = letterbox((gfx.config.width, gfx.config.height), frame, self.opts.live_changes.upscale_to());
         let [_, _, vw, vh] = gfx.viewport;
         let scaling = self.opts.live_changes.scaling();
         let upscaling = self.opts.live_changes.upscaling();
@@ -1295,11 +1307,7 @@ impl App {
                 self.opts.live_changes.cycle_levels();
                 self.picture_changed();
             }
-            Action::CycleUpscaling => {
-                let up = self.opts.live_changes.cycle_upscaling();
-                self.relayout();
-                self.overlay.message(format!("Upscaling: {}", up.name()), Duration::from_millis(1500), Instant::now());
-            }
+            Action::CycleUpscaleSize => self.cycle_upscale_size(),
             Action::CycleFramegen => self.cycle_framegen(),
             Action::ResetColour => {
                 self.opts.live_changes.reset_colour();
@@ -1591,13 +1599,17 @@ impl App {
                 // Upscaling's line: what it does on this monitor, or a
                 // suggestion (#85); nothing while the monitor is not known.
                 let setting = self.opts.live_changes.upscaling();
-                let hint = self.monitor_fit().and_then(|f| overlay::upscaling_hint(setting, self.upscaling_running(), &f));
+                let frame = (self.format.width, self.format.height);
+                let shown = self.gfx.as_ref().map(|g| (g.viewport[2], g.viewport[3]));
+                let hint = shown.and_then(|sh| overlay::upscaling_hint(setting, self.upscaling_running(), frame, sh));
+                let size = shown.map_or_else(|| self.opts.live_changes.upscale_to().as_str(), |(w, h)| format!("{w}x{h}"));
                 let id = &self.overlay.tips_id;
                 let p = self.opts.live_changes.picture();
                 Some(overlay::panel_lines(&overlay::Panel {
                     display: self.opts.live_changes.window().names().1,
                     levels: p.levels.as_str(),
                     scaling: self.opts.live_changes.scaling().as_str(),
+                    size: &size,
                     upscaling: setting.name(),
                     upscaling_hint: hint.as_deref(),
                     framegen: cfg!(feature = "dev").then(|| self.framegen.as_ref().map_or("off", |f| f.schedule.mode().as_str())),
@@ -2178,21 +2190,6 @@ mod tests {
     }
 
     #[test]
-    fn the_fit_follows_the_monitor() {
-        let (mut app, _) = app_with("SCALING=fast\n");
-        // Monitor not known: no fit line.
-        assert_eq!(app.monitor_fit(), None);
-        // A 4K monitor: enlarged 2x.
-        app.monitor_size = Some((3840, 2160));
-        let f = app.monitor_fit().unwrap();
-        assert!(f.enlarged && f.reason.contains("3840x2160"), "{f:?}");
-        // Moved to a 1080p monitor: pixel for pixel.
-        app.monitor_size = Some((1920, 1080));
-        let f = app.monitor_fit().unwrap();
-        assert!(f.one_to_one && !f.enlarged, "{f:?}");
-    }
-
-    #[test]
     fn gpu_use_is_sampled_and_shown_only_with_a_gpu_enhancement() {
         // A plain run: no sampler, no GPU section (#72).
         let (mut app, _) = app_with("SCALING=balanced\n");
@@ -2374,7 +2371,10 @@ mod tests {
         // A dev build names frame generation under Upscaling (#83, #85); a
         // release build has no row.
         assert_eq!(framegen_row(&app), cfg!(feature = "dev").then(|| "g     Framegen     off".to_string()));
-        assert_eq!(row(&app, "Upscaling"), "c     Upscaling    off");
+        // The output size (c, #85; no window here: the setting's value) and
+        // the method, without a key.
+        assert_eq!(row(&app, "Size"), "c     Size         fit");
+        assert_eq!(row(&app, "Upscaling"), "      Upscaling    off");
         assert_eq!(row(&app, "Resizing"), "      Resizing     balanced");
         assert_eq!(row(&app, "Levels"), "l     Levels       auto");
         assert_eq!(row(&app, "Colour"), "1-8   Colour       contrast 2 · brightness 0 · gamma 0 · saturation 0");
@@ -2383,14 +2383,13 @@ mod tests {
         assert_eq!(row(&app, "Save"), "w     Save         nothing changed");
 
         assert!(press(&mut app, "l"));
-        // c: Upscaling's next method (#85).
+        // c steps the output size; with no window here it has nothing to
+        // step and changes nothing (scale.rs tests the steps).
         assert!(press(&mut app, "c"));
-        assert_eq!(app.overlay.current_message(Instant::now()), Some("Upscaling: AMD FSR 1"));
-        assert_eq!(row(&app, "Upscaling"), "c     Upscaling    AMD FSR 1");
-        assert_eq!(row(&app, "Save"), "w     Save         UPSCALING=fsr LEVELS=limited", "settings.rows' order");
+        assert_eq!(row(&app, "Save"), "w     Save         LEVELS=limited");
         assert!(press(&mut app, "w"));
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "# mine\nLEVELS=limited\nCONTRAST=2\nUPSCALING=fsr\n");
-        assert_eq!(app.overlay.current_message(Instant::now()), Some("Saved: UPSCALING=fsr LEVELS=limited"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "# mine\nLEVELS=limited\nCONTRAST=2\n");
+        assert_eq!(app.overlay.current_message(Instant::now()), Some("Saved: LEVELS=limited"));
         assert_eq!(row(&app, "Save"), "w     Save         nothing changed", "the save is the new baseline");
         assert!(press(&mut app, "r"));
         assert_eq!(row(&app, "Save"), "w     Save         CONTRAST=0");
@@ -2430,10 +2429,16 @@ mod tests {
 
     #[test]
     fn letterbox_in_whole_pixels() {
-        assert_eq!(letterbox((1920, 1200), (1920, 1080)), [0, 60, 1920, 1080], "1:1, bars above and below");
-        assert_eq!(letterbox((2560, 1440), (1920, 1080)), [0, 0, 2560, 1440]);
-        assert_eq!(letterbox((3440, 1440), (1920, 1080)), [440, 0, 2560, 1440]);
-        assert_eq!(letterbox((950, 1127), (1920, 1080)), [0, 297, 950, 534]);
+        let fit = UpscaleTo::Fit;
+        assert_eq!(letterbox((1920, 1200), (1920, 1080), fit), [0, 60, 1920, 1080], "1:1, bars above and below");
+        assert_eq!(letterbox((2560, 1440), (1920, 1080), fit), [0, 0, 2560, 1440]);
+        assert_eq!(letterbox((3440, 1440), (1920, 1080), fit), [440, 0, 2560, 1440]);
+        assert_eq!(letterbox((950, 1127), (1920, 1080), fit), [0, 297, 950, 534]);
+        // A chosen size, centred (#85): 1440p on a 4K monitor; 1080p, 1:1.
+        assert_eq!(letterbox((3840, 2160), (1920, 1080), UpscaleTo::Height(1440)), [640, 360, 2560, 1440]);
+        assert_eq!(letterbox((3840, 2160), (1920, 1080), UpscaleTo::Height(1080)), [960, 540, 1920, 1080]);
+        // A size that no longer fits: the largest that does.
+        assert_eq!(letterbox((3440, 1440), (1920, 1080), UpscaleTo::Height(2160)), [440, 0, 2560, 1440]);
     }
 
     #[test]

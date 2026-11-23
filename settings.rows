@@ -38,6 +38,9 @@ SCALING         |balanced                       |enum:balanced,fast,high-quality
 # UPSCALING: protoHDMIcapture's GPU upscaler for an enlarged picture (#85);
 # legacy's players do not have it.
 UPSCALING       |off                            |enum:off,fsr,nis                   |protohdmicapture|save,wizard
+# UPSCALE_TO: the size the picture is shown at (#85); c steps it. fit: as
+# large as the window allows.
+UPSCALE_TO      |fit                            |enum:fit,720p,1080p,1440p,2160p,2880p,4320p|protohdmicapture|save
 LEVELS          |auto                           |enum:auto,limited,full             |mpv            |save
 BRIGHTNESS      |0                              |int:-100..100                      |mpv            |save
 CONTRAST        |0                              |int:-100..100                      |mpv            |save

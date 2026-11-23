@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use crate::app::WindowMode;
 use crate::picture::{Colour, Levels, Picture};
-use crate::scale::{Scaling, Upscaling};
+use crate::scale::{Scaling, UpscaleTo, Upscaling};
 use crate::settings::Settings;
 
 /// The live values as w would write them, by setting.
@@ -34,7 +34,7 @@ fn colour(name: &str, v: &str) -> Result<i32, String> {
 }
 
 /// settings.rows' `save` rows, in its order.
-const ENTRIES: [Entry; 9] = [
+const ENTRIES: [Entry; 10] = [
     Entry { name: "DELAY", picture: false, read: |_, v| delay_ms(v).map(drop), spell: |_, delay_ms| delay_ms.map(seconds) },
     Entry {
         name: "WINDOW",
@@ -63,6 +63,15 @@ const ENTRIES: [Entry; 9] = [
             Ok(())
         },
         spell: |l, _| Some(l.upscaling.as_str().into()),
+    },
+    Entry {
+        name: "UPSCALE_TO",
+        picture: false,
+        read: |l, v| {
+            l.upscale_to = UpscaleTo::from_settings(v)?;
+            Ok(())
+        },
+        spell: |l, _| Some(l.upscale_to.as_str()),
     },
     Entry {
         name: "LEVELS",
@@ -138,6 +147,7 @@ pub struct LiveChanges {
     picture: Picture,
     scaling: Scaling,
     upscaling: Upscaling,
+    upscale_to: UpscaleTo,
     /// The values at the start or at the last save (`mark_baseline`).
     baseline: Values,
 }
@@ -150,6 +160,7 @@ impl LiveChanges {
         picture: Picture::DEFAULT,
         scaling: Scaling::Balanced,
         upscaling: Upscaling::Off,
+        upscale_to: UpscaleTo::Fit,
         baseline: BTreeMap::new(),
     };
 
@@ -207,16 +218,20 @@ impl LiveChanges {
         self.upscaling
     }
 
+    pub fn upscale_to(&self) -> UpscaleTo {
+        self.upscale_to
+    }
+
     /// f: the next display mode (WINDOW's order).
     pub fn cycle_window(&mut self) -> WindowMode {
         self.window = self.window.next(self.window_size);
         self.window
     }
 
-    /// c: Upscaling's next method (#85; SCALING has no key).
-    pub fn cycle_upscaling(&mut self) -> Upscaling {
-        self.upscaling = self.upscaling.next();
-        self.upscaling
+    /// c: the next output size (#85; the window knows which fit,
+    /// scale.rs `next_upscale`).
+    pub fn set_upscale_to(&mut self, to: UpscaleTo) {
+        self.upscale_to = to;
     }
 
     /// l.
@@ -321,19 +336,19 @@ mod tests {
         assert!(l.changes(Some(50)).is_empty());
 
         l.cycle_levels();
-        assert_eq!(l.cycle_upscaling(), Upscaling::Fsr);
+        l.set_upscale_to(UpscaleTo::Height(1440));
         assert_eq!(l.adjust_colour(Colour::Gamma, -3), -3);
         assert_eq!(l.adjust_colour(Colour::Saturation, 1), 8);
         assert_eq!(l.cycle_window(), WindowMode::Borderless);
         assert_eq!(
             l.changes(Some(50)),
-            ["WINDOW=borderless", "UPSCALING=fsr", "LEVELS=limited", "SATURATION=8", "GAMMA=-3"],
+            ["WINDOW=borderless", "UPSCALE_TO=1440p", "LEVELS=limited", "SATURATION=8", "GAMMA=-3"],
             "settings.rows' order"
         );
         assert_eq!(l.save(&s, Some(50)).unwrap().len(), 5);
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
-            "# mine\nLEVELS=limited\nCONTRAST=2\nBRIGHTNESS=-4\nSATURATION=8\nWINDOW_SIZE=1600x900\nWINDOW=borderless\nUPSCALING=fsr\nGAMMA=-3\n"
+            "# mine\nLEVELS=limited\nCONTRAST=2\nBRIGHTNESS=-4\nSATURATION=8\nWINDOW_SIZE=1600x900\nWINDOW=borderless\nUPSCALE_TO=1440p\nGAMMA=-3\n"
         );
         assert!(l.changes(Some(50)).is_empty(), "the save is the new baseline");
         assert_eq!(l.save(&s, Some(50)), Ok(vec![]), "nothing changed: nothing written");
@@ -342,11 +357,11 @@ mod tests {
         assert_eq!(l.cycle_window(), WindowMode::Windowed { width: 1600, height: 900 });
         // A fresh read of what w wrote gives the same values.
         let again = LiveChanges::read(&settings(&std::fs::read_to_string(&file).unwrap()).0).unwrap();
-        assert_eq!((again.picture(), again.scaling(), again.upscaling()), (l.picture(), l.scaling(), l.upscaling()));
+        assert_eq!((again.picture(), again.scaling(), again.upscale_to()), (l.picture(), l.scaling(), l.upscale_to()));
         // The file w wrote reads as saved and valid, as `--settings` says it.
         let (back, copy) = settings(&std::fs::read_to_string(&file).unwrap());
         assert!(back.errors().is_empty(), "{:?}", back.errors());
-        for (k, v) in [("LEVELS", "limited"), ("UPSCALING", "fsr"), ("GAMMA", "-3"), ("BRIGHTNESS", "-4"), ("SATURATION", "8")] {
+        for (k, v) in [("LEVELS", "limited"), ("UPSCALE_TO", "1440p"), ("GAMMA", "-3"), ("BRIGHTNESS", "-4"), ("SATURATION", "8")] {
             assert_eq!((back.get(k), back.from(k)), (v, crate::settings::From::Saved), "{k}");
         }
         std::fs::remove_dir_all(copy.parent().unwrap()).unwrap();

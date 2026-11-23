@@ -699,6 +699,7 @@ mod tests {
             display: "Fullscreen",
             levels: "auto",
             scaling: "balanced",
+            size: "1920x1080",
             upscaling: "off",
             upscaling_hint: None,
             framegen: None,

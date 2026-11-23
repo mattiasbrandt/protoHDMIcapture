@@ -41,8 +41,8 @@
 #GAMMA=0
 
 # Any other setting works here too (README, "The settings worth knowing"):
-# DEV SRC SINK RES FPS FMT LAT_MS BACKEND AUDIO SCALING UPSCALING LEVELS IPC
-# REFRESH GST_IO_MODE. FULLSCREEN=yes|no is a deprecated alias of WINDOW.
+# DEV SRC SINK RES FPS FMT LAT_MS BACKEND AUDIO SCALING UPSCALING UPSCALE_TO
+# LEVELS IPC REFRESH GST_IO_MODE. FULLSCREEN=yes|no is a deprecated alias of WINDOW.
 # protoHDMIcapture refuses BACKEND=gst, BACKEND=ffplay and AUDIO=mpv, which
 # only protoHDMIcapture legacy (legacy/) plays.
 # protohdmicapture --settings shows what each one resolves to.

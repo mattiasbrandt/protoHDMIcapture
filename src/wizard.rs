@@ -1360,8 +1360,9 @@ impl Wizard {
         body.extend(wrap(&format!("{reason}."), WIDTH));
         body.push(String::new());
         body.extend(wrap(
-            "Change it any time with c in the overlay (Tab). Frame generation (30 fps games shown at 60, with about one \
-             refresh of extra delay) is not in this version yet.",
+            "The method is kept in the settings file; run the setup again to change it. While watching, c steps the \
+             picture's size (1080p, 1440p, 4K: the sizes your monitor fits). Frame generation (30 fps games shown at 60, \
+             with about one refresh of extra delay) is not in this version yet.",
             WIDTH,
         ));
         // The value chosen so far (the file's) if there is one; else the

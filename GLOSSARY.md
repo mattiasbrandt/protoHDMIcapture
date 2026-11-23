@@ -136,6 +136,12 @@ monitor): AMD FSR 1 or NVIDIA Image Scaling. At 1:1 or when shrinking it
 does nothing, and the resize filter (`SCALING`) scales.
 _Avoid_: sharp, super resolution, the resize filter (that is `SCALING`)
 
+**Output size**:
+`UPSCALE_TO`: the size the picture is shown at, which **c** steps through
+(1080p, 1440p, 4K: the sizes the monitor fits, at the source's shape).
+Above the source's own size, Upscaling or the resize filter enlarges it.
+_Avoid_: resolution (that is the capture's, `RES`), zoom
+
 **GPU enhancements**:
 Upscaling and frame generation together: what a gaming GPU adds to the
 picture. Shown in the GPU section of the dashboard and asked for with

@@ -75,7 +75,8 @@ impl Scaling {
     }
 }
 
-/// UPSCALING (#85), in the order c cycles it.
+/// UPSCALING (#85): the method, set by the wizard or the settings file (no
+/// key).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Upscaling {
     Off,
@@ -103,14 +104,9 @@ impl Upscaling {
         }
     }
 
-    /// The overlay's c: settings.rows' order.
-    pub fn next(self) -> Self {
-        match self {
-            Self::Off => Self::Fsr,
-            Self::Fsr => Self::Nis,
-            Self::Nis => Self::Off,
-        }
-    }
+    /// Every method, in settings.rows' order.
+    #[cfg(test)]
+    pub const ALL: [Self; 3] = [Self::Off, Self::Fsr, Self::Nis];
 
     /// The method's name for people: the overlay's row and the wizard.
     pub fn name(self) -> &'static str {
@@ -120,6 +116,87 @@ impl Upscaling {
             Self::Nis => "NVIDIA Image Scaling",
         }
     }
+}
+
+/// UPSCALE_TO (#85): the size the picture is shown at, which `c` steps
+/// through. `Fit` is as large as the window allows (the default); a height
+/// is that standard 16:9 size, kept at the source's aspect ratio (bars
+/// where needed), used only while it fits the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpscaleTo {
+    Fit,
+    Height(u32),
+}
+
+/// The standard heights `c` steps through, from the source's own up (720p,
+/// 1080p, 1440p, 2160p, 5K, 8K: docs/research/upscaling-modern-monitors.md).
+pub const UPSCALE_HEIGHTS: [u32; 6] = [720, 1080, 1440, 2160, 2880, 4320];
+
+impl UpscaleTo {
+    pub fn from_settings(v: &str) -> Result<Self, String> {
+        if v == "fit" {
+            return Ok(Self::Fit);
+        }
+        v.strip_suffix('p')
+            .and_then(|h| h.parse().ok())
+            .filter(|h| UPSCALE_HEIGHTS.contains(h))
+            .map(Self::Height)
+            .ok_or_else(|| format!("UPSCALE_TO={v} is not fit, 720p, 1080p, 1440p, 2160p, 2880p or 4320p"))
+    }
+
+    pub fn as_str(self) -> String {
+        match self {
+            Self::Fit => "fit".into(),
+            Self::Height(h) => format!("{h}p"),
+        }
+    }
+}
+
+/// The frame scaled to `height` at its own aspect ratio, in whole pixels.
+fn at_height(frame: (u32, u32), height: u32) -> (u32, u32) {
+    let w = (f64::from(frame.0) * f64::from(height) / f64::from(frame.1.max(1))).round() as u32;
+    (w, height)
+}
+
+/// The largest size of `frame`'s shape that fits `window` (the letterbox).
+pub fn fit_size(frame: (u32, u32), window: (u32, u32)) -> (u32, u32) {
+    let ratio = (f64::from(window.0) / f64::from(frame.0.max(1))).min(f64::from(window.1) / f64::from(frame.1.max(1)));
+    let w = (f64::from(frame.0) * ratio).round().clamp(1.0, f64::from(window.0.max(1)));
+    let h = (f64::from(frame.1) * ratio).round().clamp(1.0, f64::from(window.1.max(1)));
+    (w as u32, h as u32)
+}
+
+/// What `c` steps through on this window, smallest first: each standard
+/// height from the source's own (1:1) up, while it fits and is smaller than
+/// the largest fit; then `Fit`, the largest. One entry means only one size
+/// fits.
+pub fn upscale_steps(frame: (u32, u32), window: (u32, u32)) -> Vec<UpscaleTo> {
+    let largest = fit_size(frame, window);
+    let mut steps: Vec<UpscaleTo> = UPSCALE_HEIGHTS
+        .into_iter()
+        .filter(|&h| h >= frame.1)
+        .map(|h| (h, at_height(frame, h)))
+        .filter(|&(_, (w, h))| w <= largest.0 && h < largest.1)
+        .map(|(h, _)| UpscaleTo::Height(h))
+        .collect();
+    steps.push(UpscaleTo::Fit);
+    steps
+}
+
+/// The size the picture is shown at for `to`: a height that no longer
+/// fits the window (a move to a smaller monitor) falls back to `Fit`.
+pub fn upscale_size(frame: (u32, u32), window: (u32, u32), to: UpscaleTo) -> (u32, u32) {
+    match to {
+        UpscaleTo::Height(h) if upscale_steps(frame, window).contains(&to) => at_height(frame, h),
+        _ => fit_size(frame, window),
+    }
+}
+
+/// `c`: the step after `to` (the one shown now), wrapping.
+pub fn next_upscale(frame: (u32, u32), window: (u32, u32), to: UpscaleTo) -> UpscaleTo {
+    let steps = upscale_steps(frame, window);
+    let at = steps.iter().position(|&s| s == to).unwrap_or(steps.len() - 1);
+    steps[(at + 1) % steps.len()]
 }
 
 /// The convert pass's chroma taps for an odd pixel of a 4:2:2 row (#85):
@@ -722,6 +799,45 @@ mod tests {
     }
 
     #[test]
+    fn c_steps_through_the_sizes_each_monitor_fits() {
+        let hd = (1920, 1080);
+        let names = |m| upscale_steps(hd, m).into_iter().map(UpscaleTo::as_str).collect::<Vec<_>>();
+        let size = |m, to| upscale_size(hd, m, to);
+        // 3440x1440 ultrawide: 1080p <-> 1440p (fit, bars at the sides).
+        assert_eq!(names((3440, 1440)), ["1080p", "fit"]);
+        assert_eq!(size((3440, 1440), UpscaleTo::Fit), (2560, 1440));
+        // 4K: 1080p -> 1440p -> 2160p (fit).
+        assert_eq!(names((3840, 2160)), ["1080p", "1440p", "fit"]);
+        assert_eq!(size((3840, 2160), UpscaleTo::Height(1440)), (2560, 1440));
+        assert_eq!(size((3840, 2160), UpscaleTo::Fit), (3840, 2160));
+        // 5120x2160: as 4K, inside bars.
+        assert_eq!(names((5120, 2160)), ["1080p", "1440p", "fit"]);
+        assert_eq!(size((5120, 2160), UpscaleTo::Fit), (3840, 2160));
+        // 2560x1080 and 1920x1200: only 1080p fits (1:1).
+        assert_eq!(names((2560, 1080)), ["fit"]);
+        assert_eq!(size((2560, 1080), UpscaleTo::Fit), (1920, 1080));
+        assert_eq!(names((1920, 1200)), ["fit"]);
+        assert_eq!(size((1920, 1200), UpscaleTo::Fit), (1920, 1080));
+        // c wraps; the largest is `fit`.
+        assert_eq!(next_upscale(hd, (3840, 2160), UpscaleTo::Fit), UpscaleTo::Height(1080));
+        assert_eq!(next_upscale(hd, (3840, 2160), UpscaleTo::Height(1080)), UpscaleTo::Height(1440));
+        assert_eq!(next_upscale(hd, (3840, 2160), UpscaleTo::Height(1440)), UpscaleTo::Fit);
+        assert_eq!(next_upscale(hd, (2560, 1080), UpscaleTo::Fit), UpscaleTo::Fit, "one size: c stays");
+        // A size that no longer fits (moved from 4K to 3440x1440): the largest that does.
+        assert_eq!(size((3440, 1440), UpscaleTo::Height(2160)), (2560, 1440));
+        assert_eq!(next_upscale(hd, (3440, 1440), UpscaleTo::Height(2160)), UpscaleTo::Height(1080), "from the fallback, the next");
+        // The source's own aspect: a 4:3 source at 1440 is 1920x1440.
+        assert_eq!(upscale_size((1440, 1080), (3840, 2160), UpscaleTo::Height(1440)), (1920, 1440));
+        // A 720p source starts at its own size.
+        assert_eq!(upscale_steps((1280, 720), (2560, 1440)), [UpscaleTo::Height(720), UpscaleTo::Height(1080), UpscaleTo::Fit]);
+        // The setting's values.
+        for v in ["fit", "720p", "1080p", "1440p", "2160p", "2880p", "4320p"] {
+            assert_eq!(UpscaleTo::from_settings(v).map(UpscaleTo::as_str).as_deref(), Ok(v));
+        }
+        assert!(UpscaleTo::from_settings("900p").is_err() && UpscaleTo::from_settings("big").is_err());
+    }
+
+    #[test]
     fn the_fit_says_how_the_picture_meets_the_monitor() {
         let hd = (1920, 1080);
         // Pixel for pixel: a 1080p monitor, and a 2560x1080 ultrawide.
@@ -815,12 +931,10 @@ mod tests {
     }
 
     #[test]
-    fn upscaling_values_match_settings_rows_and_c_cycles_them() {
+    fn upscaling_values_match_settings_rows() {
         let rows = crate::settings::rows();
         let row = rows.iter().find(|r| r.name == "UPSCALING").unwrap();
-        let order: Vec<&str> = std::iter::successors(Some(Upscaling::Off), |u| Some(u.next()).filter(|&n| n != Upscaling::Off))
-            .map(Upscaling::as_str)
-            .collect();
+        let order: Vec<&str> = Upscaling::ALL.into_iter().map(Upscaling::as_str).collect();
         assert_eq!(order, ["off", "fsr", "nis"]);
         assert_eq!(row.values, format!("enum:{}", order.join(",")));
         assert_eq!(row.default, "off");

@@ -127,6 +127,7 @@ focuses the running window, or says it is already running.
 | **f** | cycle fullscreen → borderless → windowed |
 | **d** | open the dashboard (on another monitor, on Hyprland); with one open, raise it |
 | **s** | a screenshot to `~/Pictures/protoHDMIcapture/` |
+| **c** | the picture's size: 1080p → 1440p → 4K, the sizes your monitor fits (bars keep the shape); a short message says which |
 | **ctrl −** / **ctrl +** | audio sync 10 ms earlier / later, live |
 | **alt −** / **alt +** | audio sync 50 ms earlier / later |
 | **m**, **9** / **0** | mute; volume down / up of the loopback |
@@ -140,7 +141,6 @@ its current value, and these keys:
 | Key | With the overlay open |
 |---|---|
 | **l** | levels: auto → limited → full (the range of the card's frames) |
-| **c** | Upscaling: off → AMD FSR 1 → NVIDIA Image Scaling |
 | **r** | reset the colour |
 | **t** | the setup tips for the source; **←** / **→** browse the other source profiles |
 | **w** | save what changed since the feed started |
@@ -224,7 +224,8 @@ legacy reads the same rows.
 | `WINDOW_SIZE` | `1280x720` | the window's size when windowed |
 | `REFRESH` | `keep` | `match` switches the monitor to its refresh nearest `FPS` for the session and restores it after (Hyprland) |
 | `SCALING` | `balanced` | the resize filter, where Upscaling does not enlarge the picture: `balanced` (spline36 or mitchell), `fast` (bilinear, softer) or `high-quality` (EWA Lanczos); `config` is legacy's mpv.conf, read as balanced here |
-| `UPSCALING` | `off` | enlarges the picture with sharpening on a monitor bigger than the capture: `fsr` (AMD FSR 1) or `nis` (NVIDIA Image Scaling, up to 2x); the setup wizard turns it on with a dedicated GPU. **c** cycles it |
+| `UPSCALING` | `off` | enlarges the picture with sharpening on a monitor bigger than the capture: `fsr` (AMD FSR 1) or `nis` (NVIDIA Image Scaling, up to 2x); the setup wizard turns it on with a dedicated GPU |
+| `UPSCALE_TO` | `fit` | the size the picture is shown at: `fit` (as large as the window allows), or `720p` … `4320p` while it fits; **c** steps it, **w** saves it |
 | `LEVELS` | `auto` | the range of the card's frames: `limited` or `full` if blacks look crushed or washed out. `auto` reads YUYV as limited and MJPEG as full |
 | `BRIGHTNESS`, `CONTRAST`, `SATURATION`, `GAMMA` | `0` | colour adjustments, -100 to 100; keys **1**–**8** change them, **w** saves them |
 | `DEBUG` | `off` | `log` or `window`; see [Debugging](#debugging-and-the-dashboard). `--debug` is `window` for one run |

@@ -163,8 +163,11 @@ pub struct Panel<'a> {
     pub levels: &'a str,
     /// SCALING, the resize filter: a detail, without a key (#85).
     pub scaling: &'a str,
-    /// UPSCALING's method for people (`Upscaling::name`), and its line under
-    /// the row (`upscaling_hint`), #85.
+    /// The size the picture is shown at (UPSCALE_TO, c), e.g. "2560x1440",
+    /// #85.
+    pub size: &'a str,
+    /// UPSCALING's method for people (`Upscaling::name`), without a key,
+    /// and its line under the row (`upscaling_hint`), #85.
     pub upscaling: &'a str,
     pub upscaling_hint: Option<&'a str>,
     /// Frame generation's mode, or "off": a dev build's `g` row (#83);
@@ -180,8 +183,13 @@ pub struct Panel<'a> {
 pub fn panel_lines(p: &Panel) -> Vec<String> {
     let [c, b, g, s] = p.colour;
     // The GPU enhancements lead the page (#85); the picture's details follow.
-    let mut lines =
-        vec!["protoHDMIcapture".to_string(), String::new(), "GPU enhancements".to_string(), format!("c     Upscaling    {}", p.upscaling)];
+    let mut lines = vec![
+        "protoHDMIcapture".to_string(),
+        String::new(),
+        "GPU enhancements".to_string(),
+        format!("c     Size         {}", p.size),
+        format!("      Upscaling    {}", p.upscaling),
+    ];
     if let Some(hint) = p.upscaling_hint {
         lines.push(format!("                   {hint}"));
     }
@@ -260,21 +268,25 @@ pub fn tips_lines(id: &str, profile: Option<&Profile>) -> Vec<String> {
     out
 }
 
-/// The line under Upscaling's row (#85), from how the picture fits the
-/// monitor (scale.rs `fit`): the overlay only suggests. `running` is the
-/// Upscaling that runs (Off where it does not enlarge).
-pub fn upscaling_hint(setting: Upscaling, running: Upscaling, fit: &crate::scale::Fit) -> Option<String> {
+/// The line under Upscaling's row (#85): what it does at the size the
+/// picture is shown at (`shown`, from the `frame`), or a suggestion; the
+/// overlay never turns it on. `running` is the Upscaling that runs (Off
+/// where it does not enlarge).
+pub fn upscaling_hint(setting: Upscaling, running: Upscaling, frame: (u32, u32), shown: (u32, u32)) -> Option<String> {
+    let ratio = f64::from(shown.1) / f64::from(frame.1.max(1));
+    let enlarged = ratio > 1.0 + 1e-6;
+    let times = if (ratio - ratio.round()).abs() < 1e-6 { format!("{ratio:.0}x") } else { format!("{ratio:.2}x") };
     match (setting, running) {
-        (Upscaling::Off, _) if fit.enlarged => Some(format!("suggested: on, the picture is {}", fit.reason)),
-        (Upscaling::Off, _) => None,
-        (_, Upscaling::Off) if fit.enlarged => {
-            Some(format!("{} works up to 2x a side: the resize filter enlarges this one ({})", setting.name(), fit.reason))
+        (Upscaling::Off, _) if enlarged => {
+            Some(format!("the resize filter enlarges the picture {times}; Upscaling sharpens it (setup wizard, u)"))
         }
-        (_, Upscaling::Off) => Some(format!("does nothing here: the picture is {}", fit.reason)),
-        _ => Some(format!("the picture is {}", fit.reason)),
+        (Upscaling::Off, _) => None,
+        (_, Upscaling::Off) if enlarged => Some(format!("works up to 2x a side: the resize filter enlarges this {times}")),
+        (_, Upscaling::Off) if shown == frame => Some("does nothing here: the picture is shown pixel for pixel (c: a larger size)".into()),
+        (_, Upscaling::Off) => Some("does nothing while the picture is shrunk".into()),
+        _ => Some(format!("enlarges the picture {times}")),
     }
 }
-
 /// What runs on the picture (#80, #85), for the window's top-right corner
 /// in dev builds, so a judging run and its screenshots say what is on:
 /// frame generation's mode, and the Upscaling that runs (`upscaling`, Off
@@ -325,42 +337,33 @@ mod tests {
     }
     #[test]
     fn upscalings_hint_only_suggests_and_says_when_it_does_nothing() {
-        let fit = |m| crate::scale::fit((1920, 1080), m);
-        let (k4, hd, small, wide) = (fit((3840, 2160)), fit((1920, 1080)), fit((1280, 720)), fit((5120, 2160)));
-        // Off, enlarged: suggested.
+        let hd = (1920, 1080);
+        let hint = |set, run, shown| upscaling_hint(set, run, hd, shown);
+        // Off and enlarged: a suggestion, no switch.
         assert_eq!(
-            upscaling_hint(Upscaling::Off, Upscaling::Off, &k4).as_deref(),
-            Some("suggested: on, the picture is enlarged exactly 2x on this 3840x2160 monitor")
+            hint(Upscaling::Off, Upscaling::Off, (3840, 2160)).as_deref(),
+            Some("the resize filter enlarges the picture 2x; Upscaling sharpens it (setup wizard, u)")
         );
-        // Off, not enlarged: nothing to say.
-        assert_eq!(upscaling_hint(Upscaling::Off, Upscaling::Off, &hd), None);
-        assert_eq!(upscaling_hint(Upscaling::Off, Upscaling::Off, &small), None);
-        // On and running: the fit.
+        // Off at 1:1 or shrunk: nothing to say.
+        assert_eq!(hint(Upscaling::Off, Upscaling::Off, hd), None);
+        assert_eq!(hint(Upscaling::Off, Upscaling::Off, (1280, 720)), None);
+        // On and running.
+        assert_eq!(hint(Upscaling::Fsr, Upscaling::Fsr, (2560, 1440)).as_deref(), Some("enlarges the picture 1.33x"));
+        // On at 1:1: it does nothing, c gives a larger size.
         assert_eq!(
-            upscaling_hint(Upscaling::Fsr, Upscaling::Fsr, &k4).as_deref(),
-            Some("the picture is enlarged exactly 2x on this 3840x2160 monitor")
+            hint(Upscaling::Fsr, Upscaling::Off, hd).as_deref(),
+            Some("does nothing here: the picture is shown pixel for pixel (c: a larger size)")
         );
-        // On, 1:1 or a downscale: it does nothing.
-        assert_eq!(
-            upscaling_hint(Upscaling::Fsr, Upscaling::Off, &hd).as_deref(),
-            Some("does nothing here: the picture is shown pixel for pixel on this 1920x1080 monitor")
-        );
-        assert!(upscaling_hint(Upscaling::Nis, Upscaling::Off, &small).unwrap().starts_with("does nothing here"));
-        // NIS past 2x a side: the resize filter enlarges it.
-        assert!(
-            upscaling_hint(Upscaling::Nis, Upscaling::Off, &fit((4480, 2520))).unwrap().starts_with("NVIDIA Image Scaling works up to 2x")
-        );
-        assert_eq!(
-            upscaling_hint(Upscaling::Nis, Upscaling::Nis, &wide).as_deref(),
-            Some("the picture is enlarged exactly 2x on this 5120x2160 monitor, black bars at the sides")
-        );
+        assert_eq!(hint(Upscaling::Nis, Upscaling::Off, (1280, 720)).as_deref(), Some("does nothing while the picture is shrunk"));
+        // NIS past 2x a side.
+        assert!(hint(Upscaling::Nis, Upscaling::Off, (4480, 2520)).unwrap().starts_with("works up to 2x"));
     }
-
     fn panel(audio: Audio, changes: &[String]) -> Vec<String> {
         panel_lines(&Panel {
             display: "Fullscreen",
             levels: "auto",
             scaling: "balanced",
+            size: "1920x1080",
             upscaling: "off",
             upscaling_hint: None,
             framegen: None,
@@ -383,7 +386,8 @@ mod tests {
                 "protoHDMIcapture",
                 "",
                 "GPU enhancements",
-                "c     Upscaling    off",
+                "c     Size         1920x1080",
+                "      Upscaling    off",
                 "",
                 "f     Display      Fullscreen",
                 "l     Levels       auto",
@@ -400,10 +404,10 @@ mod tests {
             ]
         );
         let other = panel(Audio::Other("none".into()), &[]);
-        assert_eq!(other[9], "      Audio        none");
-        assert_eq!(other[12], "w     Save         nothing changed");
-        assert_eq!(panel(Audio::Failed("no card source".into()), &[])[9], "m 9 0 Audio        not running, see the log: no card source");
-        assert_eq!(panel(Audio::Running { level: None, delay_ms: 0 }, &[])[9], "m 9 0 Audio        …");
+        assert_eq!(other[10], "      Audio        none");
+        assert_eq!(other[13], "w     Save         nothing changed");
+        assert_eq!(panel(Audio::Failed("no card source".into()), &[])[10], "m 9 0 Audio        not running, see the log: no card source");
+        assert_eq!(panel(Audio::Running { level: None, delay_ms: 0 }, &[])[10], "m 9 0 Audio        …");
     }
 
     #[test]
@@ -415,8 +419,9 @@ mod tests {
                 display: "Fullscreen",
                 levels: "auto",
                 scaling: "balanced",
+                size: "3840x2160",
                 upscaling: "AMD FSR 1",
-                upscaling_hint: Some("the picture is enlarged exactly 2x on this 3840x2160 monitor"),
+                upscaling_hint: Some("enlarges the picture 2x"),
                 framegen: fg,
                 colour: [0; 4],
                 audio: Audio::Other("none".into()),
@@ -426,17 +431,18 @@ mod tests {
         };
         let on = with(Some("ffx-quality"));
         assert_eq!(
-            on[2..8],
+            on[2..9],
             [
                 "GPU enhancements",
-                "c     Upscaling    AMD FSR 1",
-                "                   the picture is enlarged exactly 2x on this 3840x2160 monitor",
+                "c     Size         3840x2160",
+                "      Upscaling    AMD FSR 1",
+                "                   enlarges the picture 2x",
                 "g     Framegen     ffx-quality",
                 "",
                 "f     Display      Fullscreen",
             ]
         );
-        assert_eq!(with(Some("off"))[5], "g     Framegen     off");
+        assert_eq!(with(Some("off"))[6], "g     Framegen     off");
         assert!(!with(None).iter().any(|l| l.contains("Framegen")));
         // The resize filter has no key.
         assert!(on.iter().any(|l| l == "      Resizing     balanced"));
