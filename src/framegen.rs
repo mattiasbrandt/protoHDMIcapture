@@ -34,6 +34,10 @@
 //! seam is compiled and tested there, but nothing reaches it.
 #![cfg_attr(not(feature = "dev"), allow(dead_code))]
 
+// Wired into `Mode` in the next commit (#68).
+#[allow(dead_code)]
+mod ffx;
+
 use crate::duplicate::{Cadence, Kind};
 use crate::gputime::PassTimes;
 
