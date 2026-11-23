@@ -225,6 +225,11 @@ impl Live {
         *self.framegen.lock().expect("the frame generation's lock is never poisoned") = Some(mode);
     }
 
+    /// Frame generation was switched off mid-run (a dev build's `g`, #83).
+    pub fn framegen_off(&self) {
+        *self.framegen.lock().expect("the frame generation's lock is never poisoned") = None;
+    }
+
     /// What frame generation did with one card frame: every new frame is
     /// generated, missed, or shown real (#78).
     pub fn framegen_step(&self, show: crate::framegen::Show, missed: bool, kind: Kind) {

@@ -163,6 +163,9 @@ pub struct Panel<'a> {
     pub display: &'a str,
     pub levels: &'a str,
     pub scaling: &'a str,
+    /// Frame generation's mode, or "off": a dev build's `g` row (#83);
+    /// None, no row (a release build).
+    pub framegen: Option<&'a str>,
     /// contrast, brightness, gamma, saturation.
     pub colour: [i32; 4],
     pub audio: Audio,
@@ -178,8 +181,11 @@ pub fn panel_lines(p: &Panel) -> Vec<String> {
         format!("f     Display      {}", p.display),
         format!("l     Levels       {}", p.levels),
         format!("c     Scaling      {}", p.scaling),
-        format!("1-8   Colour       contrast {c} · brightness {b} · gamma {g} · saturation {s}"),
     ];
+    if let Some(fg) = p.framegen {
+        lines.push(format!("g     Framegen     {fg}"));
+    }
+    lines.extend([format!("1-8   Colour       contrast {c} · brightness {b} · gamma {g} · saturation {s}")]);
     match &p.audio {
         Audio::Other(v) => lines.push(format!("      Audio        {}", if v.is_empty() { "?" } else { v })),
         Audio::Failed(why) => {
@@ -294,6 +300,7 @@ mod tests {
             display: "Fullscreen",
             levels: "auto",
             scaling: "balanced",
+            framegen: None,
             colour: [1, -2, 0, 3],
             audio,
             tips_name: "PlayStation 5".into(),
@@ -331,6 +338,28 @@ mod tests {
         assert_eq!(other[9], "w     Save         nothing changed");
         assert_eq!(panel(Audio::Failed("no card source".into()), &[])[6], "m 9 0 Audio        not running, see the log: no card source");
         assert_eq!(panel(Audio::Running { level: None, delay_ms: 0 }, &[])[6], "m 9 0 Audio        …");
+    }
+
+    #[test]
+    fn a_dev_build_names_frame_generation_under_scaling() {
+        // A dev build passes the mode or "off" (#83); a release build none.
+        let with = |fg| {
+            panel_lines(&Panel {
+                display: "Fullscreen",
+                levels: "auto",
+                scaling: "balanced",
+                framegen: fg,
+                colour: [0; 4],
+                audio: Audio::Other("none".into()),
+                tips_name: "PlayStation 5".into(),
+                changes: &[],
+            })
+        };
+        let on = with(Some("ffx-quality"));
+        assert_eq!(on[4], "c     Scaling      balanced");
+        assert_eq!(on[5], "g     Framegen     ffx-quality");
+        assert_eq!(with(Some("off"))[5], "g     Framegen     off");
+        assert!(!with(None).iter().any(|l| l.contains("Framegen")));
     }
 
     #[test]

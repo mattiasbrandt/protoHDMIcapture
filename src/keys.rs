@@ -30,6 +30,9 @@ pub enum Action {
     CycleTips(i32),
     CycleLevels,
     CycleScaling,
+    /// g, dev builds (#83): frame generation off, then each judged
+    /// approach, then off.
+    CycleFramegen,
     ResetColour,
     Save,
     ToggleTips,
@@ -99,6 +102,7 @@ fn overlay(key: &Key, page: Option<Page>) -> Option<Action> {
         Key::Character(c) => match c.as_str() {
             "l" => Action::CycleLevels,
             "c" => Action::CycleScaling,
+            "g" if cfg!(feature = "dev") => Action::CycleFramegen,
             "r" => Action::ResetColour,
             "w" => Action::Save,
             "t" => Action::ToggleTips,
@@ -289,6 +293,13 @@ mod tests {
             assert_eq!(press(k, NONE, TIPS), Some(want), "{k}, the tips open");
             assert_eq!(press(k, CTRL, PANEL), None, "ctrl+{k}");
         }
+        // g switches frame generation, with the overlay open, in a dev
+        // build only (#83).
+        let g = cfg!(feature = "dev").then_some(Action::CycleFramegen);
+        assert_eq!(press("g", NONE, VIEWER), None, "g, the overlay closed");
+        assert_eq!(press("g", NONE, PANEL), g.clone(), "g, the panel open");
+        assert_eq!(press("g", NONE, TIPS), g, "g, the tips open");
+        assert_eq!(press("g", CTRL, PANEL), None, "ctrl+g");
         assert_eq!(press("Tab", NONE, VIEWER), Some(Action::ToggleOverlay));
         assert_eq!(press("Tab", NONE, PANEL), Some(Action::ToggleOverlay));
         assert_eq!(press("Tab", CTRL, VIEWER), None);

@@ -71,6 +71,31 @@ impl Mode {
             Mode::NewOnly => false,
         }
     }
+
+    /// The mode is one of the approaches judged by eye, which `g` cycles
+    /// through in a dev build (#83): a real generator. `Copy` (a test
+    /// generator) and `NewOnly` (for external layers) are not. Each
+    /// branch's mode adds its arm.
+    pub fn judged(self) -> bool {
+        match self {
+            Mode::Copy | Mode::NewOnly => false,
+        }
+    }
+}
+
+/// `g`'s next step from `current` (None: off) through `modes`, in their
+/// order, then off again (#83). A current mode not in `modes` (a
+/// `--framegen copy` run) steps to the first.
+pub fn cycle(current: Option<Mode>, modes: &[Mode]) -> Option<Mode> {
+    match current.and_then(|c| modes.iter().position(|&m| m == c)) {
+        Some(i) => modes.get(i + 1).copied(),
+        None => modes.first().copied(),
+    }
+}
+
+/// The judged modes, in `Mode::ALL`'s order: what `g` cycles through.
+pub fn judged() -> Vec<Mode> {
+    Mode::ALL.into_iter().filter(|m| m.judged()).collect()
 }
 
 /// Why frame generation is refused on this GPU, if it is: it is meant for
@@ -311,6 +336,40 @@ mod tests {
         for pair in shows[first..].chunks(2) {
             assert_eq!(pair, [Show::Generated, Show::Held], "{shows:?}");
         }
+    }
+
+    #[test]
+    fn g_cycles_off_then_each_mode_in_order_then_off() {
+        // Over a list passed in: main has no judged mode yet, the branches'
+        // modes are listed the same way (Mode::ALL's order).
+        let modes = [Mode::Copy, Mode::NewOnly];
+        assert_eq!(cycle(None, &modes), Some(Mode::Copy));
+        assert_eq!(cycle(Some(Mode::Copy), &modes), Some(Mode::NewOnly));
+        assert_eq!(cycle(Some(Mode::NewOnly), &modes), None, "after the last: off");
+        // A mode outside the list (`--framegen new-only` with only copy
+        // judged) steps to the list's first.
+        assert_eq!(cycle(Some(Mode::NewOnly), &[Mode::Copy]), Some(Mode::Copy));
+        // Nothing judged: g stays off.
+        assert_eq!(cycle(None, &[]), None);
+        assert_eq!(cycle(Some(Mode::Copy), &[]), None);
+    }
+
+    #[test]
+    fn g_skips_the_test_generator_and_new_frames_only() {
+        // copy is a test generator, new-only is for external layers: never
+        // judged by eye, so never in g's cycle.
+        for m in Mode::ALL {
+            if m == Mode::Copy || m == Mode::NewOnly {
+                assert!(!m.judged(), "{m:?}");
+            } else {
+                assert!(m.judged() && m.generates(), "{m:?}: a judged mode runs a generator");
+            }
+        }
+        let judged = judged();
+        assert!(!judged.contains(&Mode::Copy) && !judged.contains(&Mode::NewOnly), "{judged:?}");
+        // In Mode::ALL's order.
+        let order: Vec<usize> = judged.iter().map(|m| Mode::ALL.iter().position(|a| a == m).unwrap()).collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{judged:?}");
     }
 
     #[test]

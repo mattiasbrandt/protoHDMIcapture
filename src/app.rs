@@ -301,6 +301,9 @@ struct App {
     /// The adapter's PCI vendor and device ids and its name, for the GPU
     /// use's source.
     adapter: Option<(u32, u32, String)>,
+    /// The adapter's kind, for frame generation's refusal when `g` turns
+    /// it on mid-run (#83).
+    device_type: Option<wgpu::DeviceType>,
 }
 
 /// Frame generation in the window (framegen.rs, #66): the schedule, and
@@ -604,6 +607,7 @@ impl Host for Winit {
             gpu: gpustat::Monitor::new(std::path::Path::new("/proc/self/fdinfo")),
             gamemode: GameMode::new(stats),
             adapter: None,
+            device_type: None,
         };
         app.opts.live.set_gamemode(app.gamemode.status());
         let delay_ms = app.delay_ms();
@@ -829,8 +833,9 @@ impl App {
             }
             why.is_none()
         });
-        // With frame generation, what is shown is copied into it.
-        let copied = if framegen.is_some() { wgpu::TextureUsages::COPY_DST } else { wgpu::TextureUsages::empty() };
+        // With frame generation, what is shown is copied into it; in a dev
+        // build `g` can turn it on mid-run (#83).
+        let copied = if framegen.is_some() || cfg!(feature = "dev") { wgpu::TextureUsages::COPY_DST } else { wgpu::TextureUsages::empty() };
         let rgb = frame_texture(
             "rgb",
             w,
@@ -844,6 +849,7 @@ impl App {
             self.framegen = Some(Framegen::new(mode));
         }
         let info = adapter.get_info();
+        self.device_type = Some(info.device_type);
         self.adapter = Some((info.vendor, info.device, info.name));
         self.update_gpu();
         let rgb_view = rgb.create_view(&Default::default());
@@ -977,6 +983,39 @@ impl App {
         }
     }
 
+    /// `g` (a dev build, #83): frame generation off, then each judged
+    /// approach, then off, live. Through the same path as a start with
+    /// `--framegen`: a refused GPU keeps it off (said), the generator is
+    /// made on the first card frame that needs it, the last frame is
+    /// converted again for the new path, and GameMode and the GPU section
+    /// follow (`update_gpu`).
+    fn cycle_framegen(&mut self) {
+        let mut next = framegen::cycle(self.framegen.as_ref().map(|f| f.schedule.mode()), &framegen::judged());
+        let refused = match (next, self.device_type, self.adapter.as_ref()) {
+            (Some(mode), Some(kind), Some((_, _, name))) => framegen::refusal(mode, kind, name),
+            _ => None,
+        };
+        if refused.is_some() {
+            next = None;
+        }
+        self.framegen = next.map(Framegen::new);
+        match next {
+            Some(mode) => self.opts.live.framegen(mode.as_str()),
+            None => self.opts.live.framegen_off(),
+        }
+        let name = next.map_or("off", Mode::as_str);
+        if self.opts.stats {
+            eprintln!("frame generation: {name}");
+        }
+        match refused {
+            Some(why) => self.overlay.message(format!("Warning: {why}"), Duration::from_millis(3000), Instant::now()),
+            None => self.overlay.message(format!("Frame generation: {name}"), Duration::from_millis(1500), Instant::now()),
+        }
+        self.reconvert = true;
+        self.pacing.repaint();
+        self.update_gpu();
+    }
+
     /// The viewport and the scaler for the surface's size and SCALING; after
     /// a resize and on c.
     fn relayout(&mut self) {
@@ -1087,6 +1126,7 @@ impl App {
                 self.relayout();
                 self.update_gpu();
             }
+            Action::CycleFramegen => self.cycle_framegen(),
             Action::ResetColour => {
                 self.opts.live_changes.reset_colour();
                 self.picture_changed();
@@ -1375,6 +1415,7 @@ impl App {
                     display: self.opts.live_changes.window().names().1,
                     levels: p.levels.as_str(),
                     scaling: self.opts.live_changes.scaling().as_str(),
+                    framegen: cfg!(feature = "dev").then(|| self.framegen.as_ref().map_or("off", |f| f.schedule.mode().as_str())),
                     colour: [p.contrast, p.brightness, p.gamma, p.saturation],
                     audio: match &self.opts.audio {
                         AudioSetup::Off(v) => overlay::Audio::Other(v.clone()),
@@ -1878,6 +1919,7 @@ mod tests {
             gpu: gpustat::Monitor::new(&dir),
             gamemode: GameMode::with(crate::gamemode::absent, false),
             adapter: None,
+            device_type: None,
             opts: Options {
                 audio: AudioSetup::Off("none".into()),
                 source: "ps5".into(),
@@ -1887,6 +1929,42 @@ mod tests {
         };
         app.opts.live_changes.mark_baseline(None);
         (app, file)
+    }
+
+    #[test]
+    fn g_switches_frame_generation_live_and_off_after_the_last() {
+        // #83: g steps through the judged modes, then off. On main none is
+        // judged (copy is a test generator), so a `--framegen copy` run's
+        // g turns it off; the branches' modes come first in their builds.
+        let (mut app, _) = app_with("SCALING=balanced\n");
+        app.adapter = Some((0x1002, 1, "a test GPU".into()));
+        app.device_type = Some(wgpu::DeviceType::DiscreteGpu);
+        app.framegen = Some(Framegen::new(Mode::Copy));
+        app.opts.live.framegen("copy");
+        app.update_gpu();
+        assert!(app.gamemode.wanted());
+        let mut seen = Vec::new();
+        for _ in 0..=framegen::judged().len() {
+            app.cycle_framegen();
+            let mode = app.framegen.as_ref().map(|f| f.schedule.mode());
+            seen.push(mode);
+            // Each step: the dashboard, the GPU section and GameMode follow,
+            // the last frame is converted again, and the overlay says it.
+            assert_eq!(app.opts.live.framegen_counts().map(|c| c.0), mode.map(Mode::as_str));
+            assert_eq!(app.gamemode.wanted(), mode.is_some());
+            assert!(app.reconvert);
+            let name = mode.map_or("off", Mode::as_str);
+            assert_eq!(app.overlay.current_message(Instant::now()), Some(format!("Frame generation: {name}").as_str()));
+        }
+        let want: Vec<Option<Mode>> = framegen::judged().into_iter().map(Some).chain([None]).collect();
+        assert_eq!(seen, want, "judged modes in order, then off");
+        // An integrated GPU is refused it: a warning, and it stays off.
+        if let Some(&first) = framegen::judged().first() {
+            app.device_type = Some(wgpu::DeviceType::IntegratedGpu);
+            app.cycle_framegen();
+            assert!(app.framegen.is_none(), "{first:?} refused on an integrated GPU");
+            assert!(app.overlay.current_message(Instant::now()).unwrap().starts_with("Warning: "));
+        }
     }
 
     #[test]
@@ -1943,8 +2021,23 @@ mod tests {
         true
     }
 
+    /// The panel's lines, without a dev build's `g` row (#83), so a line's
+    /// number is the same in every build; `framegen_row` reads that row.
     fn panel(app: &App) -> Vec<String> {
-        app.scene_text(Instant::now()).and_then(|t| t.page).expect("the panel is open")
+        app.scene_text(Instant::now())
+            .and_then(|t| t.page)
+            .expect("the panel is open")
+            .into_iter()
+            .filter(|l| !l.starts_with("g     Framegen"))
+            .collect()
+    }
+
+    fn framegen_row(app: &App) -> Option<String> {
+        app.scene_text(Instant::now())
+            .and_then(|t| t.page)
+            .expect("the panel is open")
+            .into_iter()
+            .find(|l| l.starts_with("g     Framegen"))
     }
 
     /// The app with a stand-in loopback started at 50 ms (#29), its
@@ -2049,6 +2142,8 @@ mod tests {
         assert!(!press(&mut app, "l"), "l only with the overlay open");
         assert!(press(&mut app, "Tab"));
         let p = panel(&app);
+        // A dev build names frame generation under Scaling (#83); a release build has no row.
+        assert_eq!(framegen_row(&app), cfg!(feature = "dev").then(|| "g     Framegen     off".to_string()));
         assert_eq!(p[3], "l     Levels       auto");
         assert_eq!(p[5], "1-8   Colour       contrast 2 · brightness 0 · gamma 0 · saturation 0");
         assert_eq!(p[6], "      Audio        none");
