@@ -1,12 +1,17 @@
-//! GPU time of the two passes (--stats): timestamp queries at each pass's
-//! start and end, read back without waiting. While one readback is still
-//! on its way, frames go unmeasured rather than stall the render path.
+//! GPU time of the passes (--stats): the convert and the scale pass, and a
+//! frame generator's passes in frames that run one (#66). Timestamp
+//! queries at each pass's start and end, read back without waiting. While
+//! one readback is still on its way, frames go unmeasured rather than stall
+//! the render path.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
-const PASSES: u32 = 2;
+/// Convert, scale, generate.
+const PASSES: u32 = 3;
+/// The generator's index (`PassTimes`).
+const GENERATE: u32 = 2;
 const QUERIES: u32 = PASSES * 2;
 const BYTES: u64 = QUERIES as u64 * 8;
 
@@ -25,6 +30,47 @@ pub struct GpuTimer {
     period: f64,
     /// This frame's passes write timestamps.
     armed: bool,
+    /// This frame's generator writes its timestamps (`generate`).
+    generating: bool,
+    /// The readback on its way has a generator's time.
+    generated: bool,
+}
+
+/// The convert and scale passes' times, and the generator's where one ran.
+#[derive(Debug, Clone, Copy)]
+pub struct Times {
+    pub convert: Duration,
+    pub scale: Duration,
+    pub generate: Option<Duration>,
+}
+
+/// Where a frame generator writes its timestamps (framegen.rs): the start
+/// on its first pass, the end on its last.
+pub struct PassTimes<'a> {
+    queries: &'a wgpu::QuerySet,
+}
+
+impl PassTimes<'_> {
+    /// The writes for a render pass of the generator's: `first` and `last`
+    /// say which ends it carries (a one-pass generator: both).
+    pub fn render(&self, first: bool, last: bool) -> Option<wgpu::RenderPassTimestampWrites<'_>> {
+        (first || last).then(|| wgpu::RenderPassTimestampWrites {
+            query_set: self.queries,
+            beginning_of_pass_write_index: first.then_some(GENERATE * 2),
+            end_of_pass_write_index: last.then_some(GENERATE * 2 + 1),
+        })
+    }
+
+    /// The same for a compute pass (a compute generator, #68; `Copy` is a
+    /// render pass).
+    #[allow(dead_code)]
+    pub fn compute(&self, first: bool, last: bool) -> Option<wgpu::ComputePassTimestampWrites<'_>> {
+        (first || last).then(|| wgpu::ComputePassTimestampWrites {
+            query_set: self.queries,
+            beginning_of_pass_write_index: first.then_some(GENERATE * 2),
+            end_of_pass_write_index: last.then_some(GENERATE * 2 + 1),
+        })
+    }
 }
 
 impl GpuTimer {
@@ -47,12 +93,22 @@ impl GpuTimer {
             state: Arc::new(AtomicU8::new(IDLE)),
             period: f64::from(queue.get_timestamp_period()),
             armed: false,
+            generating: false,
+            generated: false,
         })
     }
 
     /// Call before encoding a frame: whether this one is measured.
     pub fn arm(&mut self) {
         self.armed = self.state.load(Ordering::Acquire) == IDLE;
+        self.generating = false;
+    }
+
+    /// Where this frame's generator writes its times, if the frame is
+    /// measured; the readback then carries the generator's time.
+    pub fn generate(&mut self) -> Option<PassTimes<'_>> {
+        self.generating = self.armed;
+        self.armed.then_some(PassTimes { queries: &self.queries })
     }
 
     /// The timestamp writes for pass `i` (0 convert, 1 scale), if armed.
@@ -91,6 +147,7 @@ impl GpuTimer {
             return;
         }
         self.armed = false;
+        self.generated = std::mem::take(&mut self.generating);
         self.state.store(MAPPING, Ordering::Release);
         let state = self.state.clone();
         self.readback.map_async(wgpu::MapMode::Read, .., move |r| {
@@ -98,9 +155,9 @@ impl GpuTimer {
         });
     }
 
-    /// The convert and scale passes' times, once a readback has arrived.
-    /// The device must have been polled for the callback to run.
-    pub fn take(&mut self) -> Result<Option<[Duration; 2]>, String> {
+    /// The passes' times, once a readback has arrived. The device must have
+    /// been polled for the callback to run.
+    pub fn take(&mut self) -> Result<Option<Times>, String> {
         match self.state.load(Ordering::Acquire) {
             MAPPED => {}
             FAILED => return Err("reading the GPU pass times back failed".into()),
@@ -113,6 +170,6 @@ impl GpuTimer {
         self.readback.unmap();
         self.state.store(IDLE, Ordering::Release);
         let span = |i: usize| Duration::from_nanos((t[i * 2 + 1].saturating_sub(t[i * 2]) as f64 * self.period) as u64);
-        Ok(Some([span(0), span(1)]))
+        Ok(Some(Times { convert: span(0), scale: span(1), generate: self.generated.then(|| span(GENERATE as usize)) }))
     }
 }

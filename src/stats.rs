@@ -56,9 +56,11 @@ pub struct Stats {
     to_present: Vec<Duration>,
     kernel_to_present: Vec<Duration>,
     acquire: Vec<Duration>,
-    /// GPU time of the convert and the scale pass, where measured.
+    /// GPU time of the convert and the scale pass, where measured, and of
+    /// a frame generator's passes in the frames that ran one.
     gpu_convert: Vec<Duration>,
     gpu_scale: Vec<Duration>,
+    gpu_generate: Vec<Duration>,
     /// CPU time of drawing the overlay (layout, tessellation, upload), in
     /// the frames that drew one (#53: cache it if this is costly).
     overlay: Vec<Duration>,
@@ -89,6 +91,7 @@ impl Stats {
             kernel_to_present: Vec::with_capacity(64 * 1024),
             acquire: Vec::with_capacity(64 * 1024),
             gpu_convert: Vec::with_capacity(64 * 1024),
+            gpu_generate: Vec::new(),
             gpu_scale: Vec::with_capacity(64 * 1024),
             overlay: Vec::with_capacity(64 * 1024),
             submitted: 0,
@@ -116,10 +119,11 @@ impl Stats {
         }
     }
 
-    pub fn gpu(&mut self, convert: Duration, scale: Duration) {
+    pub fn gpu(&mut self, t: crate::gputime::Times) {
         if self.verbose {
-            self.gpu_convert.push(convert);
-            self.gpu_scale.push(scale);
+            self.gpu_convert.push(t.convert);
+            self.gpu_scale.push(t.scale);
+            self.gpu_generate.extend(t.generate);
         }
     }
 
@@ -180,13 +184,24 @@ impl Stats {
         if let (Some(prev), Some(r)) = (self.last_present, self.refresh) {
             // Presents a refresh apart are back to back; each further
             // refresh between them showed the same frame again.
+            // Duplicate frames withheld on purpose (new-frames-only) left
+            // their refreshes to the frame before: not repeated.
             let refreshes = ((at - prev).as_secs_f64() / r.as_secs_f64()).round() as u64;
-            skipped = refreshes.saturating_sub(1);
+            skipped = refreshes.saturating_sub(1 + u64::from(tag.withheld));
             self.skipped_refreshes += skipped;
         }
         self.last_present = Some(at);
+        // A generated frame carries its new frame's times; the latency is
+        // the real frame's, measured on its own present.
+        if tag.generated {
+            self.live.presented(None, skipped, self.refresh);
+            if self.verbose {
+                self.window.skipped_refreshes += skipped;
+            }
+            return;
+        }
         // The dashboard's rolling numbers (#16), at every run.
-        self.live.presented(d, k, skipped, self.refresh);
+        self.live.presented(Some((d, k)), skipped, self.refresh);
         // Samples are kept only to be printed (--stats): a viewer runs for
         // hours.
         if !self.verbose {
@@ -228,6 +243,9 @@ impl Stats {
                 fmt(&mut self.gpu_scale)
             );
         }
+        if !self.gpu_generate.is_empty() {
+            eprintln!("summary: GPU time ({} frames)  frame generation {}", self.gpu_generate.len(), fmt(&mut self.gpu_generate));
+        }
         if !self.overlay.is_empty() {
             eprintln!("summary: overlay CPU ({} frames)  {}", self.overlay.len(), fmt(&mut self.overlay));
         }
@@ -267,6 +285,8 @@ mod tests {
             dequeued: at - Duration::from_millis(20),
             repaint: false,
             kind: crate::duplicate::Kind::New,
+            generated: false,
+            withheld: 0,
         };
         s.presented(tag, at, REFRESH, 0x7);
     }
@@ -304,5 +324,44 @@ mod tests {
         assert_eq!(s.skipped_refreshes, 0);
         // The dashboard's rolling numbers come from the same count.
         assert_eq!(live.counts().repeated, 0);
+    }
+
+    /// A present of a frame-generation run (framegen.rs, #66).
+    fn present_fg(s: &mut Stats, at: Duration, generated: bool, withheld: u32) {
+        let tag = Tag {
+            captured: at - Duration::from_millis(30),
+            dequeued: at - Duration::from_millis(20),
+            repaint: false,
+            kind: crate::duplicate::Kind::New,
+            generated,
+            withheld,
+        };
+        s.presented(tag, at, REFRESH, 0x7);
+    }
+
+    #[test]
+    fn withheld_duplicates_leave_no_repeated_refreshes() {
+        // New-frames-only at 30 fps on a 60 Hz display: a present every
+        // other refresh, each after one withheld duplicate.
+        let mut s = Stats::new(Duration::ZERO, false, Arc::new(Live::new()));
+        for i in 0..10u32 {
+            present_fg(&mut s, Duration::from_secs(1) + REFRESH * (2 * i), false, 1);
+        }
+        assert_eq!(s.skipped_refreshes, 0);
+        // A refresh more than the withheld duplicate explains is repeated.
+        present_fg(&mut s, Duration::from_secs(1) + REFRESH * 21, false, 1);
+        assert_eq!(s.skipped_refreshes, 1);
+    }
+
+    #[test]
+    fn a_generated_frame_counts_its_refresh_but_not_a_latency() {
+        let live = Arc::new(Live::new());
+        let mut s = Stats::new(Duration::ZERO, true, live.clone());
+        present_fg(&mut s, Duration::from_secs(1), true, 0);
+        present_fg(&mut s, Duration::from_secs(1) + REFRESH, false, 0);
+        present_fg(&mut s, Duration::from_secs(1) + REFRESH * 2, true, 0);
+        assert_eq!(s.skipped_refreshes, 0, "generated and real alternate, a refresh apart");
+        assert_eq!((s.presented, s.to_present.len(), s.kernel_to_present.len()), (3, 1, 1), "the real frame's latency only");
+        assert_eq!(live.counts().presented, 3);
     }
 }

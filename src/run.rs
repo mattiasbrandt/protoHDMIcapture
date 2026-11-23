@@ -209,9 +209,10 @@ pub fn run(host: &mut dyn Host, mut source: Box<dyn FrameSource>, plan: Plan, qu
                     let kind = detector.classify(f.data);
                     tracker.push(kind, f.captured);
                     live.source(kind, &tracker);
-                    slot.lock()
-                        .expect("the slot's lock is never poisoned")
-                        .put(f.data, Tag { captured: f.captured, dequeued: f.dequeued, repaint: false, kind });
+                    slot.lock().expect("the slot's lock is never poisoned").put(
+                        f.data,
+                        Tag { captured: f.captured, dequeued: f.dequeued, repaint: false, kind, generated: false, withheld: 0 },
+                    );
                     wake(Wake::Frame);
                 }
                 Event::Gap { from, to, lost } => {
@@ -318,7 +319,7 @@ mod tests {
     const FORMAT: Format = Format { width: 4, height: 2, fps: 60.0, pixels: Pixels::Yuyv };
 
     fn tag(kind: Kind) -> Tag {
-        Tag { captured: Duration::ZERO, dequeued: Duration::ZERO, repaint: false, kind }
+        Tag { captured: Duration::ZERO, dequeued: Duration::ZERO, repaint: false, kind, generated: false, withheld: 0 }
     }
 
     #[test]

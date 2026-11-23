@@ -12,6 +12,7 @@ mod debuglog;
 mod desktop;
 mod duplicate;
 mod feed;
+mod framegen;
 mod gputime;
 mod keys;
 mod level;
@@ -71,12 +72,14 @@ const USAGE: &str = concat!(
     usage!(),
     "
 
-  dev build (#64): [--record NAME --seconds N [--note TEXT] [--test-pattern]] [--replay FILE]
+  dev build (#64): [--record NAME --seconds N [--note TEXT] [--test-pattern]] [--replay FILE] [--framegen MODE]
   --record NAME   no window: the card's frames into
                   /var/tmp/protohdmicapture-clips/NAME.clip for --seconds,
                   and what was recorded into NAME.json beside it
   --note TEXT     a note for NAME.json (\"GTA 6, standing still\")
-  --replay FILE   a recorded clip instead of the card, looping"
+  --replay FILE   a recorded clip instead of the card, looping
+  --framegen MODE frame generation (#66): copy (the last new frame, a
+                  refresh late) or new-only (duplicates not presented)"
 );
 
 /// Called first thing in main, before any thread exists.
@@ -278,6 +281,9 @@ struct Args {
     /// --note TEXT (dev builds): kept in a recording's metadata.
     #[cfg(feature = "dev")]
     note: Option<String>,
+    /// --framegen MODE (dev builds, #66), checked once the flags parse.
+    #[cfg(feature = "dev")]
+    framegen: Option<String>,
 }
 
 /// None for anything USAGE does not allow: an unknown flag, a missing or
@@ -298,6 +304,8 @@ fn parse_args(args: &[String]) -> Option<Args> {
             "--replay" => a.replay = Some(it.next()?.into()),
             #[cfg(feature = "dev")]
             "--note" => a.note = Some(it.next()?.clone()),
+            #[cfg(feature = "dev")]
+            "--framegen" => a.framegen = Some(it.next()?.clone()),
             _ => return None,
         }
     }
@@ -331,9 +339,15 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
         replay,
         #[cfg(feature = "dev")]
         note,
+        #[cfg(feature = "dev")]
+        framegen,
     } = parse_args(args).ok_or(USAGE)?;
     let mut opts =
         app::Options { seconds, monitor, stats, ..app::Options::new(live_changes::LiveChanges::DEFAULT, Arc::new(dashboard::Live::new())) };
+    #[cfg(feature = "dev")]
+    {
+        opts.framegen = framegen.as_deref().map(framegen::Mode::from_flag).transpose()?;
+    }
 
     let s = if debug {
         Settings::resolve_with(&|k| if k == "DEBUG" { Some("window".into()) } else { env::var(k).ok() })
@@ -357,6 +371,10 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     #[cfg(feature = "dev")]
     if note.is_some() && record.is_none() {
         return Err("--note goes with --record".into());
+    }
+    #[cfg(feature = "dev")]
+    if record.is_some() && opts.framegen.is_some() {
+        return Err("--framegen goes with a window, not --record".into());
     }
     #[cfg(feature = "dev")]
     if let Some(name) = record {
@@ -665,6 +683,8 @@ mod tests {
                 replay: None,
                 #[cfg(feature = "dev")]
                 note: None,
+                #[cfg(feature = "dev")]
+                framegen: None,
             })
         );
         // The last of a repeated flag wins.

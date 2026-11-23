@@ -115,6 +115,14 @@ pub struct Live {
     /// f64 bits (`NO_RATE`: not known yet).
     signal_hz: AtomicU64,
     source_fps: AtomicU64,
+    /// Frame generation (framegen.rs), when the window runs it: its mode,
+    /// the generated frames, the ones missed (shown real because the
+    /// window was a refresh behind), and the duplicates withheld
+    /// (new-frames-only).
+    framegen: Mutex<Option<&'static str>>,
+    generated: AtomicU64,
+    missed: AtomicU64,
+    withheld: AtomicU64,
 }
 
 /// A rate not known yet, in `Live`'s f64-bit fields (a NaN's bits).
@@ -159,6 +167,28 @@ impl Live {
             cadence_breaks: AtomicU64::new(0),
             signal_hz: AtomicU64::new(NO_RATE),
             source_fps: AtomicU64::new(NO_RATE),
+            framegen: Mutex::new(None),
+            generated: AtomicU64::new(0),
+            missed: AtomicU64::new(0),
+            withheld: AtomicU64::new(0),
+        }
+    }
+
+    /// The window runs frame generation in this mode (framegen.rs).
+    pub fn framegen(&self, mode: &'static str) {
+        *self.framegen.lock().expect("the frame generation's lock is never poisoned") = Some(mode);
+    }
+
+    /// What frame generation did with one card frame.
+    pub fn framegen_step(&self, show: crate::framegen::Show, missed: bool) {
+        use crate::framegen::Show;
+        match show {
+            Show::Generated => self.generated.fetch_add(1, Ordering::Relaxed),
+            Show::Withheld => self.withheld.fetch_add(1, Ordering::Relaxed),
+            Show::Real | Show::Held => 0,
+        };
+        if missed {
+            self.missed.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -191,16 +221,19 @@ impl Live {
         self.event(signal.to_string());
     }
 
-    /// A presented card frame: its latencies and the refreshes it repeated.
-    pub fn presented(&self, to_present: Duration, kernel_to_present: Duration, repeated: u64, refresh: Option<Duration>) {
+    /// A presented card frame: its latencies (dequeue -> presented,
+    /// kernel -> presented; none for a generated frame) and the refreshes
+    /// it repeated.
+    pub fn presented(&self, latency: Option<(Duration, Duration)>, repeated: u64, refresh: Option<Duration>) {
         self.presented.fetch_add(1, Ordering::Relaxed);
         self.repeated.fetch_add(repeated, Ordering::Relaxed);
         if let Some(r) = refresh {
             self.refresh_ns.store(r.as_nanos() as u64, Ordering::Relaxed);
         }
+        let Some(sample) = latency else { return };
         let mut samples = self.samples.lock().expect("the samples' lock is never poisoned");
         if samples.len() < SAMPLES {
-            samples.push((to_present, kernel_to_present));
+            samples.push(sample);
         }
     }
 
@@ -403,6 +436,15 @@ impl Rolling {
                 "signal_hz": rate(&live.signal_hz),
                 "cadence": cadence_of(live.cadence.load(Ordering::Relaxed)).as_str(),
                 "breaks": live.cadence_breaks.load(Ordering::Relaxed),
+            },
+            "framegen": match *live.framegen.lock().expect("the frame generation's lock is never poisoned") {
+                Some(mode) => json!({
+                    "mode": mode,
+                    "generated": live.generated.load(Ordering::Relaxed),
+                    "missed": live.missed.load(Ordering::Relaxed),
+                    "withheld": live.withheld.load(Ordering::Relaxed),
+                }),
+                None => Value::Null,
             },
             "window_s": window_s,
             "dequeue_present": latency(&mut to),
@@ -920,7 +962,12 @@ fn render(s: &Value, p: &Paint) -> String {
 
     out.push(String::new());
     out.push(format!("  {}", p.head("Video")));
-    let fps = num(&s["capture_fps"]).unwrap_or(0.0);
+    // New-frames-only presents the source's frames, not the card's
+    // (framegen.rs): it is held to the source's rate.
+    let fps = match s["framegen"]["mode"].as_str() {
+        Some("new-only") => num(&s["source"]["fps"]).unwrap_or(0.0),
+        _ => num(&s["capture_fps"]).unwrap_or(0.0),
+    };
     let shown = num(&s["presented_fps"]).unwrap_or(0.0);
     row(
         &mut out,
@@ -952,6 +999,20 @@ fn render(s: &Value, p: &Paint) -> String {
             _ => p.dim("no picture yet"),
         },
     );
+    let fg = &s["framegen"];
+    if let Some(mode) = fg["mode"].as_str() {
+        let missed = fg["missed"].as_u64().unwrap_or(0);
+        row(
+            &mut out,
+            "frame generation",
+            format!(
+                "{mode} · {} generated · {} missed · {} withheld",
+                int(&fg["generated"]),
+                p.good_bad(&missed.to_string(), missed == 0),
+                int(&fg["withheld"])
+            ),
+        );
+    }
     let gaps = s["gaps"].as_u64().unwrap_or(0);
     row(
         &mut out,
@@ -1329,7 +1390,7 @@ mod tests {
     fn samples_stay_bounded_with_no_server_taking_them() {
         let live = Live::new();
         for _ in 0..SAMPLES + 100 {
-            live.presented(Duration::from_millis(10), Duration::from_millis(30), 0, None);
+            live.presented(Some((Duration::from_millis(10), Duration::from_millis(30))), 0, None);
         }
         assert_eq!(live.samples.lock().unwrap().len(), SAMPLES);
         assert_eq!(live.presented.load(Ordering::Relaxed), (SAMPLES + 100) as u64, "every present still counted");
@@ -1386,7 +1447,7 @@ mod tests {
         wizard.gap(1, 3, 1);
         wizard.signal(&Signal::NoSignal { since: Since::Stopped, reason: Reason::Nothing });
         wizard.dropped.unusable.fetch_add(1, Ordering::Relaxed);
-        wizard.presented(Duration::from_millis(10), Duration::from_millis(30), 1, Some(Duration::from_micros(16_683)));
+        wizard.presented(Some((Duration::from_millis(10), Duration::from_millis(30))), 1, Some(Duration::from_micros(16_683)));
         assert_eq!(
             [&viewer.frames, &viewer.gaps, &viewer.lost, &viewer.presented, &viewer.repeated, &viewer.refresh_ns]
                 .map(|n| n.load(Ordering::Relaxed)),
@@ -1443,8 +1504,8 @@ mod tests {
         live.gap(10, 13, 2);
         live.signal(&Signal::NoSignal { since: Since::Stopped, reason: Reason::Undecodable("not a JPEG".into()) });
         live.dropped.undecodable.fetch_add(4, Ordering::Relaxed);
-        live.presented(Duration::from_millis(10), Duration::from_millis(30), 0, Some(Duration::from_micros(16_683)));
-        live.presented(Duration::from_millis(12), Duration::from_millis(32), 2, None);
+        live.presented(Some((Duration::from_millis(10), Duration::from_millis(30))), 0, Some(Duration::from_micros(16_683)));
+        live.presented(Some((Duration::from_millis(12), Duration::from_millis(32))), 2, None);
         let counters = Arc::new(Counters::default());
         counters.in_min.store(480, Ordering::Relaxed);
         counters.in_max.store(480, Ordering::Relaxed);
@@ -1569,6 +1630,36 @@ mod tests {
                        "delay_ms": 80, "ring_ms": 80.2, "underruns": 0, "xruns": 1, "errors": 0, "realtime_refused": true },
             "events": ["    3.0 s  capture gap: sequence 179 -> 181, 1 lost"],
         })
+    }
+
+    #[test]
+    fn frame_generation_has_a_line_only_when_it_runs() {
+        use crate::framegen::Show;
+        let live = Live::new();
+        let text = render(&Rolling::new(&live).snapshot(&live), &Paint { on: false });
+        assert!(!text.contains("frame generation"), "{text}");
+        live.framegen("copy");
+        for (show, missed) in [(Show::Generated, false), (Show::Held, false), (Show::Real, true), (Show::Withheld, false)] {
+            live.framegen_step(show, missed);
+        }
+        let s = Rolling::new(&live).snapshot(&live);
+        assert_eq!(s["framegen"], json!({ "mode": "copy", "generated": 1, "missed": 1, "withheld": 1 }));
+        let text = render(&s, &Paint { on: false });
+        assert!(text.lines().any(|l| l == "  frame generation  copy · 1 generated · 1 missed · 1 withheld"), "{text}");
+    }
+
+    #[test]
+    fn new_frames_only_is_held_to_the_sources_rate() {
+        let paint = Paint { on: true };
+        let fps_line = |s: &Value| render(s, &paint).lines().find(|l| l.contains("presented")).unwrap().to_string();
+        let mut s = sample();
+        s["presented_fps"] = json!(30.0);
+        // The sample's source is 30 fps in a 60 Hz signal: 30 presented is
+        // short of the card's 60 without new-frames-only, and all of the
+        // source's with it.
+        assert!(fps_line(&s).contains(&paint.good_bad("30.0", false)), "{}", fps_line(&s));
+        s["framegen"] = json!({ "mode": "new-only", "generated": 0, "missed": 0, "withheld": 300 });
+        assert!(fps_line(&s).contains(&paint.good_bad("30.0", true)), "{}", fps_line(&s));
     }
 
     #[test]

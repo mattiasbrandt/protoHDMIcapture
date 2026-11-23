@@ -26,6 +26,8 @@ use winit::window::{Fullscreen, Window, WindowId};
 use crate::audio::{LoopbackKeys, Status};
 use crate::capture::{Format, FrameSource, Signal, now_monotonic};
 use crate::desktop::Desktop;
+use crate::duplicate::Kind;
+use crate::framegen::{self, Generator, Mode, Pair, Schedule, Show};
 use crate::gputime::GpuTimer;
 use crate::keys::{self, Action};
 use crate::live_changes::LiveChanges;
@@ -102,6 +104,9 @@ pub struct Options {
     /// the window is placed, so typing meant for it does not reach the
     /// viewer.
     pub refocus: Option<String>,
+    /// Frame generation's mode (framegen.rs, #66): a dev build's
+    /// `--framegen`; None, the frames as the card sends them.
+    pub framegen: Option<Mode>,
 }
 
 impl Options {
@@ -122,6 +127,7 @@ impl Options {
             live,
             dashboard: None,
             refocus: None,
+            framegen: None,
         }
     }
 }
@@ -276,6 +282,62 @@ struct App {
     pacing: Pacing,
     /// The run's end (run.rs): set here when the window closes or fails.
     end: End,
+    /// Frame generation, when it runs (`Options::framegen`, unless the GPU
+    /// refused it).
+    framegen: Option<Framegen>,
+}
+
+/// Frame generation in the window (framegen.rs, #66): the schedule, and
+/// its frames on the GPU from the first card frame that needs them.
+/// Switching it on mid-run is making one of these.
+struct Framegen {
+    schedule: Schedule,
+    gpu: Option<FramegenGpu>,
+    /// The new frame a generated frame held: its times, for the present
+    /// that shows it on the next duplicate.
+    held: Option<Tag>,
+    /// Duplicate frames withheld since the last present (new-frames-only).
+    withheld: u32,
+    /// The slot's `superseded` at the last take: a rise means the window
+    /// took a frame over one it never took, a refresh behind.
+    superseded: u64,
+}
+
+impl Framegen {
+    fn new(mode: Mode) -> Self {
+        Self { schedule: Schedule::new(mode), gpu: None, held: None, withheld: 0, superseded: 0 }
+    }
+}
+
+/// The last two new frames, converted, at the capture's size, and the
+/// mode's generator. What is shown is copied or generated from them into
+/// `Gfx::rgb`, which the scale pass and the screenshot read as before.
+struct FramegenGpu {
+    frames: [wgpu::Texture; 2],
+    views: [wgpu::TextureView; 2],
+    /// Which of `frames` holds the newest new frame.
+    newest: usize,
+    generator: Option<Box<dyn Generator>>,
+}
+
+impl FramegenGpu {
+    fn new(device: &wgpu::Device, (w, h): (u32, u32), mode: Mode) -> Self {
+        let frame = || {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("framegen frame"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            })
+        };
+        let frames = [frame(), frame()];
+        let views = [frames[0].create_view(&Default::default()), frames[1].create_view(&Default::default())];
+        Self { frames, views, newest: 0, generator: framegen::generator(mode, device) }
+    }
 }
 
 // One triangle covering the viewport.
@@ -502,6 +564,7 @@ impl Host for Winit {
             slot: slot.clone(),
             gfx: None,
             end: end.clone(),
+            framegen: None,
         };
         let delay_ms = app.delay_ms();
         app.opts.live_changes.mark_baseline(delay_ms);
@@ -713,11 +776,30 @@ impl App {
             })
         };
         let texture = frame_texture("yuyv", w / 2, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+        // Frame generation, unless this GPU is refused it: said once, here.
+        let framegen = self.opts.framegen.filter(|&mode| {
+            let info = adapter.get_info();
+            let why = framegen::refusal(mode, info.device_type, &info.name);
+            if let Some(why) = &why {
+                eprintln!("note: {why}");
+                self.opts.live.event(why.clone());
+            }
+            why.is_none()
+        });
+        // With frame generation, what is shown is copied into it.
+        let copied = if framegen.is_some() { wgpu::TextureUsages::COPY_DST } else { wgpu::TextureUsages::empty() };
         let rgb = frame_texture(
             "rgb",
             w,
-            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | copied,
         );
+        if let Some(mode) = framegen {
+            if self.opts.stats {
+                eprintln!("frame generation: {}", mode.as_str());
+            }
+            self.opts.live.framegen(mode.as_str());
+            self.framegen = Some(Framegen::new(mode));
+        }
         let rgb_view = rgb.create_view(&Default::default());
 
         let convert_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1253,9 +1335,9 @@ impl App {
             eprintln!("{e}");
         }
         if let Some(timer) = gfx.timer.as_mut()
-            && let Some([convert, scale]) = timer.take()?
+            && let Some(times) = timer.take()?
         {
-            self.pacing.stats().gpu(convert, scale);
+            self.pacing.stats().gpu(times);
         }
         let Some(feedback) = gfx.feedback.as_mut() else { return Ok(()) };
         for o in feedback.drain()? {
@@ -1276,9 +1358,10 @@ impl App {
         // Built before the frame is taken: it reads the app's state.
         let scene = self.scene_text(Instant::now());
         let Some(gfx) = self.gfx.as_mut() else { return Ok(()) };
-        let tag = {
+        let (mut tag, superseded) = {
             let mut s = self.slot.lock().expect("the slot's lock is never poisoned");
-            match s.tag.take() {
+            let superseded = s.superseded;
+            let tag = match s.tag.take() {
                 Some(tag) => {
                     std::mem::swap(&mut s.data, &mut gfx.upload);
                     tag
@@ -1287,12 +1370,31 @@ impl App {
                 // last frame (black before the first) drawn again.
                 None if self.pacing.repaint_wanted() => {
                     let now = now_monotonic();
-                    Tag { captured: now, dequeued: now, repaint: true, kind: crate::duplicate::Kind::Duplicate }
+                    Tag { captured: now, dequeued: now, repaint: true, kind: Kind::Duplicate, generated: false, withheld: 0 }
                 }
                 None => return Ok(()),
-            }
+            };
+            (tag, superseded)
         };
         let new_frame = !tag.repaint;
+        // Frame generation (framegen.rs): what this card frame shows. A
+        // duplicate withheld in new-frames-only mode is not presented,
+        // unless the overlay wants drawing anyway.
+        let show = match self.framegen.as_mut() {
+            Some(fg) if new_frame => {
+                let late = superseded > fg.superseded;
+                fg.superseded = superseded;
+                let step = fg.schedule.next(tag.kind, tag.captured, late);
+                let show = if step.show == Show::Withheld && self.pacing.repaint_wanted() { Show::Real } else { step.show };
+                self.opts.live.framegen_step(show, step.missed);
+                if show == Show::Withheld {
+                    fg.withheld += 1;
+                    return Ok(());
+                }
+                Some(show)
+            }
+            _ => None,
+        };
 
         let acquire_start = now_monotonic();
         let frame = match gfx.surface.get_current_texture() {
@@ -1311,7 +1413,10 @@ impl App {
         self.pacing.stats().acquired(now_monotonic() - acquire_start);
 
         let (w, h) = (self.format.width, self.format.height);
-        if new_frame {
+        // With frame generation a duplicate is not uploaded: the shown
+        // picture comes from the new frame it repeats.
+        let upload = new_frame && (self.framegen.is_none() || tag.kind == Kind::New);
+        if upload {
             gfx.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &gfx.texture,
@@ -1330,25 +1435,41 @@ impl App {
             }
         }
         // A new frame, or the last one again after a picture change.
-        let convert = new_frame || (self.reconvert && gfx.have_frame);
+        let convert = upload || (self.reconvert && gfx.have_frame);
+        // Frame generation converts into its newest new frame, then shows
+        // a copy of it or a generated frame in `rgb`; its frames are made
+        // on first use.
+        let mut fg = self.framegen.as_mut();
+        if let Some(fg) = fg.as_deref_mut() {
+            let mode = fg.schedule.mode();
+            let gpu = fg.gpu.get_or_insert_with(|| FramegenGpu::new(&gfx.device, (w, h), mode));
+            if upload {
+                gpu.newest = 1 - gpu.newest;
+            }
+        }
 
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = gfx.device.create_command_encoder(&Default::default());
+        // Measured only with a convert pass: with frame generation a
+        // duplicate has none, and its timestamps would be stale.
         if let Some(t) = gfx.timer.as_mut()
             && new_frame
+            && convert
         {
             t.arm();
         }
-        let target = |view| {
+        // A function, not a closure: each call borrows its own view.
+        fn target(view: &wgpu::TextureView) -> [Option<wgpu::RenderPassColorAttachment<'_>>; 1] {
             [Some(wgpu::RenderPassColorAttachment {
                 view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
             })]
-        };
+        }
         if convert {
-            let attachments = target(&gfx.rgb_view);
+            let into = fg.as_ref().and_then(|f| f.gpu.as_ref()).map_or(&gfx.rgb_view, |g| &g.views[g.newest]);
+            let attachments = target(into);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("convert"),
                 color_attachments: &attachments,
@@ -1360,6 +1481,49 @@ impl App {
             pass.set_pipeline(&gfx.convert_pipeline);
             pass.set_bind_group(0, &gfx.convert_bind_group, &[]);
             pass.draw(0..3, 0..1);
+        }
+        if let Some(Framegen { schedule, gpu: Some(gpu), held, withheld, .. }) = fg
+            && (show.is_some() || convert)
+        {
+            let newest = gpu.newest;
+            let mut generated = false;
+            if show == Some(Show::Generated)
+                && let Some(generator) = gpu.generator.as_mut()
+            {
+                let frames = Pair { prev: &gpu.views[1 - newest], next: &gpu.views[newest], out: &gfx.rgb_view };
+                let times = gfx.timer.as_mut().and_then(|t| t.generate());
+                generated = generator.generate(&gfx.device, &gfx.queue, &mut encoder, frames, times);
+            }
+            match show {
+                Some(Show::Generated) if generated => {
+                    *held = Some(tag);
+                    tag.generated = true;
+                }
+                // A scene cut: the new frame now, nothing held.
+                Some(Show::Generated) => {
+                    schedule.cut();
+                }
+                Some(Show::Held) => {
+                    if let Some(h) = held.take() {
+                        tag = h;
+                    }
+                }
+                _ => {}
+            }
+            if !generated {
+                let copy = |texture| wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                };
+                encoder.copy_texture_to_texture(
+                    copy(&gpu.frames[newest]),
+                    copy(&gfx.rgb),
+                    wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                );
+            }
+            tag.withheld = std::mem::take(withheld);
         }
         gfx.screenshot.copy(&mut encoder, &gfx.rgb);
         {
@@ -1618,6 +1782,7 @@ mod tests {
             modifiers: ModifiersState::empty(),
             pacing: Pacing::new(Duration::ZERO, format.fps, Stats::new(Duration::ZERO, false, Arc::new(crate::dashboard::Live::new()))),
             end: End::new(Arc::new(|_| {})),
+            framegen: None,
             opts: Options {
                 audio: AudioSetup::Off("none".into()),
                 source: "ps5".into(),

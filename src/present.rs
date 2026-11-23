@@ -37,6 +37,14 @@ pub struct Tag {
     /// A new frame or a duplicate frame (duplicate.rs), against the last
     /// frame the window took: a repaint is a duplicate.
     pub kind: Kind,
+    /// A generated frame (framegen.rs) shown in this present, with its new
+    /// frame's times: it counts towards the refreshes, not the latency,
+    /// which the real frame's present measures.
+    pub generated: bool,
+    /// Duplicate frames the window chose not to present just before this
+    /// one (new-frames-only, framegen.rs): the refreshes they leave are not
+    /// repeated refreshes.
+    pub withheld: u32,
 }
 
 /// The platform seam for presentation timing and pacing.
