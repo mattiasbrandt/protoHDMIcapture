@@ -103,6 +103,27 @@ there is no objective score, since GTA 6 gives no 60 fps ground truth.
 **The losers.** Their issues close as not planned, with the scores kept
 on them.
 
+## Round two: picture quality on gaming GPUs
+
+Decided 2026-11-23, after stage 1 showed every round-one approach using
+under 1 ms of a 16.7 ms frame. The user's aim: use the gaming GPU's
+headroom for the picture.
+
+| # | Branch | Approach |
+|---|---|---|
+| #72 | on main | Measurement: the GPU section of the dashboard and `--stats` (busy, clocks, VRAM, power, temperatures, fan, protoHDMIcapture's own engine time), shown only while an enhancement is on |
+| #73 | `ffx-quality` (on `fg-ffx`) | Full-resolution flow, a wider search, two-way flow with occlusion-aware blending, a static-HUD mask (≤ 5 ms) |
+| #74 | `fg-rife` | RIFE v4.6, a learned interpolator, in WGSL compute (≤ 10 ms) |
+| #75 | `up-ultra` | A learned 2× upscaler in WGSL compute as `SCALING=ultra`, judged with `sharp` |
+| #77 | on main | GameMode while an enhancement is on |
+
+**Paced and back-to-back GPU time differ.** With amdgpu's power level on
+`auto`, the driver clocks the GPU only as high as the paced 60 Hz load
+needs. The ML upscaler takes 7.2 ms back to back and 12.4 ms paced
+(#75). Budgets are judged paced, as the window runs. #77 asks GameMode
+for performance while an enhancement is on; the GPU part of that stays
+opt-in in the user's own `gamemode.ini`.
+
 ## Later, only if round one falls short
 
 - **Vendor fast paths:**
