@@ -54,11 +54,14 @@ pub enum Mode {
     /// AMD FidelityFX Optical Flow and an interpolation along it (#68,
     /// framegen/ffx.rs).
     Ffx,
+    /// The same, spending more GPU time on the picture (#73,
+    /// framegen/ffx.rs `Quality::BEST`).
+    FfxQuality,
 }
 
 impl Mode {
     /// Every mode, as `--framegen` names them.
-    pub const ALL: [Mode; 4] = [Mode::Copy, Mode::Blend, Mode::NewOnly, Mode::Ffx];
+    pub const ALL: [Mode; 5] = [Mode::Copy, Mode::Blend, Mode::NewOnly, Mode::Ffx, Mode::FfxQuality];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -66,6 +69,7 @@ impl Mode {
             Mode::Blend => "blend",
             Mode::NewOnly => "new-only",
             Mode::Ffx => "ffx",
+            Mode::FfxQuality => "ffx-quality",
         }
     }
 
@@ -79,7 +83,7 @@ impl Mode {
     /// The mode runs a generator on the GPU.
     pub fn generates(self) -> bool {
         match self {
-            Mode::Copy | Mode::Blend | Mode::Ffx => true,
+            Mode::Copy | Mode::Blend | Mode::Ffx | Mode::FfxQuality => true,
             Mode::NewOnly => false,
         }
     }
@@ -91,7 +95,7 @@ impl Mode {
     pub fn judged(self) -> bool {
         match self {
             Mode::Copy | Mode::NewOnly => false,
-            Mode::Blend | Mode::Ffx => true,
+            Mode::Blend | Mode::Ffx | Mode::FfxQuality => true,
         }
     }
 }
@@ -336,7 +340,8 @@ pub fn generator(mode: Mode, device: &wgpu::Device) -> Option<Box<dyn Generator>
         Mode::Copy => Some(Box::new(OnePass::copy(device))),
         Mode::Blend => Some(Box::new(OnePass::blend(device))),
         Mode::NewOnly => None,
-        Mode::Ffx => Some(Box::new(ffx::Ffx::new(device))),
+        Mode::Ffx => Some(Box::new(ffx::Ffx::new(device, ffx::Quality::FAST))),
+        Mode::FfxQuality => Some(Box::new(ffx::Ffx::new(device, ffx::Quality::BEST))),
     }
 }
 
@@ -676,6 +681,6 @@ mod tests {
         for m in Mode::ALL {
             assert_eq!(Mode::from_flag(m.as_str()), Ok(m));
         }
-        assert!(Mode::from_flag("warp").unwrap_err().contains("copy or blend or new-only or ffx"));
+        assert!(Mode::from_flag("warp").unwrap_err().contains("copy or blend or new-only or ffx or ffx-quality"));
     }
 }

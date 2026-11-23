@@ -93,8 +93,9 @@ const USAGE: &str = concat!(
   --replay FILE   a recorded clip instead of the card, looping
   --framegen MODE frame generation (#66): copy (the last new frame, a
                   refresh late), blend (the two new frames half and half,
-                  #67), new-only (duplicates not presented) or ffx
-                  (FidelityFX optical flow, #68)"
+                  #67), new-only (duplicates not presented), ffx
+                  (FidelityFX optical flow, #68) or ffx-quality (the
+                  same, more GPU time on the picture, #73)"
 );
 
 /// Called first thing in main, before any thread exists.

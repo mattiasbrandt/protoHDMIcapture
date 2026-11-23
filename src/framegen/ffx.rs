@@ -4,9 +4,10 @@
 //! pass after afmf-linux's (MIT) warps both frames halfway along that flow.
 //!
 //! Per generated frame, on the GPU, in the SDK's order:
-//! - **Luma** of both frames at half resolution (afmf-linux's choice: a
-//!   1080p frame's flow at 960x540, ~0.6 ms a frame at 3440x1440 on RADV
-//!   by its own measurement), and a pyramid of up to 7 levels, each the
+//! - **Luma** of both frames at half resolution for `ffx` (afmf-linux's
+//!   choice: a 1080p frame's flow at 960x540, ~0.6 ms a frame at 3440x1440
+//!   on RADV by its own measurement), at full resolution for `ffx-quality`
+//!   (`Quality`), and a pyramid of up to 7 levels, each the
 //!   2x2 mean of the one above (the SDK's single-pass downsampler computes
 //!   the same means).
 //! - **Scene change**: nine strata histograms of each frame and their
@@ -48,8 +49,24 @@ use crate::gputime::PassTimes;
 const MAX_LEVELS: u32 = 7;
 /// Pixels a side of a flow block, at every level.
 const BLOCK: u32 = 8;
-/// Frame pixels per flow-luma pixel: half resolution.
-const SCALE: u32 = 2;
+/// How hard the generator works: `ffx` (#68) as it was measured, and
+/// `ffx-quality` (#73), which spends more of a gaming GPU's headroom on
+/// the picture, each step measured (`gpu_ffx_time_at_1080p`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Quality {
+    /// Frame pixels per flow-luma pixel: 2 is afmf-linux's half
+    /// resolution, 1 the flow at the frame's own resolution (#73 step 1:
+    /// a block is 8 frame pixels, not 16, so motion edges are twice as
+    /// fine).
+    pub scale: u32,
+}
+
+impl Quality {
+    /// `ffx`: #68's generator, unchanged.
+    pub const FAST: Self = Self { scale: 2 };
+    /// `ffx-quality`.
+    pub const BEST: Self = Self { scale: 1 };
+}
 /// The coarsest level is at least this many luma pixels on its short side
 /// (the search reads 4-pixel words and 8x8 blocks).
 const MIN_LEVEL_SIDE: u32 = 8;
@@ -84,11 +101,11 @@ fn flow_sizes(src: (u32, u32), levels: u32) -> Vec<(u32, u32)> {
 }
 
 /// `Params` (common.wgsl) as bytes.
-fn params(luma: (u32, u32), of: (u32, u32), next_of: (u32, u32), src: (u32, u32), level: u32, levels: u32) -> Vec<u8> {
+fn params(luma: (u32, u32), of: (u32, u32), next_of: (u32, u32), src: (u32, u32), level: u32, levels: u32, scale: u32) -> Vec<u8> {
     let i = |v: u32| (v as i32).to_le_bytes();
     [i(luma.0), i(luma.1), i(of.0), i(of.1), i(next_of.0), i(next_of.1), i(src.0), i(src.1)]
         .into_iter()
-        .chain([level, levels, SCALE, 0].map(u32::to_le_bytes))
+        .chain([level, levels, scale, 0].map(u32::to_le_bytes))
         .flatten()
         .collect()
 }
@@ -184,8 +201,9 @@ struct State {
 }
 
 impl State {
-    fn new(device: &wgpu::Device, p: &Pipelines, size: (u32, u32)) -> Self {
-        let src = (size.0.div_ceil(SCALE), size.1.div_ceil(SCALE));
+    fn new(device: &wgpu::Device, p: &Pipelines, size: (u32, u32), q: Quality) -> Self {
+        let scale = q.scale;
+        let src = (size.0.div_ceil(scale), size.1.div_ceil(scale));
         let n = levels(src);
         let luma_sizes: Vec<_> = (0..n).map(|l| ((src.0 >> l).max(1), (src.1 >> l).max(1))).collect();
         let flow_sizes = flow_sizes(src, n);
@@ -216,20 +234,20 @@ impl State {
                 let next_of = if l > 0 { flow_sizes[l - 1] } else { (0, 0) };
                 // The pyramid pass reads the finer level: `src` is it.
                 let finer = if l > 0 { luma_sizes[l - 1] } else { src };
-                let bytes = params(luma_sizes[l], flow_sizes[l], next_of, src, l as u32, n);
-                let down = params(luma_sizes[l], flow_sizes[l], next_of, finer, l as u32, n);
+                let bytes = params(luma_sizes[l], flow_sizes[l], next_of, src, l as u32, n, scale);
+                let down = params(luma_sizes[l], flow_sizes[l], next_of, finer, l as u32, n, scale);
                 (uniform(device, &format!("ffx level {l}"), &bytes), uniform(device, &format!("ffx down {l}"), &down))
             })
             .collect();
-        let luma_params = uniform(device, "ffx luma", &params(src, flow_sizes[0], (0, 0), src, 0, n));
+        let luma_params = uniform(device, "ffx luma", &params(src, flow_sizes[0], (0, 0), src, 0, n, scale));
         let interpolate_params = {
             let f = |v: f32| v.to_le_bytes();
             let i = |v: u32| (v as i32).to_le_bytes();
             let bytes: Vec<u8> = [
                 f(size.0 as f32),
                 f(size.1 as f32),
-                f((BLOCK * SCALE) as f32),
-                f(SCALE as f32),
+                f((BLOCK * scale) as f32),
+                f(scale as f32),
                 i(flow_sizes[0].0),
                 i(flow_sizes[0].1),
                 f(MAX_MOTION),
@@ -298,12 +316,13 @@ impl State {
 
 /// The generator: its pipelines, and its buffers once it knows the size.
 pub struct Ffx {
+    quality: Quality,
     pipelines: Pipelines,
     state: Option<State>,
 }
 
 impl Ffx {
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, quality: Quality) -> Self {
         let interpolate_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ffx interpolate"),
             entries: &[
@@ -346,7 +365,7 @@ impl Ffx {
                 ..Default::default()
             }),
         };
-        Self { pipelines, state: None }
+        Self { quality, pipelines, state: None }
     }
 
     /// The flow from `next` back to `prev` and the scene-change test, into
@@ -363,7 +382,7 @@ impl Ffx {
         let size = next.texture().size();
         let size = (size.width, size.height);
         if self.state.as_ref().is_none_or(|s| s.size != size) {
-            self.state = Some(State::new(device, &self.pipelines, size));
+            self.state = Some(State::new(device, &self.pipelines, size, self.quality));
         }
         let (p, s) = (&self.pipelines, self.state.as_ref().expect("made above"));
         let n = s.luma_sizes.len();
@@ -654,7 +673,7 @@ mod tests {
     #[ignore = "needs a GPU"]
     fn gpu_ffx_flow_finds_a_known_motion() {
         let rig = Rig::new(SIZE, wgpu::Features::empty());
-        let mut ffx = Ffx::new(&rig.device);
+        let mut ffx = Ffx::new(&rig.device, Quality::FAST);
         let (w, h) = SIZE;
         rig.generate(&mut ffx, &picture(w, h, (0, 0), 7, 0, 256), &picture(w, h, (8, 4), 7, 0, 256));
         assert!(!rig.scene_changed(&ffx), "one picture, moved: no cut");
@@ -667,13 +686,30 @@ mod tests {
         assert!(right * 100 >= inner.len() * 95, "{right} of {} blocks at (-4, -2): {:?}", inner.len(), &inner[..16]);
     }
 
+    /// `ffx-quality`'s flow is at the frame's resolution: the same motion
+    /// reads (-8, -4), one vector per 8x8 block of frame pixels.
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn gpu_ffx_quality_flow_is_at_full_resolution() {
+        let rig = Rig::new(SIZE, wgpu::Features::empty());
+        let mut ffx = Ffx::new(&rig.device, Quality::BEST);
+        let (w, h) = SIZE;
+        rig.generate(&mut ffx, &picture(w, h, (0, 0), 7, 0, 256), &picture(w, h, (8, 4), 7, 0, 256));
+        let (fw, fh) = flow_sizes((w, h), 1)[0];
+        let flow = rig.flow(&ffx);
+        assert_eq!(flow.len(), (fw * fh) as usize, "a vector per 8x8 block of the frame");
+        let inner: Vec<_> = (2..fh - 2).flat_map(|y| (2..fw - 2).map(move |x| (x, y))).map(|(x, y)| flow[(y * fw + x) as usize]).collect();
+        let right = inner.iter().filter(|v| **v == (-8, -4)).count();
+        assert!(right * 100 >= inner.len() * 95, "{right} of {} blocks at (-8, -4): {:?}", inner.len(), &inner[..16]);
+    }
+
     /// A dark picture, then an unrelated bright one: a scene change, and the
     /// generated frame is the new frame itself (the real frame).
     #[test]
     #[ignore = "needs a GPU"]
     fn gpu_ffx_a_cut_shows_the_new_frame() {
         let rig = Rig::new(SIZE, wgpu::Features::empty());
-        let mut ffx = Ffx::new(&rig.device);
+        let mut ffx = Ffx::new(&rig.device, Quality::FAST);
         let (w, h) = SIZE;
         let next = picture(w, h, (0, 0), 99, 160, 96);
         let out = rig.generate(&mut ffx, &picture(w, h, (0, 0), 3, 0, 90), &next);
@@ -692,7 +728,7 @@ mod tests {
     #[ignore = "needs a GPU"]
     fn gpu_ffx_generates_the_halfway_picture() {
         let rig = Rig::new(SIZE, wgpu::Features::empty());
-        let mut ffx = Ffx::new(&rig.device);
+        let mut ffx = Ffx::new(&rig.device, Quality::FAST);
         let (w, h) = SIZE;
         let (prev, next) = (picture(w, h, (0, 0), 7, 0, 256), picture(w, h, (8, 4), 7, 0, 256));
         let out = rig.generate(&mut ffx, &prev, &next);
@@ -722,11 +758,17 @@ mod tests {
     #[ignore = "needs a GPU"]
     fn gpu_ffx_time_at_1080p() {
         let rig = Rig::new((1920, 1080), wgpu::Features::TIMESTAMP_QUERY);
+        for (name, quality) in [("ffx", Quality::FAST), ("ffx-quality", Quality::BEST)] {
+            time(&rig, name, quality);
+        }
+    }
+
+    fn time(rig: &Rig, name: &str, quality: Quality) {
         let Some(mut timer) = crate::gputime::GpuTimer::new(&rig.device, &rig.queue) else {
             eprintln!("this GPU cannot time passes");
             return;
         };
-        let mut ffx = Ffx::new(&rig.device);
+        let mut ffx = Ffx::new(&rig.device, quality);
         let (w, h) = rig.size;
         let (prev, next) = (rig.frame(&picture(w, h, (0, 0), 7, 0, 256)), rig.frame(&picture(w, h, (8, 4), 7, 0, 256)));
         let out = rig.texture(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
@@ -749,6 +791,11 @@ mod tests {
         }
         times.sort();
         assert!(!times.is_empty(), "timed at least once");
-        eprintln!("ffx at 1920x1080: median {:?}, p90 {:?}, {} frames", times[times.len() / 2], times[times.len() * 9 / 10], times.len());
+        eprintln!(
+            "{name} at 1920x1080: median {:?}, p90 {:?}, {} frames",
+            times[times.len() / 2],
+            times[times.len() * 9 / 10],
+            times.len()
+        );
     }
 }
