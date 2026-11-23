@@ -39,6 +39,17 @@
 @group(0) @binding(2) var<storage, read> previous: array<u32>;
 @group(0) @binding(3) var<storage, read_write> flow: array<vec2i>;
 @group(0) @binding(4) var<storage, read> scd: array<u32>;
+// The previous pair's level-0 flow (#73): with TEMPORAL (ffx-quality, the
+// constant prepended), level 0 also tries the block's vector of a moment
+// ago, and keeps it when it matches about as well as the window's best.
+// A facade's identical windows match equally well one window over; the
+// motion that held a moment ago breaks the tie (the 3DRS temporal
+// predictor, docs/research/frame-interpolation-artefacts.md).
+@group(0) @binding(5) var<storage, read> history: array<vec2i>;
+
+// A temporal vector within this much SAD (8-bit levels over the 8x8 block)
+// of the window's best is kept.
+const TEMPORAL_EPS: u32 = 64u;
 
 const COMPARE: i32 = 8;
 const RADIUS: i32 = 8;
@@ -161,10 +172,23 @@ fn main(@builtin(workgroup_id) group_u: vec3u, @builtin(local_invocation_index) 
 
             let min_sad = atomicLoad(&wg_min);
             var new_vector = vector + decode_search_coord(min_sad);
-            if (p.level == 0u && atomicLoad(&wg_block_sad) <= (min_sad >> 16u)) {
+            let block_sad = atomicLoad(&wg_block_sad);
+            if (p.level == 0u && block_sad <= (min_sad >> 16u)) {
                 new_vector = vec2i(0);
             }
             if (local == 0) {
+                if (TEMPORAL && p.level == 0u) {
+                    let t = history[clamp(of_group.y + by, 0, p.of_size.y - 1) * p.of_size.x + clamp(of_group.x + bx, 0, p.of_size.x - 1)];
+                    let origin = pixel_group + block_id * 8 + t;
+                    var t_sad = 0u;
+                    for (var dy = 0; dy < COMPARE; dy++) {
+                        t_sad += sad4(pixels[dy][0], second_packed(origin + vec2i(0, dy)));
+                        t_sad += sad4(pixels[dy][1], second_packed(origin + vec2i(4, dy)));
+                    }
+                    if (t_sad <= min(min_sad >> 16u, block_sad) + TEMPORAL_EPS) {
+                        new_vector = t;
+                    }
+                }
                 store_flow(of_group + block_id, new_vector);
             }
             workgroupBarrier();

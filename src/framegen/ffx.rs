@@ -282,6 +282,8 @@ struct Direction {
     /// With `Quality::refine`: the 4x4 flow's size, its refinement and
     /// median, and the buffer the interpolation reads.
     fine: Option<Fine>,
+    /// The previous call's level-0 flow, the search's temporal candidate.
+    history: wgpu::Buffer,
 }
 
 impl Direction {
@@ -382,14 +384,18 @@ impl State {
                 // level): held by the bind groups below, read by nothing
                 // else.
                 let (flow_searched, flow_filtered) = (flows("searched"), flows("filtered"));
+                // The previous pair's level-0 flow (search.wgsl's
+                // TEMPORAL), copied from this one's after each call.
+                let history = storage(device, &format!("ffx flow {which} history"), u64::from(flow_sizes[0].0 * flow_sizes[0].1) * 8);
                 let search = (0..n as usize)
                     .map(|l| {
-                        bind(
-                            device,
-                            p.search_at(l),
-                            "ffx search",
-                            &[b(&level_params[l].0), b(&luma[cur][l]), b(&luma[prev][l]), b(&flow_searched[l]), b(&scd)],
-                        )
+                        let mut resources = vec![b(&level_params[l].0), b(&luma[cur][l]), b(&luma[prev][l]), b(&flow_searched[l]), b(&scd)];
+                        // search.wgsl reads the history; search_wide.wgsl
+                        // has no such binding.
+                        if l == 0 || p.search_wide.is_none() {
+                            resources.push(b(&history));
+                        }
+                        bind(device, p.search_at(l), "ffx search", &resources)
                     })
                     .collect();
                 let filter = (0..n as usize)
@@ -433,7 +439,7 @@ impl State {
                         flow,
                     }
                 });
-                Direction { flow_filtered, search, filter, scale, fine }
+                Direction { flow_filtered, search, filter, scale, fine, history }
             })
             .collect();
         let hud = q.hud_mask.then(|| {
@@ -540,7 +546,13 @@ impl Ffx {
             down: compute(device, "ffx down", include_str!("ffx/down.wgsl")),
             histogram: compute(device, "ffx histogram", include_str!("ffx/histogram.wgsl")),
             divergence: compute(device, "ffx divergence", include_str!("ffx/divergence.wgsl")),
-            search: compute(device, "ffx search", include_str!("ffx/search.wgsl")),
+            // ffx-quality: level 0 also tries the previous pair's vector
+            // (search.wgsl's TEMPORAL).
+            search: compute(
+                device,
+                "ffx search",
+                &format!("const TEMPORAL: bool = {};\n{}", quality.two_way, include_str!("ffx/search.wgsl")),
+            ),
             search_wide: (quality.radius != 8).then(|| {
                 compute(
                     device,
@@ -692,6 +704,11 @@ impl Ffx {
             pass.set_pipeline(dilate);
             pass.set_bind_group(0, &h.dilate, &[]);
             pass.dispatch_workgroups(gx, gy, 1);
+        }
+        drop(pass);
+        // This pair's level-0 flow is the next call's temporal candidate.
+        for d in &s.dirs {
+            encoder.copy_buffer_to_buffer(&d.flow_filtered[0], 0, &d.history, 0, d.history.size());
         }
     }
 }
