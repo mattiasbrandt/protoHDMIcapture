@@ -23,8 +23,12 @@
 //!
 //! Not ported: mpv's sigmoid-light upscaling and linear-light downscaling
 //! (both on by default in view.sh's balanced); the filters run on the
-//! gamma-encoded frame. Chroma stays the convert pass's linear interpolation
-//! (mpv's cscale is spline36).
+//! gamma-encoded frame.
+//!
+//! Chroma (#85): YUYV carries one chroma sample for every two pixels across
+//! (4:2:2, co-sited with the even pixel). The convert pass interpolates the
+//! odd pixels' chroma with spline36 (`chroma_taps`), mpv's default cscale,
+//! for every preset; it was linear before.
 
 /// SCALING, in the order c cycles them. `config` (mpv.conf's own scalers)
 /// has no meaning here and reads as balanced (ADR 0001).
@@ -61,6 +65,16 @@ impl Scaling {
             Self::HighQuality => Self::Balanced,
         }
     }
+}
+
+/// The convert pass's chroma taps for an odd pixel of a 4:2:2 row (#85):
+/// spline36 at the six chroma samples around it, 2.5, 1.5 and 0.5 samples
+/// away on each side, normalised to sum to 1. An even pixel is its own
+/// sample (spline36 is 1 at 0 and 0 at every other whole sample).
+pub fn chroma_taps() -> [f32; 6] {
+    let w = [2.5, 1.5, 0.5, 0.5, 1.5, 2.5].map(|d| Function::Spline36.weight(d));
+    let sum: f64 = w.iter().sum();
+    w.map(|x| (x / sum) as f32)
 }
 
 /// libplacebo's filter functions (src/filters.c).
@@ -375,6 +389,20 @@ fn lut(u: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chroma_taps_are_spline36_halfway_between_samples() {
+        let t = chroma_taps();
+        assert!((t.iter().sum::<f32>() - 1.0).abs() < 1e-6, "{t:?}");
+        // Symmetric about the odd pixel, largest next to it, negative lobes
+        // at 1.5 samples (spline36's shape).
+        for k in 0..3 {
+            assert_eq!(t[k], t[5 - k], "{t:?}");
+        }
+        assert!(t[2] > 0.5 && t[1] < 0.0 && t[0] > 0.0, "{t:?}");
+        // Not the old linear rule (0.5 and 0.5 from the two neighbours).
+        assert!((t[2] - 0.5).abs() > 0.01, "{t:?}");
+    }
 
     #[test]
     fn j1_and_jinc() {

@@ -767,6 +767,28 @@ mod tests {
         }
     }
 
+    /// The window's convert pass interpolates an odd pixel's chroma with
+    /// spline36 (#85): next to a chroma step it rings a little, where the
+    /// old linear rule gave the even neighbour's value exactly.
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn the_convert_pass_upsamples_chroma_with_spline36() {
+        let (w, h) = (16u32, 2u32);
+        let gpu = Gpu::new((w, h)).expect("a GPU");
+        // Y 128, V 128; U 100 for the first four macropixels, 156 after.
+        let row: Vec<u8> = (0..w / 2).flat_map(|k| [128, if k < 4 { 100 } else { 156 }, 128, 128]).collect();
+        let data: Vec<u8> = (0..h).flat_map(|_| row.clone()).collect();
+        gpu.convert(&data, 0);
+        let px = gpu.read(&gpu.frames[0]).expect("readback");
+        let blue = |x: usize| i32::from(px[x * 4 + 2]);
+        // x 4 is macropixel 2's own sample; x 5 sits between macropixels 2
+        // and 3 (both 100), with the step two samples away.
+        assert!((blue(5) - blue(4)).abs() >= 2, "x4 {} x5 {}: no ringing, the chroma is linear", blue(4), blue(5));
+        // Far from the step it is flat; on either side of it, ordered.
+        assert_eq!(blue(1), blue(0));
+        assert!(blue(9) > blue(6), "{} {}", blue(6), blue(9));
+    }
+
     /// The frames a generator gets are the window's: on a still, coloured
     /// picture whose brightness steps evenly from new frame to new frame,
     /// the mean of N0 and N2 is N1, and `next` alone is N2, within a

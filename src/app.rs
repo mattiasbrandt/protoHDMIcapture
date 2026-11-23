@@ -395,14 +395,19 @@ struct VOut {
 
 /// Pass 1, at the capture's own size: YUYV -> RGB. A texel is one
 /// macropixel, Y0 U Y1 V for two pixels; chroma is sited with the even pixel
-/// and interpolated for the odd one. Then LEVELS and the colour values
+/// and interpolated with spline36 for the odd one (#85). Then LEVELS and the colour values
 /// (picture.rs).
 pub(crate) fn convert_shader(width: u32) -> String {
     let last = width / 2 - 1;
+    // An odd pixel's chroma: spline36 over the six chroma samples around it
+    // (scale.rs `chroma_taps`, #85), clamped at the row's ends.
+    let taps = scale::chroma_taps().map(|w| format!("{w:.9}")).join(", ");
     format!(
         r#"{wgsl}
 @group(0) @binding(0) var yuyv: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> pic: Picture;
+
+const CHROMA_TAPS = array<f32, 6>({taps});
 
 @fragment fn fs(in: VOut) -> @location(0) vec4f {{
     let x = u32(in.pos.x);
@@ -412,8 +417,12 @@ pub(crate) fn convert_shader(width: u32) -> String {
     var c = t.ga;
     if ((x & 1u) == 1u) {{
         luma = t.b;
-        let next = textureLoad(yuyv, vec2u(min(x / 2u + 1u, {last}u), y), 0);
-        c = (t.ga + next.ga) * 0.5;
+        c = vec2f(0.0);
+        for (var i = 0; i < 6; i++) {{
+            let k = u32(clamp(i32(x / 2u) + i - 2, 0, {last}));
+            c += CHROMA_TAPS[i] * textureLoad(yuyv, vec2u(k, y), 0).ga;
+        }}
+        c = clamp(c, vec2f(0.0), vec2f(1.0));
     }}
     return vec4f(picture(pic, vec3f(luma, c.x, c.y)), 1.0);
 }}
