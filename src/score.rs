@@ -216,6 +216,27 @@ struct Kept {
     error: Vec<u8>,
 }
 
+/// A pixel whose real frame changes by at most this from one scored
+/// triple to the next (8-bit luma) is still: a change of the generated
+/// frame there is flicker.
+pub const STILL: f32 = 4.0;
+
+/// Flicker between two consecutive scored triples: the generated frames'
+/// absolute luma change, summed over the pixels where the real middle
+/// frames change by at most `STILL`, and that count. Sparkle on a facade
+/// that holds still shows here, where a per-frame error cannot tell a
+/// steady small error from one that jumps (#73).
+pub fn flicker(prev_got: &[f32], got: &[f32], prev_real: &[f32], real: &[f32]) -> (f64, u64) {
+    let (mut sum, mut still) = (0.0, 0u64);
+    for i in 0..got.len() {
+        if (real[i] - prev_real[i]).abs() <= STILL {
+            sum += f64::from((got[i] - prev_got[i]).abs());
+            still += 1;
+        }
+    }
+    (sum, still)
+}
+
 /// The whole clip's result.
 #[derive(Debug, Default)]
 pub struct Totals {
@@ -230,6 +251,12 @@ pub struct Totals {
     /// The largest difference in any channel of any pixel, generated
     /// against real (8-bit): what a test of the frames' colour reads.
     pub max_channel: u8,
+    /// `flicker` summed over the pairs of consecutive scored triples
+    /// (every one scored, none declined between them): the sum, the still
+    /// pixels, and all pixels compared.
+    pub flicker_sum: f64,
+    pub flicker_still: u64,
+    pub flicker_pixels: u64,
 }
 
 /// The window's GPU work for the score: the convert pass, the frames a
@@ -459,10 +486,14 @@ fn score(opts: &Options, mut reader: Reader, hud: Option<Rect>, gpu: Gpu, mut ge
     let mut kept: Vec<Kept> = Vec::new();
     let whole = Rect::whole(size.0, size.1);
     let (mut index, mut seen) = (0usize, 0u64);
+    // The last scored triple's generated and real luma, and its `seen`
+    // number: flicker compares only triples next to each other.
+    let mut last: Option<(u64, Vec<f32>, Vec<f32>)> = None;
     while let Some(record) = reader.next()? {
         let data = match record {
             Record::Gap { .. } => {
                 chain.gap();
+                last = None;
                 continue;
             }
             Record::Frame { data, .. } => data,
@@ -485,6 +516,7 @@ fn score(opts: &Options, mut reader: Reader, hud: Option<Rect>, gpu: Gpu, mut ge
         }
         if !gpu.generate(generator.as_mut(), s0, s2) {
             totals.cuts += 1;
+            last = None;
             continue;
         }
         let got_px = gpu.read(&gpu.out)?;
@@ -492,6 +524,14 @@ fn score(opts: &Options, mut reader: Reader, hud: Option<Rect>, gpu: Gpu, mut ge
         let channel = got_px.iter().zip(&real_px).map(|(g, r)| g.abs_diff(*r)).max().unwrap_or(0);
         totals.max_channel = totals.max_channel.max(channel);
         let (got, real) = (luma(&got_px), luma(&real_px));
+        if let Some((n, prev_got, prev_real)) = &last
+            && *n + opts.every as u64 == seen
+        {
+            let (sum, still) = flicker(prev_got, &got, prev_real, &real);
+            totals.flicker_sum += sum;
+            totals.flicker_still += still;
+            totals.flicker_pixels += got.len() as u64;
+        }
         let (picture, tears) = region(&got, &real, size.0, whole);
         let hud_region = hud.map(|r| region(&got, &real, size.0, r).0);
         totals.triples += 1;
@@ -518,6 +558,7 @@ fn score(opts: &Options, mut reader: Reader, hud: Option<Rect>, gpu: Gpu, mut ge
             kept.sort_by(|a, b| worse(&a.scored, &b.scored));
             kept.truncate(opts.worst);
         }
+        last = Some((seen, got, real));
     }
     report(opts, hud, &totals, &kept);
     if let Some(dir) = &opts.out {
@@ -564,6 +605,13 @@ fn report(opts: &Options, hud: Option<Rect>, t: &Totals, kept: &[Kept]) {
             t.hud.psnr(),
             t.hud.tear_blocks,
             t.hud.tear_blocks as f64 / t.triples as f64
+        );
+    }
+    if t.flicker_still > 0 {
+        eprintln!(
+            "score: flicker  {:.3} levels mean change of the generated frames where the real ones change <= {STILL} ({:.1} % of pixels, consecutive triples)",
+            t.flicker_sum / t.flicker_still as f64,
+            t.flicker_still as f64 / t.flicker_pixels as f64 * 100.0
         );
     }
     for (n, k) in kept.iter().enumerate() {
@@ -617,6 +665,23 @@ mod tests {
 
     fn plane(w: u32, h: u32, f: impl Fn(u32, u32) -> f32) -> Vec<f32> {
         (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).map(|(x, y)| f(x, y)).collect()
+    }
+
+    #[test]
+    fn flicker_counts_generated_change_only_where_the_real_frames_hold_still() {
+        let (w, h) = (8, 8);
+        let real0 = plane(w, h, |x, _| if x < 4 { 100.0 } else { 0.0 });
+        // The right half really changes (a moving part); the left holds.
+        let real1 = plane(w, h, |x, _| if x < 4 { 101.0 } else { 80.0 });
+        // The generated frames: steady on the left but for one pixel that
+        // jumps 30 levels, and changing on the right with the real ones.
+        let got0 = plane(w, h, |x, _| if x < 4 { 100.0 } else { 0.0 });
+        let got1 = plane(w, h, |x, y| if x < 4 { if (x, y) == (1, 1) { 130.0 } else { 100.0 } } else { 80.0 });
+        let (sum, still) = flicker(&got0, &got1, &real0, &real1);
+        assert_eq!(still, 32, "the left half holds still");
+        assert_eq!(sum, 30.0, "only the jumping pixel counts; the right half's change is real");
+        // Steady generated frames over still real ones: no flicker.
+        assert_eq!(flicker(&got0, &got0, &real0, &real0), (0.0, 64));
     }
 
     #[test]
