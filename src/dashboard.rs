@@ -959,6 +959,11 @@ struct Paint {
     on: bool,
 }
 
+/// Orange (xterm 256-colour 208), for warnings (#76).
+const WARN: &str = "38;5;208";
+/// Red (xterm 256-colour 196), for errors (#76).
+const ERROR: &str = "38;5;196";
+
 impl Paint {
     fn wrap(&self, code: &str, text: &str) -> String {
         if self.on { format!("\x1b[{code}m{text}\x1b[0m") } else { text.to_string() }
@@ -972,12 +977,20 @@ impl Paint {
     fn bold(&self, t: &str) -> String {
         self.wrap("1", t)
     }
-    fn red(&self, t: &str) -> String {
-        self.wrap("31", t)
+    /// Something to look at, the feed and the sound still running: orange.
+    /// Warnings and errors use fixed 256-colour codes, not the 16 palette
+    /// slots a terminal theme repaints: Omarchy themes set "red" (31) and
+    /// "yellow" (33) to greens and cyans, and a warning showed green (#76).
+    fn warn(&self, t: &str) -> String {
+        self.wrap(WARN, t)
     }
-    /// Green when `ok`, yellow when not, as view.sh's dashboard.
-    fn good_bad(&self, t: &str, ok: bool) -> String {
-        self.wrap(if ok { "32" } else { "33" }, t)
+    /// The feed or the sound has stopped: red.
+    fn error(&self, t: &str) -> String {
+        self.wrap(ERROR, t)
+    }
+    /// The palette's green when `ok`, a warning when not.
+    fn good_warn(&self, t: &str, ok: bool) -> String {
+        if ok { self.wrap("32", t) } else { self.warn(t) }
     }
 }
 
@@ -1070,7 +1083,7 @@ fn render(s: &Value, p: &Paint) -> String {
         format!(
             "{} captured · {} presented{}",
             n1(&s["capture_fps"]),
-            p.good_bad(&n1(&s["presented_fps"]), fps == 0.0 || shown >= fps * 0.95),
+            p.good_warn(&n1(&s["presented_fps"]), fps == 0.0 || shown >= fps * 0.95),
             match num(&s["refresh_hz"]) {
                 Some(hz) => format!(" · display {hz:.2} Hz"),
                 None => String::new(),
@@ -1087,7 +1100,7 @@ fn render(s: &Value, p: &Paint) -> String {
                 format!(
                     "{fps:.1} fps in a {hz:.2} Hz signal ({}) · {} cadence break{}",
                     src["cadence"].as_str().unwrap_or("?"),
-                    p.good_bad(&breaks.to_string(), breaks == 0),
+                    p.good_warn(&breaks.to_string(), breaks == 0),
                     if breaks == 1 { "" } else { "s" }
                 )
             }
@@ -1103,7 +1116,7 @@ fn render(s: &Value, p: &Paint) -> String {
             format!(
                 "{mode} · {} generated · {} missed · {} withheld",
                 int(&fg["generated"]),
-                p.good_bad(&missed.to_string(), missed == 0),
+                p.good_warn(&missed.to_string(), missed == 0),
                 int(&fg["withheld"])
             ),
         );
@@ -1112,16 +1125,16 @@ fn render(s: &Value, p: &Paint) -> String {
     row(
         &mut out,
         "capture gaps",
-        format!("{} · {} frames lost · {} frames captured", p.good_bad(&int(&s["gaps"]), gaps == 0), int(&s["lost"]), int(&s["frames"])),
+        format!("{} · {} frames lost · {} frames captured", p.good_warn(&int(&s["gaps"]), gaps == 0), int(&s["lost"]), int(&s["frames"])),
     );
     row(
         &mut out,
         "signal",
         match (s["signal"].as_str(), s["signal_why"].as_str()) {
             (Some("ok"), _) => "ok".into(),
-            (Some("never"), None) => p.red("none since the feed opened"),
-            (Some("stopped"), None) => p.red("stopped (source asleep or off?)"),
-            (Some("never" | "stopped"), Some(why)) => p.red(&format!("no picture: {why}")),
+            (Some("never"), None) => p.error("none since the feed opened"),
+            (Some("stopped"), None) => p.error("stopped (source asleep or off?)"),
+            (Some("never" | "stopped"), Some(why)) => p.error(&format!("no picture: {why}")),
             _ => "?".into(),
         },
     );
@@ -1131,7 +1144,7 @@ fn render(s: &Value, p: &Paint) -> String {
         "dropped",
         format!(
             "{} · {} undecodable · {} unusable",
-            p.good_bad(&(undecodable + unusable).to_string(), undecodable + unusable == 0),
+            p.good_warn(&(undecodable + unusable).to_string(), undecodable + unusable == 0),
             int(&s["dropped"]["undecodable"]),
             int(&s["dropped"]["unusable"])
         ),
@@ -1143,7 +1156,7 @@ fn render(s: &Value, p: &Paint) -> String {
             &mut out,
             name,
             if v.is_null() && s["latency_replaced"].as_bool() == Some(true) {
-                p.red("not measurable: every present is replaced before display (a frame-generation layer?)")
+                p.warn("not measurable: every present is replaced before display (a frame-generation layer?)")
             } else if v.is_null() {
                 p.dim("no frame presented yet")
             } else {
@@ -1162,7 +1175,7 @@ fn render(s: &Value, p: &Paint) -> String {
         "repeated",
         format!(
             "{} refreshes {} · {} since start",
-            p.good_bad(&int(&s["repeated_window"]), rep == 0),
+            p.good_warn(&int(&s["repeated_window"]), rep == 0),
             p.dim(&format!("({window})")),
             int(&s["repeated_total"])
         ),
@@ -1192,13 +1205,13 @@ fn render(s: &Value, p: &Paint) -> String {
                 ),
             );
             row(&mut out, "sync", format!("delay {} ms · ring {} ms", int(&a["delay_ms"]), n1(&a["ring_ms"])));
-            let bad = |k: &str| p.good_bad(&int(&a[k]), a[k].as_u64() == Some(0));
+            let bad = |k: &str| p.good_warn(&int(&a[k]), a[k].as_u64() == Some(0));
             row(&mut out, "underruns", format!("{} · xruns {} · errors {}", bad("underruns"), bad("xruns"), bad("errors")));
             if a["realtime_refused"].as_bool() == Some(true) {
-                row(&mut out, "priority", p.red("real-time refused; sound may crackle under load"));
+                row(&mut out, "priority", p.warn("real-time refused; sound may crackle under load"));
             }
         }
-        Some("failed") => row(&mut out, "loopback", p.red(&format!("failed: {}", a["why"].as_str().unwrap_or("?")))),
+        Some("failed") => row(&mut out, "loopback", p.error(&format!("failed: {}", a["why"].as_str().unwrap_or("?")))),
         _ => row(&mut out, "loopback", format!("not running ({})", a["why"].as_str().unwrap_or("?"))),
     }
 
@@ -1233,7 +1246,7 @@ fn render(s: &Value, p: &Paint) -> String {
             } else if let Some(why) = r["unsupported"].as_str() {
                 p.dim(why)
             } else if let Some(why) = r["unreadable"].as_str() {
-                p.red(why)
+                p.warn(why)
             } else {
                 format!(
                     "{} at {} Hz by REFRESH=match {}",
@@ -1298,7 +1311,7 @@ pub fn client(run_dir: &Path) -> Result<(), String> {
                 (text, None)
             }
             Ok(None) => {
-                println!("\n  {}", paint.good_bad("The feed has ended; closing.", false));
+                println!("\n  {}", paint.good_warn("The feed has ended; closing.", false));
                 if tty {
                     thread::sleep(Duration::from_secs(2));
                 }
@@ -1313,7 +1326,7 @@ pub fn client(run_dir: &Path) -> Result<(), String> {
         // The title too, each time: the viewer knows its window by it
         // where the terminal took no app id (`$TERMINAL -e`).
         let clear = if tty { format!("\x1b]0;{}\x07\x1b[H\x1b[2J", crate::desktop::DASHBOARD_TITLE) } else { String::new() };
-        let note = note.map_or_else(String::new, |n| format!("\n  {}", paint.red(&n)));
+        let note = note.map_or_else(String::new, |n| format!("\n  {}", paint.warn(&n)));
         // A closed terminal ends the dashboard, nothing else.
         if writeln!(out, "{clear}{text}{note}").and_then(|()| out.flush()).is_err() {
             return Ok(());
@@ -1755,9 +1768,9 @@ mod tests {
         // The sample's source is 30 fps in a 60 Hz signal: 30 presented is
         // short of the card's 60 without new-frames-only, and all of the
         // source's with it.
-        assert!(fps_line(&s).contains(&paint.good_bad("30.0", false)), "{}", fps_line(&s));
+        assert!(fps_line(&s).contains(&paint.good_warn("30.0", false)), "{}", fps_line(&s));
         s["framegen"] = json!({ "mode": "new-only", "generated": 0, "missed": 0, "withheld": 300 });
-        assert!(fps_line(&s).contains(&paint.good_bad("30.0", true)), "{}", fps_line(&s));
+        assert!(fps_line(&s).contains(&paint.good_warn("30.0", true)), "{}", fps_line(&s));
     }
 
     #[test]
@@ -1778,6 +1791,26 @@ mod tests {
         assert!((src["fps"].as_f64().unwrap() - 29.97).abs() < 0.5, "{src}");
         let text = render(&s, &Paint { on: false });
         assert!(text.contains("fps in a 59.94 Hz signal (2:2) · 0 cadence breaks"), "{text}");
+    }
+
+    #[test]
+    fn warnings_are_orange_and_errors_red_whatever_the_theme() {
+        // Fixed 256-colour codes: a theme repaints the 16 palette slots
+        // (the user's set "red" to a green), not these (#76).
+        let warn = |t: &str| format!("\x1b[38;5;208m{t}\x1b[0m");
+        let error = |t: &str| format!("\x1b[38;5;196m{t}\x1b[0m");
+        let text = render(&sample(), &Paint { on: true });
+        assert!(text.contains(&warn("real-time refused; sound may crackle under load")), "{text}");
+        assert!(text.contains(&warn("1")), "a non-zero xruns count is a warning: {text}");
+        assert!(!text.contains("\x1b[31m") && !text.contains("\x1b[33m"), "no palette red or yellow: {text}");
+
+        let mut s = sample();
+        s["signal"] = json!("never");
+        s["audio"] = json!({ "state": "failed", "why": "the card has no PipeWire source" });
+        let text = render(&s, &Paint { on: true });
+        assert!(text.contains(&error("none since the feed opened")), "{text}");
+        assert!(text.contains(&error("failed: the card has no PipeWire source")), "{text}");
+        assert!(!render(&s, &Paint { on: false }).contains('\x1b'), "plain without colour");
     }
 
     #[test]
