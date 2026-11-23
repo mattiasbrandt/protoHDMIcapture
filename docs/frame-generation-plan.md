@@ -40,6 +40,15 @@ Out of scope:
 - **Upscaling:** one new `SCALING` preset named `sharp`, which `c` cycles
   to after high-quality. FSR 1 and NVIDIA Image Scaling are both tried;
   only the winner lands.
+- **The wizard suggests them from the hardware** (#84): it measures the
+  winning generator and `sharp` on the user's GPU, headless and paced, and
+  suggests each only where it fits with room, saying the latency cost
+  plainly. The user decides; frame generation stays off by default. An
+  integrated GPU, a GPU without the room, or a 60 fps source get the
+  reason instead.
+- **The README describes the feature** (#84): what it does and does not do,
+  its delay, where it looks worse, `sharp`, GameMode's GPU opt-in, and
+  what could come later (the "Later" list below and round two's findings).
 
 ## The shape
 
