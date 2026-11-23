@@ -78,8 +78,9 @@ fn split((x, y, z): (u32, u32, u32), cin: u32, step: u32) -> (u32, u32) {
 const TIMESTEP: f32 = 0.5;
 
 /// The scale `--framegen rife` runs at: the budget (#74, at most 10 ms at
-/// 1080p on an RX 9070 XT) is met at 1.0, the model's full quality.
-pub const SCALE: f32 = 1.0;
+/// 1080p on an RX 9070 XT) is met at 0.5 with fp16 (9.7 ms); 1.0, the
+/// model's full resolution, took 23.9 ms.
+pub const SCALE: f32 = 0.5;
 
 /// fp16 (IEEE binary16) bits to f32.
 fn f16(bits: u16) -> f32 {
@@ -220,6 +221,9 @@ struct Plan {
 /// `--framegen rife`.
 pub struct Rife {
     scale: f32,
+    /// The heavy kernels in f16 (rife.wgsl's alias `A`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    fp16: bool,
     pipelines: Vec<(Kernel, wgpu::ComputePipeline)>,
     weights: Vec<(wgpu::Buffer, wgpu::Buffer, u32, u32)>,
     out_pipeline: wgpu::RenderPipeline,
@@ -265,15 +269,23 @@ fn storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 }
 
 impl Rife {
+    /// fp16 where the device has it (`SHADER_F16`, which the window asks
+    /// for when a generator may run), as rife-ncnn-vulkan does on such GPUs.
     pub fn new(device: &wgpu::Device, scale: f32) -> Result<Self, String> {
-        Self::with_weights(device, scale, WEIGHTS)
+        Self::with_precision(device, scale, device.features().contains(wgpu::Features::SHADER_F16))
     }
 
-    fn with_weights(device: &wgpu::Device, scale: f32, bytes: &[u8]) -> Result<Self, String> {
+    fn with_precision(device: &wgpu::Device, scale: f32, fp16: bool) -> Result<Self, String> {
+        let bytes = WEIGHTS;
         if ![1.0, 0.5, 0.25].contains(&scale) {
             return Err(format!("RIFE scale {scale}: 1, 0.5 or 0.25"));
         }
-        let desc = wgpu::ShaderModuleDescriptor { label: Some("rife"), source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER)) };
+        let source = if fp16 {
+            Cow::Owned(format!("enable f16;\n{}", SHADER.replacen("alias A = f32;", "alias A = f16;", 1)))
+        } else {
+            Cow::Borrowed(SHADER)
+        };
+        let desc = wgpu::ShaderModuleDescriptor { label: Some("rife"), source: wgpu::ShaderSource::Wgsl(source) };
         let module = device.create_shader_module(desc);
         let pipelines = KERNELS
             .iter()
@@ -303,7 +315,7 @@ impl Rife {
             entries: &[crate::app::uniform_entry(0), storage_entry(1), storage_entry(2), storage_entry(3)],
         });
         let out_pipeline = crate::app::pipeline(device, "rife out", OUT, &out_layout, wgpu::TextureFormat::Rgba8Unorm);
-        Ok(Self { scale, pipelines, weights, out_pipeline, out_layout, plan: None })
+        Ok(Self { scale, fp16, pipelines, weights, out_pipeline, out_layout, plan: None })
     }
 
     fn pipeline(&self, k: Kernel) -> &wgpu::ComputePipeline {
@@ -633,7 +645,7 @@ mod tests {
         }))
         .expect("a GPU");
         eprintln!("GPU: {}", adapter.get_info().name);
-        let features = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+        let features = adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::SHADER_F16);
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features: features, ..Default::default() })).unwrap()
     }
 
@@ -739,7 +751,8 @@ mod tests {
         let prev = rgba(include_bytes!("rife/golden/in0.rgb"));
         let next = rgba(include_bytes!("rife/golden/in1.rgb"));
         let want: Vec<f32> = include_bytes!("rife/golden/out.f32").as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
-        let mut rife = Rife::new(&device, 1.0).unwrap();
+        // f32: the reference's own precision.
+        let mut rife = Rife::with_precision(&device, 1.0, false).unwrap();
         let got = run(&mut rife, &device, &queue, size, &prev, &next);
         assert_eq!(got.padded, size, "96x64 needs no padding");
         assert_eq!(got.result.len(), want.len());
@@ -759,6 +772,31 @@ mod tests {
                 assert!((f32::from(got.out[i * 4 + c]) - want8).abs() <= 1.0, "pixel {i} channel {c}");
             }
         }
+    }
+
+    /// fp16 (where the GPU has it) against f32 on the golden frames: the
+    /// 8-bit pictures within a few levels.
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn gpu_rife_fp16_follows_fp32() {
+        let (device, queue) = device();
+        if !device.features().contains(wgpu::Features::SHADER_F16) {
+            eprintln!("no fp16 shaders on this GPU");
+            return;
+        }
+        let size = (96, 64);
+        let prev = rgba(include_bytes!("rife/golden/in0.rgb"));
+        let next = rgba(include_bytes!("rife/golden/in1.rgb"));
+        let full = run(&mut Rife::with_precision(&device, 1.0, false).unwrap(), &device, &queue, size, &prev, &next);
+        let half = run(&mut Rife::with_precision(&device, 1.0, true).unwrap(), &device, &queue, size, &prev, &next);
+        let d: Vec<i32> = full.out.iter().zip(&half.out).map(|(a, b)| (i32::from(*a) - i32::from(*b)).abs()).collect();
+        let max = d.iter().copied().max().unwrap();
+        let mean = d.iter().sum::<i32>() as f64 / d.len() as f64;
+        let over2 = d.iter().filter(|&&v| v > 2).count() as f64 / d.len() as f64;
+        eprintln!("fp16 against fp32: max {max} levels, mean {mean:.3}, {:.3} % over 2 levels", over2 * 100.0);
+        // fp16 sums 1728 products a convolution: a few pixels where the
+        // flow is sensitive move by a few levels, the picture does not.
+        assert!(max <= 8 && mean < 0.25 && over2 < 0.005, "max {max}, mean {mean}, over 2 levels {over2}");
     }
 
     /// A bright square moving across a gradient: its halfway position.
@@ -798,16 +836,19 @@ mod tests {
         let (device, queue) = device();
         let size = (256, 192);
         let (a, b) = (moving(size, (64, 64)), moving(size, (96, 80)));
-        let mut rife = Rife::new(&device, 1.0).unwrap();
-        let got = run(&mut rife, &device, &queue, size, &a, &b);
-        let (ca, cb, cg) = (centre(&a, size), centre(&b, size), centre(&got.out, size));
-        eprintln!("centre: prev {ca:?}, next {cb:?}, generated {cg:?}");
-        // Halfway: (80, 72) + 15.5; within 2 px. A blend would put the mean
-        // halfway too, so the square must also stay one square.
-        assert!((cg.0 - (ca.0 + cb.0) / 2.0).abs() < 2.0 && (cg.1 - (ca.1 + cb.1) / 2.0).abs() < 2.0, "{cg:?}");
-        let bright = got.out.as_chunks::<4>().0.iter().filter(|p| p[0] > 150).count();
-        let one = a.as_chunks::<4>().0.iter().filter(|p| p[0] > 150).count();
-        assert!((bright as f32 - one as f32).abs() / (one as f32) < 0.15, "{bright} bright pixels against {one}: not one square");
+        // Full resolution, and the scale `--framegen rife` runs at.
+        for scale in [1.0, SCALE] {
+            let mut rife = Rife::new(&device, scale).unwrap();
+            let got = run(&mut rife, &device, &queue, size, &a, &b);
+            let (ca, cb, cg) = (centre(&a, size), centre(&b, size), centre(&got.out, size));
+            eprintln!("scale {scale} centre: prev {ca:?}, next {cb:?}, generated {cg:?}");
+            // Halfway: (80, 72) + 15.5; within 2 px. A blend would put the
+            // mean halfway too, so the square must also stay one square.
+            assert!((cg.0 - (ca.0 + cb.0) / 2.0).abs() < 2.0 && (cg.1 - (ca.1 + cb.1) / 2.0).abs() < 2.0, "{cg:?}");
+            let bright = got.out.as_chunks::<4>().0.iter().filter(|p| p[0] > 150).count();
+            let one = a.as_chunks::<4>().0.iter().filter(|p| p[0] > 150).count();
+            assert!((bright as f32 - one as f32).abs() / (one as f32) < 0.15, "{bright} bright pixels against {one}: not one square");
+        }
     }
 
     #[test]
@@ -844,6 +885,9 @@ mod tests {
         let mut medians = Vec::new();
         for scale in [1.0, 0.5, 0.25] {
             let mut rife = Rife::new(&device, scale).unwrap();
+            if scale == 1.0 {
+                eprintln!("fp16: {}", rife.fp16);
+            }
             let queries = device.create_query_set(&wgpu::QuerySetDescriptor {
                 label: None,
                 ty: wgpu::QueryType::Timestamp,

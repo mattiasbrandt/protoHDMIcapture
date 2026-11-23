@@ -803,8 +803,13 @@ impl App {
         .map_err(|e| format!("graphics adapter: {e}"))?;
         // Pass times only when measuring, and only where the GPU has them.
         let timestamps = wgpu::Features::TIMESTAMP_QUERY;
-        let required_features =
+        let mut required_features =
             if self.opts.stats && adapter.features().contains(timestamps) { timestamps } else { wgpu::Features::empty() };
+        // fp16 shaders, for a frame generator that runs them (RIFE, #74),
+        // only where the GPU has them and only when one may run.
+        if self.opts.framegen.is_some_and(|m| m.generates()) {
+            required_features |= adapter.features() & wgpu::Features::SHADER_F16;
+        }
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features, ..Default::default() }))
                 .map_err(|e| format!("graphics device: {e}"))?;

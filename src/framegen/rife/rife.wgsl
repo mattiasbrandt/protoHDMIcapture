@@ -11,6 +11,12 @@
 // at c * h * w + y * w + x. A concatenation is several kernels writing one
 // buffer at their own channel offsets.
 
+// The type the heavy kernels (conv1, conv2, deconv) compute and keep
+// workgroup memory in: f32, or f16 where the device has SHADER_F16 (rife.rs
+// makes that variant: `enable f16;` and this alias, as rife-ncnn-vulkan
+// runs fp16 on GPUs that have it).
+alias A = f32;
+
 struct P {
     // Source: channel offset, channels, width, height.
     s_off: u32, s_c: u32, s_w: u32, s_h: u32,
@@ -186,10 +192,10 @@ fn reduce(@builtin(global_invocation_id) g: vec3u) {
     if (p.flags & RESIDUAL) != 0u { v = v + residual[at]; }
     dst[at] = activate(v, p.flags);
 }
-var<workgroup> tile: array<f32, 2592>; // stride 1: 8 x 18 x 18; stride 2: 2 x 33 x 33
-var<workgroup> wt: array<vec4f, 288>; // channels x 9 x 4
+var<workgroup> tile: array<A, 2592>; // stride 1: 8 x 18 x 18; stride 2: 2 x 33 x 33
+var<workgroup> wt: array<vec4<A>, 288>; // channels x 9 x 4
 
-fn store(x: u32, y: u32, oc0: u32, slice: u32, a: array<vec4f, 4>) {
+fn store(x: u32, y: u32, oc0: u32, slice: u32, a: array<vec4<A>, 4>) {
     if x >= p.d_w || y >= p.d_h { return; }
     let dplane = p.d_w * p.d_h;
     for (var j = 0u; j < 4u; j++) {
@@ -199,10 +205,10 @@ fn store(x: u32, y: u32, oc0: u32, slice: u32, a: array<vec4f, 4>) {
             if oc >= p.d_c { return; }
             let at = oc * dplane + y * p.d_w + x;
             if (p.flags & PARTIAL) != 0u {
-                dst[slice * p.d_c * dplane + at] = v4[e];
+                dst[slice * p.d_c * dplane + at] = f32(v4[e]);
                 continue;
             }
-            var v = v4[e] + bias[oc];
+            var v = f32(v4[e]) + bias[oc];
             if (p.flags & RESIDUAL) != 0u { v = v + residual[at]; }
             dst[at] = activate(v, p.flags);
         }
@@ -228,22 +234,22 @@ fn conv1(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec3
     let cbeg = slice * per;
     let cend = min(cbeg + per, p.s_c);
     let splane = p.s_w * p.s_h;
-    var a000 = vec4f(0.0);
-    var a001 = vec4f(0.0);
-    var a002 = vec4f(0.0);
-    var a003 = vec4f(0.0);
-    var a010 = vec4f(0.0);
-    var a011 = vec4f(0.0);
-    var a012 = vec4f(0.0);
-    var a013 = vec4f(0.0);
-    var a100 = vec4f(0.0);
-    var a101 = vec4f(0.0);
-    var a102 = vec4f(0.0);
-    var a103 = vec4f(0.0);
-    var a110 = vec4f(0.0);
-    var a111 = vec4f(0.0);
-    var a112 = vec4f(0.0);
-    var a113 = vec4f(0.0);
+    var a000 = vec4<A>(0.0);
+    var a001 = vec4<A>(0.0);
+    var a002 = vec4<A>(0.0);
+    var a003 = vec4<A>(0.0);
+    var a010 = vec4<A>(0.0);
+    var a011 = vec4<A>(0.0);
+    var a012 = vec4<A>(0.0);
+    var a013 = vec4<A>(0.0);
+    var a100 = vec4<A>(0.0);
+    var a101 = vec4<A>(0.0);
+    var a102 = vec4<A>(0.0);
+    var a103 = vec4<A>(0.0);
+    var a110 = vec4<A>(0.0);
+    var a111 = vec4<A>(0.0);
+    var a112 = vec4<A>(0.0);
+    var a113 = vec4<A>(0.0);
     for (var c0 = cbeg; c0 < cend; c0 += ci) {
         for (var t = lin; t < ci * ts * ts; t += 64u) {
             let c = t / (ts * ts);
@@ -254,7 +260,7 @@ fn conv1(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec3
             if c0 + c < cend && ix >= 0 && iy >= 0 && ix < i32(p.s_w) && iy < i32(p.s_h) {
                 v = src[(p.s_off + c0 + c) * splane + u32(iy) * p.s_w + u32(ix)];
             }
-            tile[t] = v;
+            tile[t] = A(v);
         }
         for (var t = lin; t < ci * 9u * 4u; t += 64u) {
             let j = t % 4u;
@@ -267,7 +273,7 @@ fn conv1(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec3
                     if oc < p.d_c { v[e] = weight[(oc * p.s_c + c0 + c) * 9u + k]; }
                 }
             }
-            wt[t] = v;
+            wt[t] = vec4<A>(v);
         }
         workgroupBarrier();
         let n = min(ci, cend - c0);
@@ -493,10 +499,10 @@ fn conv1(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec3
         }
         workgroupBarrier();
     }
-    store(ox0 + l.x * 2u + 0u, oy0 + l.y * 2u + 0u, oc0, slice, array<vec4f, 4>(a000, a001, a002, a003));
-    store(ox0 + l.x * 2u + 1u, oy0 + l.y * 2u + 0u, oc0, slice, array<vec4f, 4>(a010, a011, a012, a013));
-    store(ox0 + l.x * 2u + 0u, oy0 + l.y * 2u + 1u, oc0, slice, array<vec4f, 4>(a100, a101, a102, a103));
-    store(ox0 + l.x * 2u + 1u, oy0 + l.y * 2u + 1u, oc0, slice, array<vec4f, 4>(a110, a111, a112, a113));
+    store(ox0 + l.x * 2u + 0u, oy0 + l.y * 2u + 0u, oc0, slice, array<vec4<A>, 4>(a000, a001, a002, a003));
+    store(ox0 + l.x * 2u + 1u, oy0 + l.y * 2u + 0u, oc0, slice, array<vec4<A>, 4>(a010, a011, a012, a013));
+    store(ox0 + l.x * 2u + 0u, oy0 + l.y * 2u + 1u, oc0, slice, array<vec4<A>, 4>(a100, a101, a102, a103));
+    store(ox0 + l.x * 2u + 1u, oy0 + l.y * 2u + 1u, oc0, slice, array<vec4<A>, 4>(a110, a111, a112, a113));
 }
 
 @compute @workgroup_size(8, 8)
@@ -518,22 +524,22 @@ fn conv2(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec3
     let cbeg = slice * per;
     let cend = min(cbeg + per, p.s_c);
     let splane = p.s_w * p.s_h;
-    var a000 = vec4f(0.0);
-    var a001 = vec4f(0.0);
-    var a002 = vec4f(0.0);
-    var a003 = vec4f(0.0);
-    var a010 = vec4f(0.0);
-    var a011 = vec4f(0.0);
-    var a012 = vec4f(0.0);
-    var a013 = vec4f(0.0);
-    var a100 = vec4f(0.0);
-    var a101 = vec4f(0.0);
-    var a102 = vec4f(0.0);
-    var a103 = vec4f(0.0);
-    var a110 = vec4f(0.0);
-    var a111 = vec4f(0.0);
-    var a112 = vec4f(0.0);
-    var a113 = vec4f(0.0);
+    var a000 = vec4<A>(0.0);
+    var a001 = vec4<A>(0.0);
+    var a002 = vec4<A>(0.0);
+    var a003 = vec4<A>(0.0);
+    var a010 = vec4<A>(0.0);
+    var a011 = vec4<A>(0.0);
+    var a012 = vec4<A>(0.0);
+    var a013 = vec4<A>(0.0);
+    var a100 = vec4<A>(0.0);
+    var a101 = vec4<A>(0.0);
+    var a102 = vec4<A>(0.0);
+    var a103 = vec4<A>(0.0);
+    var a110 = vec4<A>(0.0);
+    var a111 = vec4<A>(0.0);
+    var a112 = vec4<A>(0.0);
+    var a113 = vec4<A>(0.0);
     for (var c0 = cbeg; c0 < cend; c0 += ci) {
         for (var t = lin; t < ci * ts * ts; t += 64u) {
             let c = t / (ts * ts);
@@ -544,7 +550,7 @@ fn conv2(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec3
             if c0 + c < cend && ix >= 0 && iy >= 0 && ix < i32(p.s_w) && iy < i32(p.s_h) {
                 v = src[(p.s_off + c0 + c) * splane + u32(iy) * p.s_w + u32(ix)];
             }
-            tile[t] = v;
+            tile[t] = A(v);
         }
         for (var t = lin; t < ci * 9u * 4u; t += 64u) {
             let j = t % 4u;
@@ -557,7 +563,7 @@ fn conv2(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec3
                     if oc < p.d_c { v[e] = weight[(oc * p.s_c + c0 + c) * 9u + k]; }
                 }
             }
-            wt[t] = v;
+            wt[t] = vec4<A>(v);
         }
         workgroupBarrier();
         let n = min(ci, cend - c0);
@@ -783,10 +789,10 @@ fn conv2(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec3
         }
         workgroupBarrier();
     }
-    store(ox0 + l.x * 2u + 0u, oy0 + l.y * 2u + 0u, oc0, slice, array<vec4f, 4>(a000, a001, a002, a003));
-    store(ox0 + l.x * 2u + 1u, oy0 + l.y * 2u + 0u, oc0, slice, array<vec4f, 4>(a010, a011, a012, a013));
-    store(ox0 + l.x * 2u + 0u, oy0 + l.y * 2u + 1u, oc0, slice, array<vec4f, 4>(a100, a101, a102, a103));
-    store(ox0 + l.x * 2u + 1u, oy0 + l.y * 2u + 1u, oc0, slice, array<vec4f, 4>(a110, a111, a112, a113));
+    store(ox0 + l.x * 2u + 0u, oy0 + l.y * 2u + 0u, oc0, slice, array<vec4<A>, 4>(a000, a001, a002, a003));
+    store(ox0 + l.x * 2u + 1u, oy0 + l.y * 2u + 0u, oc0, slice, array<vec4<A>, 4>(a010, a011, a012, a013));
+    store(ox0 + l.x * 2u + 0u, oy0 + l.y * 2u + 1u, oc0, slice, array<vec4<A>, 4>(a100, a101, a102, a103));
+    store(ox0 + l.x * 2u + 1u, oy0 + l.y * 2u + 1u, oc0, slice, array<vec4<A>, 4>(a110, a111, a112, a113));
 }
 
 /// ncnn Deconvolution, kernel 4, stride 2, padding 1, bias, 24 outputs
@@ -799,17 +805,17 @@ fn conv2(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec3
 /// 8 channels at a time.
 
 const DCI: u32 = 8u;
-var<workgroup> dtile: array<f32, 800>; // DCI x 10 x 10
-var<workgroup> dwt: array<vec4f, 768>; // DCI x 16 taps x 6 (24 outputs)
+var<workgroup> dtile: array<A, 800>; // DCI x 10 x 10
+var<workgroup> dwt: array<vec4<A>, 768>; // DCI x 16 taps x 6 (24 outputs)
 
-fn dstore(x: u32, y: u32, a: array<vec4f, 6>) {
+fn dstore(x: u32, y: u32, a: array<vec4<A>, 6>) {
     if x >= p.d_w || y >= p.d_h { return; }
     let dplane = p.d_w * p.d_h;
     for (var j = 0u; j < 6u; j++) {
         let v4 = a[j];
         for (var e = 0u; e < 4u; e++) {
             let oc = j * 4u + e;
-            dst[oc * dplane + y * p.d_w + x] = v4[e] + bias[oc];
+            dst[oc * dplane + y * p.d_w + x] = f32(v4[e]) + bias[oc];
         }
     }
 }
@@ -820,30 +826,30 @@ fn deconv(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec
     let m = wg.y * 8u + l.y;
     let n = wg.x * 8u + l.x;
     let splane = p.s_w * p.s_h;
-    var o000 = vec4f(0.0);
-    var o001 = vec4f(0.0);
-    var o002 = vec4f(0.0);
-    var o003 = vec4f(0.0);
-    var o004 = vec4f(0.0);
-    var o005 = vec4f(0.0);
-    var o010 = vec4f(0.0);
-    var o011 = vec4f(0.0);
-    var o012 = vec4f(0.0);
-    var o013 = vec4f(0.0);
-    var o014 = vec4f(0.0);
-    var o015 = vec4f(0.0);
-    var o100 = vec4f(0.0);
-    var o101 = vec4f(0.0);
-    var o102 = vec4f(0.0);
-    var o103 = vec4f(0.0);
-    var o104 = vec4f(0.0);
-    var o105 = vec4f(0.0);
-    var o110 = vec4f(0.0);
-    var o111 = vec4f(0.0);
-    var o112 = vec4f(0.0);
-    var o113 = vec4f(0.0);
-    var o114 = vec4f(0.0);
-    var o115 = vec4f(0.0);
+    var o000 = vec4<A>(0.0);
+    var o001 = vec4<A>(0.0);
+    var o002 = vec4<A>(0.0);
+    var o003 = vec4<A>(0.0);
+    var o004 = vec4<A>(0.0);
+    var o005 = vec4<A>(0.0);
+    var o010 = vec4<A>(0.0);
+    var o011 = vec4<A>(0.0);
+    var o012 = vec4<A>(0.0);
+    var o013 = vec4<A>(0.0);
+    var o014 = vec4<A>(0.0);
+    var o015 = vec4<A>(0.0);
+    var o100 = vec4<A>(0.0);
+    var o101 = vec4<A>(0.0);
+    var o102 = vec4<A>(0.0);
+    var o103 = vec4<A>(0.0);
+    var o104 = vec4<A>(0.0);
+    var o105 = vec4<A>(0.0);
+    var o110 = vec4<A>(0.0);
+    var o111 = vec4<A>(0.0);
+    var o112 = vec4<A>(0.0);
+    var o113 = vec4<A>(0.0);
+    var o114 = vec4<A>(0.0);
+    var o115 = vec4<A>(0.0);
     for (var c0 = 0u; c0 < p.s_c; c0 += DCI) {
         for (var t = lin; t < DCI * 100u; t += 64u) {
             let c = t / 100u;
@@ -854,7 +860,7 @@ fn deconv(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec
             if c0 + c < p.s_c && ix >= 0 && iy >= 0 && ix < i32(p.s_w) && iy < i32(p.s_h) {
                 v = src[(c0 + c) * splane + u32(iy) * p.s_w + u32(ix)];
             }
-            dtile[t] = v;
+            dtile[t] = A(v);
         }
         for (var t = lin; t < DCI * 16u * 6u; t += 64u) {
             let j = t % 6u;
@@ -866,7 +872,7 @@ fn deconv(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec
                     v[e] = weight[((j * 4u + e) * p.s_c + c0 + c) * 16u + k];
                 }
             }
-            dwt[t] = v;
+            dwt[t] = vec4<A>(v);
         }
         workgroupBarrier();
         let nc = min(DCI, p.s_c - c0);
@@ -906,10 +912,10 @@ fn deconv(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec
         }
         workgroupBarrier();
     }
-    dstore(n * 2u + 0u, m * 2u + 0u, array<vec4f, 6>(o000, o001, o002, o003, o004, o005));
-    dstore(n * 2u + 1u, m * 2u + 0u, array<vec4f, 6>(o010, o011, o012, o013, o014, o015));
-    dstore(n * 2u + 0u, m * 2u + 1u, array<vec4f, 6>(o100, o101, o102, o103, o104, o105));
-    dstore(n * 2u + 1u, m * 2u + 1u, array<vec4f, 6>(o110, o111, o112, o113, o114, o115));
+    dstore(n * 2u + 0u, m * 2u + 0u, array<vec4<A>, 6>(o000, o001, o002, o003, o004, o005));
+    dstore(n * 2u + 1u, m * 2u + 0u, array<vec4<A>, 6>(o010, o011, o012, o013, o014, o015));
+    dstore(n * 2u + 0u, m * 2u + 1u, array<vec4<A>, 6>(o100, o101, o102, o103, o104, o105));
+    dstore(n * 2u + 1u, m * 2u + 1u, array<vec4<A>, 6>(o110, o111, o112, o113, o114, o115));
 }
 
 /// A block's end: its 24-channel deconvolution PixelShuffled (factor 2) to
