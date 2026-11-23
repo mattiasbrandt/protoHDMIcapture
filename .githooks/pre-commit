@@ -11,6 +11,15 @@ fi
 # into the build, so one build directory serves one tree only.
 tree="$(git rev-parse --absolute-git-dir)/precommit-tree"
 find "$tree" -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} + 2>/dev/null
+# Its first build starts from the checkout's own (a reflink copy shares the
+# blocks; no reflinks, no copy): only the crate and what its fresh checkout
+# touches compile, not every dependency again. A shared directory would be
+# wrong the other way: the working tree's older files would look built.
+if [ ! -d "$tree/target" ] && [ -d "$top/target" ]; then
+    mkdir -p "$tree"
+    nice -n 19 ionice -c3 cp -a --reflink=always "$top/target" "$tree/target" 2>/dev/null \
+        || rm -rf "$tree/target"
+fi
 mkdir -p "$tree" && git checkout-index -a --prefix="$tree/" || exit 1
 echo ":: pre-commit: checking the staged tree in $tree (unstaged or untracked changes left out)"
 # git ls-files in tools/check reads this index. git commit passes the index
