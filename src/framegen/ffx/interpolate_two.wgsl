@@ -148,6 +148,8 @@ struct Try {
     b: vec4f,
     next_agrees: bool,
     prev_agrees: bool,
+    // Within the largest motion and off the HUD mask: may be used at all.
+    trusted: bool,
     mismatch: f32,
 }
 
@@ -165,6 +167,7 @@ fn attempt(y: vec2f, u: vec2f) -> Try {
     // A moving sample taken from the mask would drag the HUD (ip.use_mask).
     let off_mask = ip.use_mask == 0u || dot(u, u) < 0.25 || !(masked(y - half_u) || masked(y + half_u));
     let trusted = dot(u, u) <= ip.max_motion * ip.max_motion && off_mask;
+    t.trusted = trusted;
     t.next_agrees = trusted && length(nearest_n(y + half_u) + u) <= tolerance;
     t.prev_agrees = trusted && length(nearest_p(y - half_u) - u) <= tolerance;
     let d = abs(t.a.rgb - t.b.rgb);
@@ -234,6 +237,11 @@ fn warped(y: vec2f, vn: vec2f, at_next: vec4f) -> vec4f {
     // by a switch between motions (the shredding, #73).
     var sum = vec3f(0.0);
     var total = 0.0;
+    // Where no motion is seen at either end, the trusted motions by how
+    // well their two samples match alone: the region's best guess, not
+    // the forward flow's one answer (#73).
+    var fit_sum = vec3f(0.0);
+    var fit_total = 0.0;
     for (var i = 0; i < 4; i++) {
         let t = attempt(y, motions[i]);
         let fit = exp(-t.mismatch / MATCH_SIGMA);
@@ -247,9 +255,16 @@ fn warped(y: vec2f, vn: vec2f, at_next: vec4f) -> vec4f {
             sum += ONE_SIDED * t.a.rgb;
             total += ONE_SIDED;
         }
+        if (t.trusted) {
+            fit_sum += (fit + 1e-4) * 0.5 * (t.a.rgb + t.b.rgb);
+            fit_total += fit + 1e-4;
+        }
     }
     if (total > 0.0) {
         return vec4f(sum / total, 1.0);
+    }
+    if (fit_total > 0.0) {
+        return vec4f(fit_sum / fit_total, 1.0);
     }
     return vec4f(one_way(y, at_next).rgb, 1.0);
 }

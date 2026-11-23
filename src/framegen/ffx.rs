@@ -105,8 +105,13 @@ const HUD_FRAMES: u32 = 3;
 const MIN_LEVEL_SIDE: u32 = 8;
 /// Motion beyond this (frame pixels between the two frames) is not
 /// believed and blends the frames unmoved: afmf-linux's value, half of
-/// what its search reaches at half resolution.
+/// what its search reaches at half resolution (`ffx`).
 const MAX_MOTION: f32 = 128.0;
+/// `ffx-quality`'s: its search, at full resolution with a 16-pixel window
+/// above level 0, reaches about 1000 frame pixels, and 128 threw away
+/// the motions of a fast camera turn it had found and both flows agreed
+/// on (#73, the driving clip).
+const MAX_MOTION_TWO_WAY: f32 = 256.0;
 /// A pixel equal in both frames within this on a moving block is a HUD and
 /// is kept (afmf-linux's default, one 8-bit step).
 const HUD: f32 = 1.0 / 255.0;
@@ -339,7 +344,7 @@ impl State {
                 f(luma_scale as f32),
                 i(out_size.0),
                 i(out_size.1),
-                f(MAX_MOTION),
+                f(if q.two_way { MAX_MOTION_TWO_WAY } else { MAX_MOTION }),
                 f(HUD),
                 i(size.0.div_ceil(8)),
                 i(size.1.div_ceil(8)),
