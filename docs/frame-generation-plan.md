@@ -16,6 +16,11 @@ Out of scope:
 - Copying code whose licence does not allow it. Reading any of it to learn
   from is fine; a port keeps the source's notice.
 - protoHDMIcapture legacy: neither feature is brought to view.sh.
+- Recording for users. The dev recorder (#64) exists only in dev builds,
+  and its clips are development files in `/var/tmp`. If recording ever
+  becomes a user feature, its files go to the user's Videos folder
+  (`XDG_VIDEOS_DIR` on Linux, the Videos library on Windows), under
+  `protoHDMIcapture/`.
 
 ## What ships (once a winner exists)
 
