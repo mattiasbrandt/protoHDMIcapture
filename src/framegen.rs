@@ -25,8 +25,9 @@
 //! - **A generator** writes the picture halfway between two new frames,
 //!   the convert pass's RGB frames at the capture's size, before scaling.
 //!   Copy (the last new frame again) is for the wiring and its tests;
-//!   blend (#67, half and half) is round one's baseline; the others come
-//!   on their own branches (#68).
+//!   blend (#67, half and half) is round one's baseline; `Ffx`, FidelityFX
+//!   optical flow (#68, framegen/ffx.rs), and the others come on their own
+//!   branches, gathered here on the judging branch (#83).
 //!
 //! The user-facing setting (FRAMEGEN), its key and its overlay row come
 //! with the generator that wins round one; until then the mode is a dev
@@ -34,8 +35,6 @@
 //! seam is compiled and tested there, but nothing reaches it.
 #![cfg_attr(not(feature = "dev"), allow(dead_code))]
 
-// Wired into `Mode` in the next commit (#68).
-#[allow(dead_code)]
 mod ffx;
 
 use crate::duplicate::{Cadence, Kind};
@@ -52,17 +51,21 @@ pub enum Mode {
     Blend,
     /// No generator: each new frame once, duplicates not presented.
     NewOnly,
+    /// AMD FidelityFX Optical Flow and an interpolation along it (#68,
+    /// framegen/ffx.rs).
+    Ffx,
 }
 
 impl Mode {
     /// Every mode, as `--framegen` names them.
-    pub const ALL: [Mode; 3] = [Mode::Copy, Mode::Blend, Mode::NewOnly];
+    pub const ALL: [Mode; 4] = [Mode::Copy, Mode::Blend, Mode::NewOnly, Mode::Ffx];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Mode::Copy => "copy",
             Mode::Blend => "blend",
             Mode::NewOnly => "new-only",
+            Mode::Ffx => "ffx",
         }
     }
 
@@ -76,7 +79,7 @@ impl Mode {
     /// The mode runs a generator on the GPU.
     pub fn generates(self) -> bool {
         match self {
-            Mode::Copy | Mode::Blend => true,
+            Mode::Copy | Mode::Blend | Mode::Ffx => true,
             Mode::NewOnly => false,
         }
     }
@@ -88,7 +91,7 @@ impl Mode {
     pub fn judged(self) -> bool {
         match self {
             Mode::Copy | Mode::NewOnly => false,
-            Mode::Blend => true,
+            Mode::Blend | Mode::Ffx => true,
         }
     }
 }
@@ -333,6 +336,7 @@ pub fn generator(mode: Mode, device: &wgpu::Device) -> Option<Box<dyn Generator>
         Mode::Copy => Some(Box::new(OnePass::copy(device))),
         Mode::Blend => Some(Box::new(OnePass::blend(device))),
         Mode::NewOnly => None,
+        Mode::Ffx => Some(Box::new(ffx::Ffx::new(device))),
     }
 }
 
@@ -418,6 +422,17 @@ mod tests {
     }
 
     #[test]
+    fn every_generating_mode_follows_the_same_schedule() {
+        let mut kinds = two_two(8);
+        kinds.extend([N, D, D, N, N]);
+        kinds.extend(two_two(8));
+        for m in Mode::ALL.into_iter().filter(|m| m.generates()) {
+            assert_eq!(run(m, &kinds), run(Mode::Copy, &kinds), "{m:?}");
+            assert!(run(m, &kinds).contains(&Show::Generated), "{m:?}");
+        }
+    }
+
+    #[test]
     fn the_first_two_frames_are_real() {
         assert_eq!(run(Mode::Copy, &[N, D]), [Show::Real, Show::Real]);
     }
@@ -472,8 +487,8 @@ mod tests {
     /// taking all but the one at `skip` (the slot superseded it: run.rs
     /// `Slot::put`, which keeps a superseded new frame's kind on the frame
     /// that replaced it): what the window shows for each frame it took.
-    fn window(kinds: &[Kind], skip: Option<usize>) -> Vec<Step> {
-        let (mut s, mut c) = (Schedule::new(Mode::Copy), Capture::new());
+    fn window(mode: Mode, kinds: &[Kind], skip: Option<usize>) -> Vec<Step> {
+        let (mut s, mut c) = (Schedule::new(mode), Capture::new());
         let mut waiting: Option<Kind> = None;
         let mut steps = Vec::new();
         for (i, &k) in kinds.iter().enumerate() {
@@ -493,31 +508,44 @@ mod tests {
         steps.iter().filter(|s| s.show == Show::Generated || s.missed).count()
     }
 
+    /// Every mode that runs a generator: the schedule's rules are theirs.
+    fn generating() -> impl Iterator<Item = Mode> {
+        Mode::ALL.into_iter().filter(|m| m.generates())
+    }
+
     #[test]
     fn a_superseded_duplicate_costs_one_generated_frame_and_is_counted() {
-        let kinds = two_two(60);
-        let all = generated_and_missed(&window(&kinds, None));
-        // A duplicate superseded mid-run (#78): the window takes the next
-        // new frame a refresh late.
-        let steps = window(&kinds, Some(61));
-        assert_eq!(generated_and_missed(&steps), all, "{steps:?}");
-        assert_eq!(steps.iter().filter(|s| s.missed).count(), 1, "{steps:?}");
-        // The new frame its generated frame held still shows, on the late
-        // new frame's refresh, which is held in its turn. Card frames 58 to
-        // 64, 61 superseded: Generated, Held, Generated, (61), Held (60's
-        // new frame), Held (62's), Generated: 2:2 as before.
-        let shows: Vec<Show> = steps[58..64].iter().map(|s| s.show).collect();
-        assert_eq!(shows, [Show::Generated, Show::Held, Show::Generated, Show::Held, Show::Held, Show::Generated], "{steps:?}");
-        assert!(steps[61].missed, "the late new frame's generated frame is the one missed");
+        for mode in generating() {
+            let kinds = two_two(60);
+            let all = generated_and_missed(&window(mode, &kinds, None));
+            // A duplicate superseded mid-run (#78): the window takes the next
+            // new frame a refresh late.
+            let steps = window(mode, &kinds, Some(61));
+            assert_eq!(generated_and_missed(&steps), all, "{mode:?}: {steps:?}");
+            assert_eq!(steps.iter().filter(|s| s.missed).count(), 1, "{mode:?}: {steps:?}");
+            // The new frame its generated frame held still shows, on the late
+            // new frame's refresh, which is held in its turn. Card frames 58 to
+            // 64, 61 superseded: Generated, Held, Generated, (61), Held (60's
+            // new frame), Held (62's), Generated: 2:2 as before.
+            let shows: Vec<Show> = steps[58..64].iter().map(|s| s.show).collect();
+            assert_eq!(
+                shows,
+                [Show::Generated, Show::Held, Show::Generated, Show::Held, Show::Held, Show::Generated],
+                "{mode:?}: {steps:?}"
+            );
+            assert!(steps[61].missed, "{mode:?}: the late new frame's generated frame is the one missed");
+        }
     }
 
     #[test]
     fn a_superseded_new_frame_costs_one_generated_frame_and_is_counted() {
-        let kinds = two_two(60);
-        let all = generated_and_missed(&window(&kinds, None));
-        let steps = window(&kinds, Some(60));
-        assert_eq!(generated_and_missed(&steps), all, "{steps:?}");
-        assert_eq!(steps.iter().filter(|s| s.missed).count(), 1, "{steps:?}");
+        for mode in generating() {
+            let kinds = two_two(60);
+            let all = generated_and_missed(&window(mode, &kinds, None));
+            let steps = window(mode, &kinds, Some(60));
+            assert_eq!(generated_and_missed(&steps), all, "{mode:?}: {steps:?}");
+            assert_eq!(steps.iter().filter(|s| s.missed).count(), 1, "{mode:?}: {steps:?}");
+        }
     }
 
     #[test]
@@ -644,17 +672,10 @@ mod tests {
     }
 
     #[test]
-    fn every_generating_mode_follows_the_same_schedule() {
-        let kinds = two_two(10);
-        assert_eq!(run(Mode::Blend, &kinds), run(Mode::Copy, &kinds));
-        assert!(run(Mode::Blend, &kinds).contains(&Show::Generated));
-    }
-
-    #[test]
     fn the_flag_names_every_mode() {
         for m in Mode::ALL {
             assert_eq!(Mode::from_flag(m.as_str()), Ok(m));
         }
-        assert!(Mode::from_flag("warp").unwrap_err().contains("copy or blend or new-only"));
+        assert!(Mode::from_flag("warp").unwrap_err().contains("copy or blend or new-only or ffx"));
     }
 }

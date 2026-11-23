@@ -163,8 +163,6 @@ struct State {
     flow_sizes: Vec<(u32, u32)>,
     /// Per level: [0] the new frame's luma, [1] the previous frame's.
     luma: [Vec<wgpu::Buffer>; 2],
-    /// Per level: the search's vectors (seeded by the coarser level).
-    flow_searched: Vec<wgpu::Buffer>,
     /// Per level: the filtered vectors; level 0's is the flow.
     flow_filtered: Vec<wgpu::Buffer>,
     histogram: wgpu::Buffer,
@@ -206,6 +204,8 @@ impl State {
                 .map(|(l, (w, h))| storage(device, &format!("ffx flow {which} {l}"), u64::from(w * h) * 8))
                 .collect()
         };
+        // The search's vectors per level (seeded by the coarser level):
+        // held by the bind groups below, read by nothing else.
         let (flow_searched, flow_filtered) = (flows("searched"), flows("filtered"));
         let histogram = storage(device, "ffx histogram", HISTOGRAM_BINS * 4);
         let previous_histogram = storage(device, "ffx previous histogram", HISTOGRAM_BINS * 4);
@@ -279,7 +279,6 @@ impl State {
             luma_sizes,
             flow_sizes,
             luma,
-            flow_searched,
             flow_filtered,
             histogram,
             previous_histogram,
@@ -715,5 +714,41 @@ mod tests {
             .collect();
         let blend_exact = blend.iter().zip(&want).filter(|(a, b)| a == b).count();
         assert!(blend_exact * 2 < got.len(), "the test tells motion from a blend: {blend_exact} of {}", got.len());
+    }
+
+    /// The generator's GPU time at 1080p, as `--stats` measures it
+    /// (`cargo test --release -- --ignored gpu_ffx_time --nocapture`).
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn gpu_ffx_time_at_1080p() {
+        let rig = Rig::new((1920, 1080), wgpu::Features::TIMESTAMP_QUERY);
+        let Some(mut timer) = crate::gputime::GpuTimer::new(&rig.device, &rig.queue) else {
+            eprintln!("this GPU cannot time passes");
+            return;
+        };
+        let mut ffx = Ffx::new(&rig.device);
+        let (w, h) = rig.size;
+        let (prev, next) = (rig.frame(&picture(w, h, (0, 0), 7, 0, 256)), rig.frame(&picture(w, h, (8, 4), 7, 0, 256)));
+        let out = rig.texture(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+        let views = [&prev, &next, &out].map(|t| t.create_view(&Default::default()));
+        let mut times = Vec::new();
+        for _ in 0..60 {
+            timer.arm();
+            let mut encoder = rig.device.create_command_encoder(&Default::default());
+            let frames = Pair { prev: &views[0], next: &views[1], out: &views[2] };
+            assert!(ffx.generate(&rig.device, &rig.queue, &mut encoder, frames, timer.generate()));
+            timer.resolve(&mut encoder);
+            rig.queue.submit([encoder.finish()]);
+            timer.submitted();
+            rig.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            if let Some(t) = timer.take().unwrap()
+                && let Some(g) = t.generate
+            {
+                times.push(g);
+            }
+        }
+        times.sort();
+        assert!(!times.is_empty(), "timed at least once");
+        eprintln!("ffx at 1920x1080: median {:?}, p90 {:?}, {} frames", times[times.len() / 2], times[times.len() * 9 / 10], times.len());
     }
 }
