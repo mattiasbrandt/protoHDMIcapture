@@ -33,6 +33,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::capture::{self, Event, Format, FrameSource, Mark, Pixels, Raw, Stream, now_monotonic};
+use crate::duplicate::{Detector, Kind, Scores};
 use crate::run::Quit;
 
 /// Where `--record` writes its clips.
@@ -315,6 +316,10 @@ pub struct FrameNote {
     pub captured: Duration,
     pub dequeued: Duration,
     pub luma: f64,
+    /// New or duplicate (duplicate.rs), and the detector's scores against
+    /// the last new frame, for tuning its thresholds (#66).
+    pub kind: Kind,
+    pub scores: Scores,
 }
 
 /// What a recording did, for the report.
@@ -328,6 +333,9 @@ pub struct Recorded {
     pub behind: u64,
     /// The mean luma per second, as `Luma::line` writes it.
     pub luma: String,
+    /// New frames (duplicate.rs): a recording of a game left idle is all
+    /// duplicates.
+    pub new: u64,
     /// Each frame, in clip order.
     pub per_frame: Vec<FrameNote>,
 }
@@ -380,6 +388,9 @@ pub fn metadata(about: &About, recorded: &str, seconds: u64, header: Header, r: 
                 "captured_ns": f.captured.as_nanos() as u64,
                 "dequeued_ns": f.dequeued.as_nanos() as u64,
                 "luma": (f.luma * 100.0).round() / 100.0,
+                "kind": match f.kind { Kind::New => "new", Kind::Duplicate => "duplicate" },
+                "largest_block": f.scores.largest,
+                "over_lo": (f.scores.over_lo * 10_000.0).round() / 10_000.0,
             })
         })
         .collect();
@@ -391,9 +402,23 @@ pub fn metadata(about: &About, recorded: &str, seconds: u64, header: Header, r: 
         "card": { "name": about.card, "usb_id": about.usb_id },
         "format": { "width": header.width, "height": header.height, "fps": header.fps, "fmt": header.pixels.setting() },
         "settings": settings,
-        "totals": { "frames": r.frames, "gaps": r.gaps, "behind": r.behind, "length_s": r.length.as_secs_f64() },
+        "totals": { "frames": r.frames, "new": r.new, "gaps": r.gaps, "behind": r.behind, "length_s": r.length.as_secs_f64() },
         "frames": frames,
     })
+}
+
+/// The report's line on new frames (duplicate.rs): a game left idle, or a
+/// source that dimmed to a still screen, sends only duplicates, and its
+/// clip shows nothing to generate frames from.
+fn new_share(r: &Recorded) -> String {
+    let share = if r.frames == 0 { 0.0 } else { r.new as f64 / r.frames as f64 * 100.0 };
+    let line = format!("new frames: {} of {} ({share:.0}%)", r.new, r.frames);
+    // Two frames is the first and one more: nothing moved after the start.
+    if r.frames > 2 && r.new * 20 < r.frames {
+        format!("{line}; warning: almost all duplicates, the picture hardly moved (idle, or dimmed)")
+    } else {
+        line
+    }
 }
 
 /// `<dir>/<name>.json` for the clip `<dir>/<name>.clip`.
@@ -431,6 +456,7 @@ pub fn record_into(source: &mut dyn FrameSource, path: &Path, stop: &AtomicBool)
     let interval = Duration::from_secs_f64(1.0 / format.fps.max(1.0));
     let mut done = Recorded::default();
     let mut luma = Luma::default();
+    let mut detector = Detector::new(format.width, format.height);
     let (mut first, mut last) = (None, Duration::ZERO);
     let mut failed: Option<io::Error> = None;
     let dropped = capture::Dropped::default();
@@ -449,7 +475,11 @@ pub fn record_into(source: &mut dyn FrameSource, path: &Path, stop: &AtomicBool)
                 first.get_or_insert(f.captured);
                 last = f.captured;
                 let mean = luma.add(f.captured, f.data);
-                done.per_frame.push(FrameNote { captured: f.captured, dequeued: f.dequeued, luma: mean });
+                let (kind, scores) = detector.classify_scored(f.data);
+                if kind == Kind::New {
+                    done.new += 1;
+                }
+                done.per_frame.push(FrameNote { captured: f.captured, dequeued: f.dequeued, luma: mean, kind, scores });
                 w
             }
             Event::Gap { from, to, lost } => {
@@ -523,6 +553,7 @@ pub fn record(mut source: Box<dyn FrameSource>, dir: &Path, name: &str, seconds:
         eprintln!("warning: {} frames took longer than a frame interval to write: the disk fell behind", r.behind);
     }
     eprintln!("mean luma per second: {}", r.luma);
+    eprintln!("{}", new_share(&r));
     eprintln!("metadata: {}", meta.display());
     Ok(())
 }
@@ -739,6 +770,81 @@ mod tests {
             thread::sleep(ms(2));
             Ok(())
         }
+    }
+
+    /// A 2:2 source (a 30 fps game in a 60 Hz signal): each picture twice,
+    /// the pictures far apart, `n` card frames.
+    struct TwoTwo {
+        format: Format,
+        n: u32,
+    }
+
+    impl FrameSource for TwoTwo {
+        fn format(&self) -> Format {
+            self.format
+        }
+
+        fn start(&mut self) -> io::Result<Box<dyn Stream + '_>> {
+            Ok(Box::new(TwoTwoStream { size: self.format.frame_size(), sent: 0, n: self.n }))
+        }
+    }
+
+    struct TwoTwoStream {
+        size: usize,
+        sent: u32,
+        n: u32,
+    }
+
+    impl Stream for TwoTwoStream {
+        fn next(&mut self, wait: Duration, take: &mut dyn FnMut(Raw<'_>)) -> io::Result<()> {
+            if self.sent >= self.n {
+                thread::sleep(wait.min(ms(5)));
+                return Ok(());
+            }
+            let picture = (self.sent / 2) as u8;
+            let data: Vec<u8> = [16 + picture.wrapping_mul(50), 128].repeat(self.size / 2);
+            let t = now_monotonic();
+            take(Raw { data: &data, captured: t, dequeued: t, mark: Mark::Sequence(self.sent), flagged: false });
+            self.sent += 1;
+            thread::sleep(ms(1));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_recording_tells_new_frames_from_duplicates_and_scores_them() {
+        let d = dir();
+        let path = d.join("twotwo.clip");
+        let format = Format { width: 64, height: 16, ..FORMAT };
+        let mut source = TwoTwo { format, n: 8 };
+        let stop = AtomicBool::new(false);
+        let r = thread::scope(|s| {
+            s.spawn(|| {
+                thread::sleep(ms(150));
+                stop.store(true, Ordering::Relaxed);
+            });
+            record_into(&mut source, &path, &stop).unwrap()
+        });
+        assert_eq!((r.frames, r.new), (8, 4));
+        assert_eq!(new_share(&r), "new frames: 4 of 8 (50%)");
+        let json = metadata(&About::default(), "", 1, Header::of(format), &r);
+        assert_eq!(json["totals"]["new"], 4);
+        let frames = json["frames"].as_array().unwrap();
+        let kinds: Vec<_> = frames.iter().map(|f| f["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["new", "duplicate"].repeat(4));
+        // Against the last new frame: a duplicate scores 0, a new picture
+        // 50 a pixel, 3200 a block, every block over LO.
+        assert_eq!((frames[1]["largest_block"].as_u64(), frames[1]["over_lo"].as_f64()), (Some(0), Some(0.0)));
+        assert_eq!((frames[2]["largest_block"].as_u64(), frames[2]["over_lo"].as_f64()), (Some(3200), Some(1.0)));
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn a_recording_that_hardly_moved_is_flagged() {
+        let r = Recorded { frames: 600, new: 3, ..Default::default() };
+        assert!(new_share(&r).contains("warning: almost all duplicates"), "{}", new_share(&r));
+        let r = Recorded { frames: 600, new: 300, ..Default::default() };
+        assert!(!new_share(&r).contains("warning"));
     }
 
     #[test]

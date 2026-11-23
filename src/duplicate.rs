@@ -43,6 +43,16 @@ pub enum Kind {
     Duplicate,
 }
 
+/// What the detector measured on a frame against the last new frame: the
+/// largest 8×8 block's sum of absolute luma differences, and the share of
+/// blocks over `LO` (0 for the first frame, which has nothing to compare
+/// with). For tuning `HI`, `LO` and `FRAC` from a recording.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Scores {
+    pub largest: u32,
+    pub over_lo: f64,
+}
+
 /// The detector: the last new frame's luma, and the block sums' scratch.
 pub struct Detector {
     width: usize,
@@ -62,17 +72,33 @@ impl Detector {
     /// One YUYV frame (packed rows, `width * 2` bytes each: Y0 U Y1 V).
     /// Only whole 8×8 blocks are compared; a strip of fewer than 8 pixels at
     /// the right or bottom edge is not (none at 1920×1080 or 1280×720).
+    /// Stops at the first block that settles it.
     pub fn classify(&mut self, yuyv: &[u8]) -> Kind {
+        self.compare(yuyv, false).0
+    }
+
+    /// As `classify`, with every block compared for the scores (the
+    /// recording's metadata, #66, a dev build's): slower, the same verdict.
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))]
+    pub fn classify_scored(&mut self, yuyv: &[u8]) -> (Kind, Scores) {
+        self.compare(yuyv, true)
+    }
+
+    /// The verdict, and the scores of the blocks compared: all of them when
+    /// `full`, else up to the one that settled it.
+    fn compare(&mut self, yuyv: &[u8], full: bool) -> (Kind, Scores) {
         let (w, h) = (self.width, self.height);
         assert_eq!(yuyv.len(), w * h * 2, "a frame of the detector's size");
         if self.reference.len() != w * h {
             self.keep(yuyv);
-            return Kind::New;
+            return (Kind::New, Scores::default());
         }
         let blocks = (w / BLOCK) * (h / BLOCK);
         let allowed = (FRAC * blocks as f64) as usize;
         let mut over_lo = 0usize;
-        for by in 0..h / BLOCK {
+        let mut largest = 0u32;
+        let mut new = false;
+        'rows: for by in 0..h / BLOCK {
             self.sums.iter_mut().for_each(|s| *s = 0);
             for y in by * BLOCK..(by + 1) * BLOCK {
                 let row = &yuyv[y * w * 2..(y + 1) * w * 2];
@@ -88,20 +114,25 @@ impl Detector {
                 }
             }
             for &sum in &self.sums {
-                if sum > HI {
-                    self.keep(yuyv);
-                    return Kind::New;
-                }
+                largest = largest.max(sum);
                 if sum > LO {
                     over_lo += 1;
-                    if over_lo > allowed {
-                        self.keep(yuyv);
-                        return Kind::New;
+                }
+                if sum > HI || over_lo > allowed {
+                    new = true;
+                    if !full {
+                        break 'rows;
                     }
                 }
             }
         }
-        Kind::Duplicate
+        let scores = Scores { largest, over_lo: if blocks == 0 { 0.0 } else { over_lo as f64 / blocks as f64 } };
+        if new {
+            self.keep(yuyv);
+            (Kind::New, scores)
+        } else {
+            (Kind::Duplicate, scores)
+        }
     }
 
     /// The frame becomes the reference.
@@ -285,6 +316,22 @@ mod tests {
         assert_eq!(d.classify(&picture(1)), D);
         assert_eq!(d.classify(&picture(2)), N);
         assert_eq!(d.classify(&picture(2)), D);
+    }
+
+    #[test]
+    fn the_scored_verdict_is_classifys_with_every_block_scored() {
+        let (mut quick, mut full) = (detector(), detector());
+        let frames = [picture(1), picture(1), flat(100), flat(100), picture(2), flat(102), flat(100)];
+        for f in &frames {
+            let (kind, scores) = full.classify_scored(f);
+            assert_eq!(kind, quick.classify(f));
+            assert!(scores.over_lo >= 0.0 && scores.over_lo <= 1.0);
+        }
+        // flat(102) against flat(100): 2 a pixel, 128 a block, every block.
+        let mut d = detector();
+        d.classify(&flat(100));
+        assert_eq!(d.classify_scored(&flat(102)), (D, Scores { largest: 128, over_lo: 0.0 }));
+        assert_eq!(d.classify_scored(&flat(110)).1, Scores { largest: 640, over_lo: 1.0 });
     }
 
     #[test]
