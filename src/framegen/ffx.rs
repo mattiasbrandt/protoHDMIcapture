@@ -18,7 +18,10 @@
 //!   vector median, and the scale-up that seeds the next finer level;
 //!   `ffx-quality` then refines level 0's 8x8 vectors to 4x4 blocks and
 //!   takes their median again.
-//! - **Interpolation** into the output, a render pass at the frames' size.
+//! - **Interpolation** into the output, a render pass at the frames' size;
+//!   `ffx-quality` searches the flow both ways (the previous frame's
+//!   blocks into the new frame too) and interpolates knowing which frame
+//!   sees a region (interpolate_two.wgsl).
 //!
 //! What differs from the SDK, and why:
 //! - **No wave (subgroup) operations.** The SDK reduces with wave sums and
@@ -73,13 +76,19 @@ pub struct Quality {
     /// 2): a block that straddles a motion edge no longer drags one side
     /// along with the other.
     pub refine: bool,
+    /// The flow both ways, and an interpolation that knows which frame
+    /// sees a region (interpolate_two.wgsl, #73 step 3): where an object
+    /// uncovers or covers the background, the frame that shows it is
+    /// used alone, instead of a blend of the background with the object
+    /// (the halo around moving edges).
+    pub two_way: bool,
 }
 
 impl Quality {
     /// `ffx`: #68's generator, unchanged.
-    pub const FAST: Self = Self { scale: 2, radius: 8, refine: false };
+    pub const FAST: Self = Self { scale: 2, radius: 8, refine: false, two_way: false };
     /// `ffx-quality`.
-    pub const BEST: Self = Self { scale: 1, radius: 16, refine: true };
+    pub const BEST: Self = Self { scale: 1, radius: 16, refine: true, two_way: true };
 }
 /// The coarsest level is at least this many luma pixels on its short side
 /// (the search reads 4-pixel words and 8x8 blocks).
@@ -194,6 +203,9 @@ struct Pipelines {
     refine: wgpu::ComputePipeline,
     interpolate: wgpu::RenderPipeline,
     interpolate_layout: wgpu::BindGroupLayout,
+    /// `Quality::two_way`: interpolate_two.wgsl, and its layout (the
+    /// backward flow at binding 6).
+    interpolate_two: Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
     sampler: wgpu::Sampler,
 }
 
@@ -208,8 +220,6 @@ struct State {
     flow_sizes: Vec<(u32, u32)>,
     /// Per level: [0] the new frame's luma, [1] the previous frame's.
     luma: [Vec<wgpu::Buffer>; 2],
-    /// Per level: the filtered vectors; level 0's is the flow.
-    flow_filtered: Vec<wgpu::Buffer>,
     histogram: wgpu::Buffer,
     previous_histogram: wgpu::Buffer,
     filtered_histogram: wgpu::Buffer,
@@ -222,6 +232,18 @@ struct State {
     /// Per frame: its histograms.
     histograms: [wgpu::BindGroup; 2],
     divergence: wgpu::BindGroup,
+    /// The flow from the new frame back to the previous one, and with
+    /// `Quality::two_way` from the previous frame on to the new one.
+    dirs: Vec<Direction>,
+}
+
+/// One direction's flow: the search from one frame's luma into the
+/// other's, level by level. Forward (the SDK's): the new frame's blocks,
+/// previous = new + v. Backward (#73 step 3): the previous frame's
+/// blocks, new = previous + w.
+struct Direction {
+    /// Per level: the filtered vectors; level 0's is the flow.
+    flow_filtered: Vec<wgpu::Buffer>,
     search: Vec<wgpu::BindGroup>,
     filter: Vec<wgpu::BindGroup>,
     /// Per level from 1: the scale-up into the level below.
@@ -229,6 +251,14 @@ struct State {
     /// With `Quality::refine`: the 4x4 flow's size, its refinement and
     /// median, and the buffer the interpolation reads.
     fine: Option<Fine>,
+}
+
+impl Direction {
+    /// The flow the interpolation reads: the 4x4 one when refined
+    /// (`interpolate_params` says its size and block).
+    fn output(&self) -> &wgpu::Buffer {
+        self.fine.as_ref().map_or(&self.flow_filtered[0], |f| &f.flow)
+    }
 }
 
 /// Level 0's flow at 4x4 blocks (`Quality::refine`).
@@ -254,16 +284,6 @@ impl State {
                 .collect()
         };
         let luma = [luma_buffers("new"), luma_buffers("previous")];
-        let flows = |which: &str| -> Vec<wgpu::Buffer> {
-            flow_sizes
-                .iter()
-                .enumerate()
-                .map(|(l, (w, h))| storage(device, &format!("ffx flow {which} {l}"), u64::from(w * h) * 8))
-                .collect()
-        };
-        // The search's vectors per level (seeded by the coarser level):
-        // held by the bind groups below, read by nothing else.
-        let (flow_searched, flow_filtered) = (flows("searched"), flows("filtered"));
         let histogram = storage(device, "ffx histogram", HISTOGRAM_BINS * 4);
         let previous_histogram = storage(device, "ffx previous histogram", HISTOGRAM_BINS * 4);
         let filtered_histogram = storage(device, "ffx filtered histogram", HISTOGRAM_BINS * 4);
@@ -311,56 +331,82 @@ impl State {
             [0, 1].map(|f| bind(device, &p.histogram, "ffx histogram", &[b(&level_params[0].0), b(&luma[f][0]), b(&histogram)]));
         let divergence =
             bind(device, &p.divergence, "ffx divergence", &[b(&histogram), b(&previous_histogram), b(&filtered_histogram), b(&scd)]);
-        let search = (0..n as usize)
-            .map(|l| {
-                bind(
-                    device,
-                    p.search_at(l),
-                    "ffx search",
-                    &[b(&level_params[l].0), b(&luma[0][l]), b(&luma[1][l]), b(&flow_searched[l]), b(&scd)],
-                )
+        // Forward searches the new frame's luma (0) in the previous one's
+        // (1); backward the other way round.
+        let dirs = [(0, 1, "forward"), (1, 0, "backward")][..if q.two_way { 2 } else { 1 }]
+            .iter()
+            .map(|&(cur, prev, which)| {
+                let flows = |what: &str| -> Vec<wgpu::Buffer> {
+                    flow_sizes
+                        .iter()
+                        .enumerate()
+                        .map(|(l, (w, h))| storage(device, &format!("ffx flow {which} {what} {l}"), u64::from(w * h) * 8))
+                        .collect()
+                };
+                // The search's vectors per level (seeded by the coarser
+                // level): held by the bind groups below, read by nothing
+                // else.
+                let (flow_searched, flow_filtered) = (flows("searched"), flows("filtered"));
+                let search = (0..n as usize)
+                    .map(|l| {
+                        bind(
+                            device,
+                            p.search_at(l),
+                            "ffx search",
+                            &[b(&level_params[l].0), b(&luma[cur][l]), b(&luma[prev][l]), b(&flow_searched[l]), b(&scd)],
+                        )
+                    })
+                    .collect();
+                let filter = (0..n as usize)
+                    .map(|l| bind(device, &p.filter, "ffx filter", &[b(&level_params[l].0), b(&flow_searched[l]), b(&flow_filtered[l])]))
+                    .collect();
+                let scale = (1..n as usize)
+                    .map(|l| {
+                        bind(
+                            device,
+                            &p.scale,
+                            "ffx scale",
+                            &[
+                                b(&level_params[l].0),
+                                b(&luma[cur][l]),
+                                b(&luma[prev][l]),
+                                b(&flow_filtered[l]),
+                                b(&flow_searched[l - 1]),
+                                b(&scd),
+                            ],
+                        )
+                    })
+                    .collect();
+                let fine = q.refine.then(|| {
+                    let fine_size = (src.0.div_ceil(4), src.1.div_ceil(4));
+                    let raw = storage(device, &format!("ffx fine {which} searched"), u64::from(fine_size.0 * fine_size.1) * 8);
+                    let flow = storage(device, &format!("ffx fine {which}"), u64::from(fine_size.0 * fine_size.1) * 8);
+                    // Refinement reads level 0's luma and 8x8 flow, writes
+                    // next_of.
+                    let refine_params = uniform(device, "ffx refine", &params(src, flow_sizes[0], fine_size, src, 0, n, luma_scale));
+                    // The median runs on the 4x4 flow as on a level's.
+                    let filter_params = uniform(device, "ffx fine filter", &params(src, fine_size, (0, 0), src, 0, n, luma_scale));
+                    Fine {
+                        size: fine_size,
+                        refine: bind(
+                            device,
+                            &p.refine,
+                            "ffx refine",
+                            &[b(&refine_params), b(&luma[cur][0]), b(&luma[prev][0]), b(&flow_filtered[0]), b(&raw)],
+                        ),
+                        filter: bind(device, &p.filter, "ffx fine filter", &[b(&filter_params), b(&raw), b(&flow)]),
+                        flow,
+                    }
+                });
+                Direction { flow_filtered, search, filter, scale, fine }
             })
             .collect();
-        let filter = (0..n as usize)
-            .map(|l| bind(device, &p.filter, "ffx filter", &[b(&level_params[l].0), b(&flow_searched[l]), b(&flow_filtered[l])]))
-            .collect();
-        let scale = (1..n as usize)
-            .map(|l| {
-                bind(
-                    device,
-                    &p.scale,
-                    "ffx scale",
-                    &[b(&level_params[l].0), b(&luma[0][l]), b(&luma[1][l]), b(&flow_filtered[l]), b(&flow_searched[l - 1]), b(&scd)],
-                )
-            })
-            .collect();
-        let fine = q.refine.then(|| {
-            let fine_size = (src.0.div_ceil(4), src.1.div_ceil(4));
-            let raw = storage(device, "ffx fine searched", u64::from(fine_size.0 * fine_size.1) * 8);
-            let flow = storage(device, "ffx fine", u64::from(fine_size.0 * fine_size.1) * 8);
-            // Refinement reads level 0's luma and 8x8 flow, writes next_of.
-            let refine_params = uniform(device, "ffx refine", &params(src, flow_sizes[0], fine_size, src, 0, n, luma_scale));
-            // The median runs on the 4x4 flow as on a level's.
-            let filter_params = uniform(device, "ffx fine filter", &params(src, fine_size, (0, 0), src, 0, n, luma_scale));
-            Fine {
-                size: fine_size,
-                refine: bind(
-                    device,
-                    &p.refine,
-                    "ffx refine",
-                    &[b(&refine_params), b(&luma[0][0]), b(&luma[1][0]), b(&flow_filtered[0]), b(&raw)],
-                ),
-                filter: bind(device, &p.filter, "ffx fine filter", &[b(&filter_params), b(&raw), b(&flow)]),
-                flow,
-            }
-        });
         Self {
             size,
             src,
             luma_sizes,
             flow_sizes,
             luma,
-            flow_filtered,
             histogram,
             previous_histogram,
             filtered_histogram,
@@ -370,17 +416,8 @@ impl State {
             down,
             histograms,
             divergence,
-            search,
-            filter,
-            scale,
-            fine,
+            dirs,
         }
-    }
-
-    /// The flow the interpolation reads: the 4x4 one when refined
-    /// (`interpolate_params` says its size and block).
-    fn output(&self) -> &wgpu::Buffer {
-        self.fine.as_ref().map_or(&self.flow_filtered[0], |f| &f.flow)
     }
 }
 
@@ -416,6 +453,33 @@ impl Ffx {
             &interpolate_layout,
             wgpu::TextureFormat::Rgba8Unorm,
         );
+        let interpolate_two = quality.two_way.then(|| {
+            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("ffx interpolate two-way"),
+                entries: &[
+                    crate::app::uniform_entry(0),
+                    crate::app::texture_entry(1, true),
+                    crate::app::texture_entry(2, true),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    read_only_storage(4),
+                    read_only_storage(5),
+                    read_only_storage(6),
+                ],
+            });
+            let pipeline = crate::app::pipeline(
+                device,
+                "ffx interpolate two-way",
+                &format!("{COMMON}{}", include_str!("ffx/interpolate_two.wgsl")),
+                &layout,
+                wgpu::TextureFormat::Rgba8Unorm,
+            );
+            (pipeline, layout)
+        });
         let pipelines = Pipelines {
             luma: compute(device, "ffx luma", include_str!("ffx/luma.wgsl")),
             down: compute(device, "ffx down", include_str!("ffx/down.wgsl")),
@@ -434,6 +498,7 @@ impl Ffx {
             refine: compute(device, "ffx refine", include_str!("ffx/refine.wgsl")),
             interpolate,
             interpolate_layout,
+            interpolate_two,
             sampler: device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("ffx"),
                 address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -513,31 +578,33 @@ impl Ffx {
         pass.set_pipeline(&p.divergence);
         pass.set_bind_group(0, &s.divergence, &[]);
         pass.dispatch_workgroups(9, 3, 1);
-        for l in (0..n).rev() {
-            pass.set_pipeline(p.search_at(l));
-            pass.set_bind_group(0, &s.search[l], &[]);
-            let (gx, gy) = groups(s.luma_sizes[l], 16, 16);
-            pass.dispatch_workgroups(gx, gy, 1);
-            pass.set_pipeline(&p.filter);
-            pass.set_bind_group(0, &s.filter[l], &[]);
-            let (gx, gy) = groups(s.flow_sizes[l], 16, 4);
-            pass.dispatch_workgroups(gx, gy, 1);
-            if l > 0 {
-                pass.set_pipeline(&p.scale);
-                pass.set_bind_group(0, &s.scale[l - 1], &[]);
-                let (gx, gy) = groups(s.flow_sizes[l - 1], 4, 4);
+        for d in &s.dirs {
+            for l in (0..n).rev() {
+                pass.set_pipeline(p.search_at(l));
+                pass.set_bind_group(0, &d.search[l], &[]);
+                let (gx, gy) = groups(s.luma_sizes[l], 16, 16);
+                pass.dispatch_workgroups(gx, gy, 1);
+                pass.set_pipeline(&p.filter);
+                pass.set_bind_group(0, &d.filter[l], &[]);
+                let (gx, gy) = groups(s.flow_sizes[l], 16, 4);
+                pass.dispatch_workgroups(gx, gy, 1);
+                if l > 0 {
+                    pass.set_pipeline(&p.scale);
+                    pass.set_bind_group(0, &d.scale[l - 1], &[]);
+                    let (gx, gy) = groups(s.flow_sizes[l - 1], 4, 4);
+                    pass.dispatch_workgroups(gx, gy, 1);
+                }
+            }
+            if let Some(f) = &d.fine {
+                pass.set_pipeline(&p.refine);
+                pass.set_bind_group(0, &f.refine, &[]);
+                let (gx, gy) = groups(f.size, 8, 8);
+                pass.dispatch_workgroups(gx, gy, 1);
+                pass.set_pipeline(&p.filter);
+                pass.set_bind_group(0, &f.filter, &[]);
+                let (gx, gy) = groups(f.size, 16, 4);
                 pass.dispatch_workgroups(gx, gy, 1);
             }
-        }
-        if let Some(f) = &s.fine {
-            pass.set_pipeline(&p.refine);
-            pass.set_bind_group(0, &f.refine, &[]);
-            let (gx, gy) = groups(f.size, 8, 8);
-            pass.dispatch_workgroups(gx, gy, 1);
-            pass.set_pipeline(&p.filter);
-            pass.set_bind_group(0, &f.filter, &[]);
-            let (gx, gy) = groups(f.size, 16, 4);
-            pass.dispatch_workgroups(gx, gy, 1);
         }
     }
 }
@@ -566,18 +633,23 @@ impl Generator for Ffx {
     ) -> bool {
         self.flow(device, encoder, frames.prev, frames.next, times.as_ref());
         let (p, s) = (&self.pipelines, self.state.as_ref().expect("made by flow"));
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ffx interpolate"),
-            layout: &p.interpolate_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: s.interpolate_params.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(frames.prev) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(frames.next) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&p.sampler) },
-                wgpu::BindGroupEntry { binding: 4, resource: s.output().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: s.scd.as_entire_binding() },
-            ],
-        });
+        let mut entries = vec![
+            wgpu::BindGroupEntry { binding: 0, resource: s.interpolate_params.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(frames.prev) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(frames.next) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&p.sampler) },
+            wgpu::BindGroupEntry { binding: 4, resource: s.dirs[0].output().as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 5, resource: s.scd.as_entire_binding() },
+        ];
+        // Two-way: the backward flow too, and its interpolation.
+        let (pipeline, layout) = match (&p.interpolate_two, s.dirs.get(1)) {
+            (Some((pipeline, layout)), Some(backward)) => {
+                entries.push(wgpu::BindGroupEntry { binding: 6, resource: backward.output().as_entire_binding() });
+                (pipeline, layout)
+            }
+            _ => (&p.interpolate, &p.interpolate_layout),
+        };
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("ffx interpolate"), layout, entries: &entries });
         let attachments = [Some(wgpu::RenderPassColorAttachment {
             view: frames.out,
             depth_slice: None,
@@ -592,7 +664,7 @@ impl Generator for Ffx {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&p.interpolate);
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..3, 0..1);
         true
@@ -659,6 +731,43 @@ mod tests {
             }
         }
         px
+    }
+
+    /// A textured object (48x48, its own noise moving with it) with its
+    /// top-left at `at`, over a static textured background.
+    fn scene(w: u32, h: u32, at: (i32, i32)) -> Vec<u8> {
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let (ox, oy) = (x - at.0, y - at.1);
+                let c = if (0..48).contains(&ox) && (0..48).contains(&oy) { hash(ox, oy, 31) } else { hash(x, y, 17) };
+                px.extend_from_slice(&[(c & 0xff) as u8, ((c >> 8) & 0xff) as u8, ((c >> 16) & 0xff) as u8, 255]);
+            }
+        }
+        px
+    }
+
+    /// The halo metric: the mean absolute error, 8-bit levels averaged over
+    /// the colour channels, against the true halfway picture, over the
+    /// band of pixels within 8 of the halfway object's outline (both
+    /// sides), where a blend of object and background shows.
+    fn halo(out: &[u8], truth: &[u8], w: u32, at: (i32, i32)) -> f64 {
+        let (mut sum, mut n) = (0u64, 0u64);
+        let (x0, y0, x1, y1) = (at.0, at.1, at.0 + 48, at.1 + 48);
+        for y in y0 - 8..y1 + 8 {
+            for x in x0 - 8..x1 + 8 {
+                let inside_core = x >= x0 + 8 && x < x1 - 8 && y >= y0 + 8 && y < y1 - 8;
+                if inside_core {
+                    continue;
+                }
+                let i = ((y as u32 * w + x as u32) * 4) as usize;
+                for k in 0..3 {
+                    sum += u64::from(out[i + k].abs_diff(truth[i + k]));
+                }
+                n += 3;
+            }
+        }
+        sum as f64 / n as f64
     }
 
     struct Rig {
@@ -745,7 +854,7 @@ mod tests {
 
         /// Level 0's flow, one vector per block.
         fn flow(&self, ffx: &Ffx) -> Vec<(i32, i32)> {
-            let bytes = self.read_buffer(&ffx.state.as_ref().expect("generated").flow_filtered[0]);
+            let bytes = self.read_buffer(&ffx.state.as_ref().expect("generated").dirs[0].flow_filtered[0]);
             bytes
                 .as_chunks::<8>()
                 .0
@@ -756,7 +865,7 @@ mod tests {
 
         /// The 4x4 flow (`Quality::refine`), one vector per 4x4 block.
         fn fine_flow(&self, ffx: &Ffx) -> Vec<(i32, i32)> {
-            let fine = ffx.state.as_ref().expect("generated").fine.as_ref().expect("refined");
+            let fine = ffx.state.as_ref().expect("generated").dirs[0].fine.as_ref().expect("refined");
             let bytes = self.read_buffer(&fine.flow);
             bytes
                 .as_chunks::<8>()
@@ -877,6 +986,26 @@ mod tests {
             }
         }
         assert!(exact * 100 >= all * 99, "{exact} of {all} pixels exact");
+    }
+
+    /// The halo: an object moves 16 to the right over a still background.
+    /// ffx-quality's halfway frame around the object's outline is much
+    /// closer to the truth than ffx's (#73 step 3). Measured on the RX
+    /// 9070 XT: ffx 41.1 levels, ffx-quality 14.2 (2.9 times smaller).
+    /// What is left sits in the two strips only one frame sees (the
+    /// background the object uncovers and the one it covers), about half
+    /// of each: there the flow of the seen side is unreliable, and which
+    /// layer is in front is not known.
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn gpu_ffx_quality_halo_is_smaller_than_ffx() {
+        let rig = Rig::new(SIZE, wgpu::Features::empty());
+        let (w, h) = SIZE;
+        let (prev, next, truth) = (scene(w, h, (80, 72)), scene(w, h, (96, 72)), scene(w, h, (88, 72)));
+        let fast = halo(&rig.generate(&mut Ffx::new(&rig.device, Quality::FAST), &prev, &next), &truth, w, (88, 72));
+        let best = halo(&rig.generate(&mut Ffx::new(&rig.device, Quality::BEST), &prev, &next), &truth, w, (88, 72));
+        eprintln!("halo (mean abs error, 8-bit levels): ffx {fast:.2}, ffx-quality {best:.2}");
+        assert!(best * 2.5 <= fast, "ffx-quality {best:.2} against ffx {fast:.2}: not 2.5 times smaller");
     }
 
     /// A dark picture, then an unrelated bright one: a scene change, and the
