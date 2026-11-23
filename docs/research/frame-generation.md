@@ -177,10 +177,15 @@ first, latency self-reported.
 | DLSS-G, FSR 3/4 FG, XeSS-FG, FSR 2/3/4 and XeSS upscaling | the game's motion vectors and depth | **no** | — | — | various, mostly binary-only | — | not possible on a capture |
 
 Licence traps, checked in the cloned sources:
-- The FidelityFX SDK v2 licence file (`license.md` in its docs folder) is binary-only redistribution by
-  default. Files carrying their own MIT header are exceptions: the optical
-  flow sources, e.g. `ffx_opticalflow.h`, do. SDK v1.1.4 was MIT throughout,
-  and openfg vendors its optical flow from there with the notice kept.
+- The FidelityFX SDK v2 licence file (`license.md` in its docs folder)
+  grants binary-only redistribution by default. Its exception list puts the
+  optical-flow sources under MIT: `ffx_opticalflow.h` and the
+  `gpu/opticalflow/` shaders, e.g.
+  `ffx_opticalflow_compute_optical_flow_v5.h`. SDK v1.1.4's `LICENSE.txt` is
+  MIT for the whole SDK
+  ([v1.1.4 tag](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/v1.1.4/LICENSE.txt)
+  [fetched]). openfg vendors its optical flow from v1.1.4 with the notice
+  kept.
 - Intel's XeSS SDK is binary-only (Intel Simplified Software License).
 - MVTools (SVP's engine) is GPL and libplacebo is LGPL: external process or
   dynamic link only. SVP itself is closed and personal-use only.
