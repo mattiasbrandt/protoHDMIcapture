@@ -122,7 +122,8 @@ headroom for the picture.
 needs. The ML upscaler takes 7.2 ms back to back and 12.4 ms paced
 (#75). Budgets are judged paced, as the window runs. #77 asks GameMode
 for performance while an enhancement is on; the GPU part of that stays
-opt-in in the user's own `gamemode.ini`.
+the user's opt-in in `/etc/gamemode.ini` (gamemoded ignores `[gpu]` in
+`~/.config/gamemode.ini`).
 
 ## Later, only if round one falls short
 
