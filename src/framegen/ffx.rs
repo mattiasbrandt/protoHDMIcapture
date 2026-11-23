@@ -14,8 +14,10 @@
 //!   divergence; over the SDK's 0.45 the pair is a cut, and every later
 //!   pass sees it.
 //! - **Flow**, coarsest level first: block search around the coarser
-//!   level's vector (+-8 pixels), a 3x3 vector median, and the scale-up
-//!   that seeds the next finer level.
+//!   level's vector (+-8 pixels; `ffx-quality` +-16 above level 0), a 3x3
+//!   vector median, and the scale-up that seeds the next finer level;
+//!   `ffx-quality` then refines level 0's 8x8 vectors to 4x4 blocks and
+//!   takes their median again.
 //! - **Interpolation** into the output, a render pass at the frames' size.
 //!
 //! What differs from the SDK, and why:
@@ -59,13 +61,25 @@ pub struct Quality {
     /// a block is 8 frame pixels, not 16, so motion edges are twice as
     /// fine).
     pub scale: u32,
+    /// The block search's window, +-pixels, at every level above 0: 8 is
+    /// the SDK's (search.wgsl); 16 (search_wide.wgsl, #73 step 2) catches
+    /// a block whose motion the coarser level's vector, or the top level's
+    /// zero, misses by up to 16. Level 0 keeps the SDK's 8: it starts from
+    /// level 1's vector, rarely more than a pixel or two out, and holds
+    /// most of the blocks (16 there was 3.3 ms of ffx-quality's 3.6 at
+    /// 1080p, against 0.75 ms at the levels above).
+    pub radius: i32,
+    /// Level 0's 8x8 vectors refined to 4x4 blocks (refine.wgsl, #73 step
+    /// 2): a block that straddles a motion edge no longer drags one side
+    /// along with the other.
+    pub refine: bool,
 }
 
 impl Quality {
     /// `ffx`: #68's generator, unchanged.
-    pub const FAST: Self = Self { scale: 2 };
+    pub const FAST: Self = Self { scale: 2, radius: 8, refine: false };
     /// `ffx-quality`.
-    pub const BEST: Self = Self { scale: 1 };
+    pub const BEST: Self = Self { scale: 1, radius: 16, refine: true };
 }
 /// The coarsest level is at least this many luma pixels on its short side
 /// (the search reads 4-pixel words and 8x8 blocks).
@@ -156,14 +170,28 @@ fn bind(device: &wgpu::Device, pipeline: &wgpu::ComputePipeline, label: &str, re
     })
 }
 
+impl Pipelines {
+    /// The search a level runs: the wide one above level 0, where there is
+    /// one.
+    fn search_at(&self, level: usize) -> &wgpu::ComputePipeline {
+        match &self.search_wide {
+            Some(wide) if level > 0 => wide,
+            _ => &self.search,
+        }
+    }
+}
+
 struct Pipelines {
     luma: wgpu::ComputePipeline,
     down: wgpu::ComputePipeline,
     histogram: wgpu::ComputePipeline,
     divergence: wgpu::ComputePipeline,
     search: wgpu::ComputePipeline,
+    /// `Quality::radius` above 8: the search at the levels above 0.
+    search_wide: Option<wgpu::ComputePipeline>,
     filter: wgpu::ComputePipeline,
     scale: wgpu::ComputePipeline,
+    refine: wgpu::ComputePipeline,
     interpolate: wgpu::RenderPipeline,
     interpolate_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -198,12 +226,23 @@ struct State {
     filter: Vec<wgpu::BindGroup>,
     /// Per level from 1: the scale-up into the level below.
     scale: Vec<wgpu::BindGroup>,
+    /// With `Quality::refine`: the 4x4 flow's size, its refinement and
+    /// median, and the buffer the interpolation reads.
+    fine: Option<Fine>,
+}
+
+/// Level 0's flow at 4x4 blocks (`Quality::refine`).
+struct Fine {
+    size: (u32, u32),
+    refine: wgpu::BindGroup,
+    filter: wgpu::BindGroup,
+    flow: wgpu::Buffer,
 }
 
 impl State {
     fn new(device: &wgpu::Device, p: &Pipelines, size: (u32, u32), q: Quality) -> Self {
-        let scale = q.scale;
-        let src = (size.0.div_ceil(scale), size.1.div_ceil(scale));
+        let luma_scale = q.scale;
+        let src = (size.0.div_ceil(luma_scale), size.1.div_ceil(luma_scale));
         let n = levels(src);
         let luma_sizes: Vec<_> = (0..n).map(|l| ((src.0 >> l).max(1), (src.1 >> l).max(1))).collect();
         let flow_sizes = flow_sizes(src, n);
@@ -234,22 +273,26 @@ impl State {
                 let next_of = if l > 0 { flow_sizes[l - 1] } else { (0, 0) };
                 // The pyramid pass reads the finer level: `src` is it.
                 let finer = if l > 0 { luma_sizes[l - 1] } else { src };
-                let bytes = params(luma_sizes[l], flow_sizes[l], next_of, src, l as u32, n, scale);
-                let down = params(luma_sizes[l], flow_sizes[l], next_of, finer, l as u32, n, scale);
+                let bytes = params(luma_sizes[l], flow_sizes[l], next_of, src, l as u32, n, luma_scale);
+                let down = params(luma_sizes[l], flow_sizes[l], next_of, finer, l as u32, n, luma_scale);
                 (uniform(device, &format!("ffx level {l}"), &bytes), uniform(device, &format!("ffx down {l}"), &down))
             })
             .collect();
-        let luma_params = uniform(device, "ffx luma", &params(src, flow_sizes[0], (0, 0), src, 0, n, scale));
+        let luma_params = uniform(device, "ffx luma", &params(src, flow_sizes[0], (0, 0), src, 0, n, luma_scale));
+        let (out_size, out_block) = match q.refine {
+            true => ((src.0.div_ceil(4), src.1.div_ceil(4)), 4 * luma_scale),
+            false => (flow_sizes[0], BLOCK * luma_scale),
+        };
         let interpolate_params = {
             let f = |v: f32| v.to_le_bytes();
             let i = |v: u32| (v as i32).to_le_bytes();
             let bytes: Vec<u8> = [
                 f(size.0 as f32),
                 f(size.1 as f32),
-                f((BLOCK * scale) as f32),
-                f(scale as f32),
-                i(flow_sizes[0].0),
-                i(flow_sizes[0].1),
+                f(out_block as f32),
+                f(luma_scale as f32),
+                i(out_size.0),
+                i(out_size.1),
                 f(MAX_MOTION),
                 f(HUD),
             ]
@@ -272,7 +315,7 @@ impl State {
             .map(|l| {
                 bind(
                     device,
-                    &p.search,
+                    p.search_at(l),
                     "ffx search",
                     &[b(&level_params[l].0), b(&luma[0][l]), b(&luma[1][l]), b(&flow_searched[l]), b(&scd)],
                 )
@@ -291,6 +334,26 @@ impl State {
                 )
             })
             .collect();
+        let fine = q.refine.then(|| {
+            let fine_size = (src.0.div_ceil(4), src.1.div_ceil(4));
+            let raw = storage(device, "ffx fine searched", u64::from(fine_size.0 * fine_size.1) * 8);
+            let flow = storage(device, "ffx fine", u64::from(fine_size.0 * fine_size.1) * 8);
+            // Refinement reads level 0's luma and 8x8 flow, writes next_of.
+            let refine_params = uniform(device, "ffx refine", &params(src, flow_sizes[0], fine_size, src, 0, n, luma_scale));
+            // The median runs on the 4x4 flow as on a level's.
+            let filter_params = uniform(device, "ffx fine filter", &params(src, fine_size, (0, 0), src, 0, n, luma_scale));
+            Fine {
+                size: fine_size,
+                refine: bind(
+                    device,
+                    &p.refine,
+                    "ffx refine",
+                    &[b(&refine_params), b(&luma[0][0]), b(&luma[1][0]), b(&flow_filtered[0]), b(&raw)],
+                ),
+                filter: bind(device, &p.filter, "ffx fine filter", &[b(&filter_params), b(&raw), b(&flow)]),
+                flow,
+            }
+        });
         Self {
             size,
             src,
@@ -310,7 +373,14 @@ impl State {
             search,
             filter,
             scale,
+            fine,
         }
+    }
+
+    /// The flow the interpolation reads: the 4x4 one when refined
+    /// (`interpolate_params` says its size and block).
+    fn output(&self) -> &wgpu::Buffer {
+        self.fine.as_ref().map_or(&self.flow_filtered[0], |f| &f.flow)
     }
 }
 
@@ -352,8 +422,16 @@ impl Ffx {
             histogram: compute(device, "ffx histogram", include_str!("ffx/histogram.wgsl")),
             divergence: compute(device, "ffx divergence", include_str!("ffx/divergence.wgsl")),
             search: compute(device, "ffx search", include_str!("ffx/search.wgsl")),
+            search_wide: (quality.radius != 8).then(|| {
+                compute(
+                    device,
+                    "ffx search wide",
+                    &format!("const RADIUS: i32 = {};\n{}", quality.radius, include_str!("ffx/search_wide.wgsl")),
+                )
+            }),
             filter: compute(device, "ffx filter", include_str!("ffx/filter.wgsl")),
             scale: compute(device, "ffx scale", include_str!("ffx/scale.wgsl")),
+            refine: compute(device, "ffx refine", include_str!("ffx/refine.wgsl")),
             interpolate,
             interpolate_layout,
             sampler: device.create_sampler(&wgpu::SamplerDescriptor {
@@ -436,7 +514,7 @@ impl Ffx {
         pass.set_bind_group(0, &s.divergence, &[]);
         pass.dispatch_workgroups(9, 3, 1);
         for l in (0..n).rev() {
-            pass.set_pipeline(&p.search);
+            pass.set_pipeline(p.search_at(l));
             pass.set_bind_group(0, &s.search[l], &[]);
             let (gx, gy) = groups(s.luma_sizes[l], 16, 16);
             pass.dispatch_workgroups(gx, gy, 1);
@@ -450,6 +528,16 @@ impl Ffx {
                 let (gx, gy) = groups(s.flow_sizes[l - 1], 4, 4);
                 pass.dispatch_workgroups(gx, gy, 1);
             }
+        }
+        if let Some(f) = &s.fine {
+            pass.set_pipeline(&p.refine);
+            pass.set_bind_group(0, &f.refine, &[]);
+            let (gx, gy) = groups(f.size, 8, 8);
+            pass.dispatch_workgroups(gx, gy, 1);
+            pass.set_pipeline(&p.filter);
+            pass.set_bind_group(0, &f.filter, &[]);
+            let (gx, gy) = groups(f.size, 16, 4);
+            pass.dispatch_workgroups(gx, gy, 1);
         }
     }
 }
@@ -486,7 +574,7 @@ impl Generator for Ffx {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(frames.prev) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(frames.next) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&p.sampler) },
-                wgpu::BindGroupEntry { binding: 4, resource: s.flow_filtered[0].as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: s.output().as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: s.scd.as_entire_binding() },
             ],
         });
@@ -553,6 +641,21 @@ mod tests {
                     px.push((lo + ((c >> (k * 8)) & 0xff) % span) as u8);
                 }
                 px.push(255);
+            }
+        }
+        px
+    }
+
+    /// RGBA pixels of a w x h picture of per-pixel noise, its content moved
+    /// by `by` pixels; `keep` (a column range) shows the unmoved plane
+    /// instead (a region that does not move).
+    fn noise(w: u32, h: u32, by: (i32, i32), seed: u32, keep: std::ops::Range<i32>) -> Vec<u8> {
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let (u, v) = if keep.contains(&x) { (x, y) } else { (x - by.0, y - by.1) };
+                let c = hash(u, v, seed);
+                px.extend_from_slice(&[(c & 0xff) as u8, ((c >> 8) & 0xff) as u8, ((c >> 16) & 0xff) as u8, 255]);
             }
         }
         px
@@ -651,6 +754,18 @@ mod tests {
                 .collect()
         }
 
+        /// The 4x4 flow (`Quality::refine`), one vector per 4x4 block.
+        fn fine_flow(&self, ffx: &Ffx) -> Vec<(i32, i32)> {
+            let fine = ffx.state.as_ref().expect("generated").fine.as_ref().expect("refined");
+            let bytes = self.read_buffer(&fine.flow);
+            bytes
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| (i32::from_le_bytes([c[0], c[1], c[2], c[3]]), i32::from_le_bytes([c[4], c[5], c[6], c[7]])))
+                .collect()
+        }
+
         fn scene_changed(&self, ffx: &Ffx) -> bool {
             let bytes = self.read_buffer(&ffx.state.as_ref().expect("generated").scd);
             u32::from_le_bytes(bytes[16..20].try_into().unwrap()) & 1 != 0
@@ -701,6 +816,67 @@ mod tests {
         let inner: Vec<_> = (2..fh - 2).flat_map(|y| (2..fw - 2).map(move |x| (x, y))).map(|(x, y)| flow[(y * fw + x) as usize]).collect();
         let right = inner.iter().filter(|v| **v == (-8, -4)).count();
         assert!(right * 100 >= inner.len() * 95, "{right} of {} blocks at (-8, -4): {:?}", inner.len(), &inner[..16]);
+    }
+
+    /// The wider window: a picture with two pyramid levels, moved by 30.
+    /// The top level starts from zero and sees 15: the SDK's window ends
+    /// at 7, so level 0, starting from twice a wrong vector with its own
+    /// +-8, cannot reach 30; the wide top level finds 15, and level 0
+    /// 30 (#73 step 2).
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn gpu_ffx_quality_search_reaches_beyond_8() {
+        // 24 rows: level 1 has two block rows, so its 3x3 median is not
+        // outvoted by the zeros it reads outside the level.
+        let size = (256, 24);
+        assert_eq!(levels(size), 2, "two levels");
+        let rig = Rig::new(size, wgpu::Features::empty());
+        let mut ffx = Ffx::new(&rig.device, Quality::BEST);
+        rig.generate(&mut ffx, &noise(256, 24, (0, 0), 5, 0..0), &noise(256, 24, (30, 0), 5, 0..0));
+        let flow = rig.flow(&ffx);
+        // Level 0's middle block row, away from the sides.
+        let row: Vec<_> = flow[32 + 5..32 + 27].to_vec();
+        assert!(row.iter().all(|v| *v == (-30, 0)), "the middle block row: {row:?}");
+    }
+
+    /// The 4x4 refinement: the part left of x = 100 moves right by 8, the
+    /// rest stands still. The 8x8 block over 96..104 straddles the edge;
+    /// its 4x4 quarters take each side's own vector (#73 step 2).
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn gpu_ffx_quality_refines_a_motion_edge_to_4x4() {
+        let rig = Rig::new(SIZE, wgpu::Features::empty());
+        let mut ffx = Ffx::new(&rig.device, Quality::BEST);
+        let (w, h) = SIZE;
+        rig.generate(&mut ffx, &noise(w, h, (0, 0), 9, 0..0), &noise(w, h, (8, 0), 9, 100..w as i32));
+        let fine = rig.fine_flow(&ffx);
+        let fw = w.div_ceil(4) as usize;
+        let rows = 4..(h / 4 - 4) as usize;
+        let at = |x: usize| rows.clone().map(|y| fine[y * fw + x]).collect::<Vec<_>>();
+        assert!(at(24).iter().all(|v| *v == (-8, 0)), "96..100 moves: {:?}", at(24));
+        assert!(at(25).iter().all(|v| *v == (0, 0)), "100..104 stands: {:?}", at(25));
+    }
+
+    /// ffx-quality's generated frame of a picture moved by (8, 4) is the
+    /// picture moved by (4, 2), as ffx's is.
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn gpu_ffx_quality_generates_the_halfway_picture() {
+        let rig = Rig::new(SIZE, wgpu::Features::empty());
+        let mut ffx = Ffx::new(&rig.device, Quality::BEST);
+        let (w, h) = SIZE;
+        let out = rig.generate(&mut ffx, &noise(w, h, (0, 0), 7, 0..0), &noise(w, h, (8, 4), 7, 0..0));
+        let want = noise(w, h, (4, 2), 7, 0..0);
+        let border = 32;
+        let (mut exact, mut all) = (0, 0);
+        for y in border..h - border {
+            for x in border..w - border {
+                let i = ((y * w + x) * 4) as usize;
+                all += 1;
+                exact += usize::from(out[i..i + 4] == want[i..i + 4]);
+            }
+        }
+        assert!(exact * 100 >= all * 99, "{exact} of {all} pixels exact");
     }
 
     /// A dark picture, then an unrelated bright one: a scene change, and the
