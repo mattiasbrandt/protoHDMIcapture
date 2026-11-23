@@ -24,12 +24,16 @@ Out of scope:
 
 ## What ships (once a winner exists)
 
-- **Frame generation** (GLOSSARY.md) is opt-in: `FRAMEGEN=off|2x`, off by
-  default.
+- **Frame generation** (GLOSSARY.md) is opt-in, off by default.
+  **Not locked to one method** (the user, 2026-11-23): after round two both
+  ffx-quality and rife are candidates, and more than one may ship; the
+  setting's form (`FRAMEGEN=off|2x`, or a value per method such as
+  `off|ffx|rife`) is decided with #84.
   - It is meant for dedicated gaming GPUs. On an integrated GPU it is
     refused at startup, with a message saying so.
   - It is a live change: `g`, with the Tab overlay open, switches it
-    off ↔ 2x, the overlay row shows its value, and `w` saves it.
+    (off ↔ on, or through the shipped methods), the overlay row shows its
+    value, and `w` saves it.
   - Only 2x: one generated frame between two new frames. A later 4x for
     high-refresh monitors is the reason the value names a multiplier.
   - A generated frame only ever replaces a **duplicate frame**, and only
@@ -110,7 +114,7 @@ there is no objective score, since GTA 6 gives no 60 fps ground truth.
    approach live and picks the winners.
 
 **The losers.** Their issues close as not planned, with the scores kept
-on them.
+on them. More than one frame generator may win (the user, 2026-11-23).
 
 ## Round two: picture quality on gaming GPUs
 
