@@ -36,6 +36,8 @@ const RESBLOCKS: usize = 8;
 /// A block's output: 4 flow channels, the mask, and one unused, PixelShuffled
 /// from 24.
 const DECONV_OUT: u32 = 24;
+/// The input channels the deconvolution reads at a time (rife.wgsl's `DCI`).
+const DECONV_CHANNELS: u32 = 8;
 /// rife.wgsl's conv flags (conv1 is stride 1, conv2 stride 2).
 const LEAKY: u32 = 1;
 const RESIDUAL: u32 = 2;
@@ -77,10 +79,44 @@ fn split((x, y, z): (u32, u32, u32), cin: u32, step: u32) -> (u32, u32) {
 /// The timestep the generated frame sits at: halfway.
 const TIMESTEP: f32 = 0.5;
 
-/// The scale `--framegen rife` runs at: the budget (#74, at most 10 ms at
-/// 1080p on an RX 9070 XT) is met at 0.5 with fp16 (9.7 ms); 1.0, the
-/// model's full resolution, took 23.9 ms.
-pub const SCALE: f32 = 0.5;
+/// The scale `--framegen rife` runs at. Paced at 60 Hz, as the window runs
+/// it, at 1080p on an RX 9070 XT with fp16 (#74's pacing fix,
+/// `gpu_rife_paced_time_at_1080p`): 0.25 takes 5.87 ms (p99 5.92) with
+/// GameMode and 7.33 ms (p99 7.45) without; 0.5 took 10.59 / 13.49 ms,
+/// too little of a refresh left for the window's other work (106 of 893
+/// in-between frames missed on the driving clip). 0.25 costs 0.94 dB on
+/// #81's skip-frame score (25.01 against 25.95 dB) and 25 % more tear
+/// blocks. 1.0, the model's full resolution, took 23.9 ms back to back.
+pub const SCALE: f32 = 0.25;
+
+/// The scale to run at: `SCALE`, or `PROTOHDMICAPTURE_RIFE_SCALE` (a dev
+/// knob for comparing settings with `--framegen-score`, #81: 1, 0.5 or
+/// 0.25). A value it cannot use is said on stderr and `SCALE` runs.
+pub fn scale() -> f32 {
+    let v = std::env::var("PROTOHDMICAPTURE_RIFE_SCALE").ok();
+    scale_from(v.as_deref()).unwrap_or_else(|v| {
+        eprintln!("warning: PROTOHDMICAPTURE_RIFE_SCALE={v} is not 1, 0.5 or 0.25; rife runs at {SCALE}");
+        SCALE
+    })
+}
+
+/// The knob's value: unset is `SCALE`; one it cannot use is an error.
+fn scale_from(v: Option<&str>) -> Result<f32, String> {
+    match v {
+        None => Ok(SCALE),
+        Some(v) => v.parse::<f32>().ok().filter(|x| [1.0, 0.5, 0.25].contains(x)).ok_or_else(|| v.to_string()),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn the_scale_knob_takes_the_scales_the_network_runs_at() {
+    assert_eq!(scale_from(None), Ok(SCALE));
+    assert_eq!(scale_from(Some("0.5")), Ok(0.5));
+    assert_eq!(scale_from(Some("1")), Ok(1.0));
+    assert_eq!(scale_from(Some("0.3")), Err("0.3".into()));
+    assert_eq!(scale_from(Some("fast")), Err("fast".into()));
+}
 
 /// fp16 (IEEE binary16) bits to f32.
 fn f16(bits: u16) -> f32 {
@@ -473,12 +509,29 @@ impl Rife {
             // added into the flow and mask.
             let (wt, b, _, _) = &self.weights[layer + 2 + RESBLOCKS];
             let d = storage("rife deconv", u64::from(DECONV_OUT) * u64::from(w1) * u64::from(h1));
-            op(
-                Kernel::Deconv,
-                Params { s_c: c, s_w: w2, s_h: h2, d_c: DECONV_OUT, d_w: w1, d_h: h1, ..Default::default() },
-                &[(1, &x), (2, &d), (4, wt), (5, b)],
-                (w2.div_ceil(8), h2.div_ceil(8), 1),
-            );
+            let deconv = Params { s_c: c, s_w: w2, s_h: h2, d_c: DECONV_OUT, d_w: w1, d_h: h1, ..Default::default() };
+            let groups = (w2.div_ceil(8), h2.div_ceil(8), 1);
+            // Split-K as the convolutions: the small blocks' deconvolutions
+            // had 12 to 135 workgroups and took 1.2 ms of a 10.7 ms frame
+            // with the GPU mostly idle (#74's pacing fix).
+            let (slices, per) = split(groups, c, DECONV_CHANNELS);
+            if slices == 1 {
+                op(Kernel::Deconv, deconv, &[(1, &x), (2, &d), (4, wt), (5, b)], groups);
+            } else {
+                let part = storage("rife deconv partial sums", u64::from(slices * DECONV_OUT * w1 * h1));
+                op(
+                    Kernel::Deconv,
+                    Params { flags: PARTIAL, f_off: per, ..deconv },
+                    &[(1, &x), (2, &part), (4, wt), (5, b)],
+                    (groups.0, groups.1, slices),
+                );
+                op(
+                    Kernel::Reduce,
+                    Params { s_c: slices, ..deconv },
+                    &[(1, &part), (2, &d), (5, b), (6, &x)],
+                    (w1.div_ceil(8), h1.div_ceil(8), DECONV_OUT),
+                );
+            }
             op(
                 Kernel::BlockOut,
                 Params { s_w: bw, s_h: bh, d_c: 5, d_w: pw, d_h: ph, mul: s as f32, flags: u32::from(i > 0), ..Default::default() },
@@ -801,15 +854,21 @@ mod tests {
 
     /// A bright square moving across a gradient: its halfway position.
     fn moving(size: (u32, u32), at: (u32, u32)) -> Vec<u8> {
+        moving_sized(size, at, 32)
+    }
+
+    /// `moving` with a square of `side` px, its checks `side / 8` px.
+    fn moving_sized(size: (u32, u32), at: (u32, u32), side: u32) -> Vec<u8> {
         let (w, h) = size;
+        let check = side / 8;
         let mut px = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h {
             for x in 0..w {
-                let inside = x >= at.0 && x < at.0 + 32 && y >= at.1 && y < at.1 + 32;
+                let inside = x >= at.0 && x < at.0 + side && y >= at.1 && y < at.1 + side;
                 let v = if inside {
-                    if ((x - at.0) / 4 + (y - at.1) / 4).is_multiple_of(2) { 230 } else { 170 }
+                    if ((x - at.0) / check + (y - at.1) / check).is_multiple_of(2) { 230 } else { 170 }
                 } else {
-                    (40 + (x + y) / 4 % 60) as u8
+                    (40 + (x + y) / check % 60) as u8
                 };
                 px.extend([v, v, v, 255]);
             }
@@ -834,17 +893,23 @@ mod tests {
     #[ignore = "needs a GPU"]
     fn gpu_rife_generates_the_halfway_picture() {
         let (device, queue) = device();
-        let size = (256, 192);
-        let (a, b) = (moving(size, (64, 64)), moving(size, (96, 80)));
-        // Full resolution, and the scale `--framegen rife` runs at.
+        // Full resolution, and the scale `--framegen rife` runs at. At scale
+        // `s` the network sees the frame at `s` of its size, so the frame,
+        // the square and its motion grow by 1/s: every scale gets the
+        // picture full resolution gets at 256x192 (the fine detail a lower
+        // scale loses is #81's score's to show, not this test's).
         for scale in [1.0, SCALE] {
+            let k = (1.0 / scale) as u32;
+            let size = (256 * k, 192 * k);
+            let (a, b) = (moving_sized(size, (64 * k, 64 * k), 32 * k), moving_sized(size, (96 * k, 80 * k), 32 * k));
             let mut rife = Rife::new(&device, scale).unwrap();
             let got = run(&mut rife, &device, &queue, size, &a, &b);
             let (ca, cb, cg) = (centre(&a, size), centre(&b, size), centre(&got.out, size));
-            eprintln!("scale {scale} centre: prev {ca:?}, next {cb:?}, generated {cg:?}");
-            // Halfway: (80, 72) + 15.5; within 2 px. A blend would put the
-            // mean halfway too, so the square must also stay one square.
-            assert!((cg.0 - (ca.0 + cb.0) / 2.0).abs() < 2.0 && (cg.1 - (ca.1 + cb.1) / 2.0).abs() < 2.0, "{cg:?}");
+            eprintln!("scale {scale} at {size:?} centre: prev {ca:?}, next {cb:?}, generated {cg:?}");
+            // Halfway, within 2 px of the 256x192 picture. A blend would put
+            // the mean halfway too, so the square must also stay one square.
+            let tol = 2.0 * k as f32;
+            assert!((cg.0 - (ca.0 + cb.0) / 2.0).abs() < tol && (cg.1 - (ca.1 + cb.1) / 2.0).abs() < tol, "{cg:?} within {tol} px");
             let bright = got.out.as_chunks::<4>().0.iter().filter(|p| p[0] > 150).count();
             let one = a.as_chunks::<4>().0.iter().filter(|p| p[0] > 150).count();
             assert!((bright as f32 - one as f32).abs() / (one as f32) < 0.15, "{bright} bright pixels against {one}: not one square");
@@ -932,5 +997,190 @@ mod tests {
         }
         let at = medians.iter().find(|(s, _)| *s == SCALE).expect("SCALE is measured").1;
         assert!(at <= 10.0, "the budget is 10 ms at 1080p; scale {SCALE} took {at:.2} ms");
+    }
+
+    /// Where a frame's GPU time goes at 1080p: each dispatch in its own
+    /// timed pass, summed per kernel and per block (#74's pacing fix):
+    /// `cargo test --release --features dev -- --ignored --nocapture gpu_rife_kernel_times`.
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn gpu_rife_kernel_times_at_1080p() {
+        let (device, queue) = device();
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            eprintln!("no timestamp queries on this GPU");
+            return;
+        }
+        let size = (1920, 1080);
+        let (a, b) = (moving(size, (600, 400)), moving(size, (640, 420)));
+        let tex = [texture(&device, &queue, size, Some(&a)), texture(&device, &queue, size, Some(&b))];
+        let views = tex.each_ref().map(|t| t.create_view(&Default::default()));
+        let mut rife = Rife::new(&device, SCALE).unwrap();
+        let mut encoder = device.create_command_encoder(&Default::default());
+        rife.infer(&device, &mut encoder, &views[0], &views[1], None);
+        queue.submit([encoder.finish()]);
+        let plan = rife.plan.as_ref().unwrap();
+        let n = plan.ops.len() as u32;
+        let queries = device.create_query_set(&wgpu::QuerySetDescriptor { label: None, ty: wgpu::QueryType::Timestamp, count: n * 2 });
+        let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: u64::from(n) * 16,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let rb = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: resolve.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let name = |k: Kernel| KERNELS.iter().find(|(x, _)| *x == k).unwrap().1;
+        let mut per_op = vec![Vec::new(); n as usize];
+        for i in 0..60 {
+            let mut encoder = device.create_command_encoder(&Default::default());
+            for (j, op) in plan.ops.iter().enumerate() {
+                let j = j as u32;
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: None,
+                    timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                        query_set: &queries,
+                        beginning_of_pass_write_index: Some(j * 2),
+                        end_of_pass_write_index: Some(j * 2 + 1),
+                    }),
+                });
+                pass.set_pipeline(rife.pipeline(op.kernel));
+                pass.set_bind_group(0, &op.bind, &[]);
+                pass.dispatch_workgroups(op.groups.0, op.groups.1, op.groups.2);
+            }
+            encoder.resolve_query_set(&queries, 0..n * 2, &resolve, 0);
+            encoder.copy_buffer_to_buffer(&resolve, 0, &rb, 0, resolve.size());
+            queue.submit([encoder.finish()]);
+            rb.map_async(wgpu::MapMode::Read, .., |r| r.unwrap());
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            let t: Vec<u64> = rb.get_mapped_range(..).unwrap().as_chunks::<8>().0.iter().map(|b| u64::from_le_bytes(*b)).collect();
+            rb.unmap();
+            if i >= 10 {
+                for j in 0..n as usize {
+                    per_op[j].push((t[j * 2 + 1] - t[j * 2]) as f64 * f64::from(queue.get_timestamp_period()) / 1e6);
+                }
+            }
+        }
+        let median = |v: &Vec<f64>| {
+            let mut v = v.clone();
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let mut by_kernel: Vec<(&str, f64, usize)> = Vec::new();
+        let mut total = 0.0;
+        for (op, times) in plan.ops.iter().zip(&per_op) {
+            let m = median(times);
+            total += m;
+            match by_kernel.iter_mut().find(|(k, _, _)| *k == name(op.kernel)) {
+                Some(e) => {
+                    e.1 += m;
+                    e.2 += 1;
+                }
+                None => by_kernel.push((name(op.kernel), m, 1)),
+            }
+        }
+        by_kernel.sort_by(|a, b| b.1.total_cmp(&a.1));
+        eprintln!("rife scale {SCALE}: {n} dispatches, {total:.2} ms summed (each in its own pass)");
+        for (k, ms, count) in by_kernel {
+            eprintln!("  {k:<10} {ms:6.2} ms over {count} dispatches");
+        }
+        let mut cum = 0.0;
+        for (j, (op, times)) in plan.ops.iter().zip(&per_op).enumerate() {
+            let m = median(times);
+            cum += m;
+            if m > 0.1 {
+                eprintln!("  op {j:3} {:<10} {m:5.2} ms (cumulative {cum:5.2}) groups {:?}", name(op.kernel), op.groups);
+            }
+        }
+    }
+
+    /// GPU time per generated frame at 1080p paced as the window runs it:
+    /// one frame every 16.7 ms, the GPU idle between (#74's pacing fix):
+    /// `cargo test --release --features dev -- --ignored --nocapture gpu_rife_paced`.
+    /// Its median, p99 and max per scale, and the frames a 60 Hz window
+    /// would miss (over 16.7 ms minus the rest of a frame's GPU work, ~1 ms).
+    #[test]
+    #[ignore = "needs a GPU"]
+    fn gpu_rife_paced_time_at_1080p() {
+        let (device, queue) = device();
+        if !device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            eprintln!("no timestamp queries on this GPU");
+            return;
+        }
+        let size = (1920, 1080);
+        let (a, b) = (moving(size, (600, 400)), moving(size, (640, 420)));
+        let tex =
+            [texture(&device, &queue, size, Some(&a)), texture(&device, &queue, size, Some(&b)), texture(&device, &queue, size, None)];
+        let views = tex.each_ref().map(|t| t.create_view(&Default::default()));
+        let scales: Vec<f32> = std::env::var("RIFE_SCALES")
+            .ok()
+            .map(|s| s.split(',').map(|x| x.parse().expect("RIFE_SCALES: numbers")).collect())
+            .unwrap_or_else(|| vec![SCALE]);
+        let frames: usize = std::env::var("RIFE_FRAMES").ok().map_or(600, |s| s.parse().expect("RIFE_FRAMES: a number"));
+        let queries = device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: None,
+            ty: wgpu::QueryType::Timestamp,
+            count: crate::gputime::QUERIES,
+        });
+        let resolve = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: u64::from(crate::gputime::QUERIES) * 8,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let rb = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: resolve.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let interval = std::time::Duration::from_micros(16_667);
+        for scale in scales {
+            let mut rife = Rife::new(&device, scale).unwrap();
+            let mut ms = Vec::new();
+            let mut next = std::time::Instant::now();
+            for i in 0..frames + 30 {
+                let mut encoder = device.create_command_encoder(&Default::default());
+                let times = crate::gputime::PassTimes::for_test(&queries);
+                rife.generate(&device, &queue, &mut encoder, Pair { prev: &views[0], next: &views[1], out: &views[2] }, Some(times));
+                encoder.resolve_query_set(&queries, 0..crate::gputime::QUERIES, &resolve, 0);
+                encoder.copy_buffer_to_buffer(&resolve, 0, &rb, 0, resolve.size());
+                queue.submit([encoder.finish()]);
+                rb.map_async(wgpu::MapMode::Read, .., |r| r.unwrap());
+                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                let t: Vec<u64> = rb.get_mapped_range(..).unwrap().as_chunks::<8>().0.iter().map(|b| u64::from_le_bytes(*b)).collect();
+                rb.unmap();
+                let (s, e) = crate::gputime::generate_span(&t);
+                // The first frames settle the clocks.
+                if i >= 30 {
+                    ms.push((e - s) as f64 * f64::from(queue.get_timestamp_period()) / 1e6);
+                }
+                next += interval;
+                if let Some(rest) = next.checked_duration_since(std::time::Instant::now()) {
+                    std::thread::sleep(rest);
+                }
+            }
+            let mut sorted = ms.clone();
+            sorted.sort_by(f64::total_cmp);
+            let at = |q: f64| sorted[((sorted.len() - 1) as f64 * q) as usize];
+            let over = ms.iter().filter(|&&m| m > 15.7).count();
+            eprintln!(
+                "rife paced scale {scale}, fp16 {}: median {:.2} ms, p90 {:.2}, p99 {:.2}, max {:.2}; over 15.7 ms: {over} of {}",
+                rife.fp16,
+                at(0.5),
+                at(0.9),
+                at(0.99),
+                at(1.0),
+                ms.len()
+            );
+            // The window's budget: a refresh with room for its other passes
+            // and the compositor (#74's pacing fix).
+            if scale == SCALE {
+                assert!(at(0.99) <= 8.0, "rife at scale {SCALE}: paced p99 {:.2} ms, over the 8 ms budget", at(0.99));
+            }
+        }
     }
 }

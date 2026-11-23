@@ -808,14 +808,21 @@ const DCI: u32 = 8u;
 var<workgroup> dtile: array<A, 800>; // DCI x 10 x 10
 var<workgroup> dwt: array<vec4<A>, 768>; // DCI x 16 taps x 6 (24 outputs)
 
-fn dstore(x: u32, y: u32, a: array<vec4<A>, 6>) {
+fn dstore(x: u32, y: u32, slice: u32, a: array<vec4<A>, 6>) {
     if x >= p.d_w || y >= p.d_h { return; }
     let dplane = p.d_w * p.d_h;
     for (var j = 0u; j < 6u; j++) {
         let v4 = a[j];
         for (var e = 0u; e < 4u; e++) {
             let oc = j * 4u + e;
-            dst[oc * dplane + y * p.d_w + x] = f32(v4[e]) + bias[oc];
+            let at = oc * dplane + y * p.d_w + x;
+            // Split-K (#74's pacing fix): this slice's partial sum, the
+            // bias added once by `reduce`.
+            if (p.flags & PARTIAL) != 0u {
+                dst[slice * p.d_c * dplane + at] = f32(v4[e]);
+            } else {
+                dst[at] = f32(v4[e]) + bias[oc];
+            }
         }
     }
 }
@@ -850,14 +857,22 @@ fn deconv(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec
     var o113 = vec4<A>(0.0);
     var o114 = vec4<A>(0.0);
     var o115 = vec4<A>(0.0);
-    for (var c0 = 0u; c0 < p.s_c; c0 += DCI) {
+    // Split-K: workgroup layer z sums input channels [z * f_off, +f_off)
+    // (the convolutions' scheme); unsplit, all of them.
+    var c_begin = 0u;
+    var c_end = p.s_c;
+    if (p.flags & PARTIAL) != 0u {
+        c_begin = wg.z * p.f_off;
+        c_end = min(c_begin + p.f_off, p.s_c);
+    }
+    for (var c0 = c_begin; c0 < c_end; c0 += DCI) {
         for (var t = lin; t < DCI * 100u; t += 64u) {
             let c = t / 100u;
             let r = t % 100u;
             let ix = i32(wg.x * 8u + r % 10u) - 1;
             let iy = i32(wg.y * 8u + r / 10u) - 1;
             var v = 0.0;
-            if c0 + c < p.s_c && ix >= 0 && iy >= 0 && ix < i32(p.s_w) && iy < i32(p.s_h) {
+            if c0 + c < c_end && ix >= 0 && iy >= 0 && ix < i32(p.s_w) && iy < i32(p.s_h) {
                 v = src[(c0 + c) * splane + u32(iy) * p.s_w + u32(ix)];
             }
             dtile[t] = A(v);
@@ -867,7 +882,7 @@ fn deconv(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec
             let k = (t / 6u) % 16u;
             let c = t / 96u;
             var v = vec4f(0.0);
-            if c0 + c < p.s_c {
+            if c0 + c < c_end {
                 for (var e = 0u; e < 4u; e++) {
                     v[e] = weight[((j * 4u + e) * p.s_c + c0 + c) * 16u + k];
                 }
@@ -875,7 +890,7 @@ fn deconv(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec
             dwt[t] = vec4<A>(v);
         }
         workgroupBarrier();
-        let nc = min(DCI, p.s_c - c0);
+        let nc = min(DCI, c_end - c0);
         for (var c = 0u; c < nc; c++) {
             { let v = dtile[c * 100u + (l.y + 1u) * 10u + l.x + 1u]; let wb = (c * 16u + 5u) * 6u;
               o000 += v * dwt[wb + 0u]; o001 += v * dwt[wb + 1u]; o002 += v * dwt[wb + 2u]; o003 += v * dwt[wb + 3u]; o004 += v * dwt[wb + 4u]; o005 += v * dwt[wb + 5u]; }
@@ -912,10 +927,10 @@ fn deconv(@builtin(local_invocation_id) l: vec3u, @builtin(workgroup_id) wg: vec
         }
         workgroupBarrier();
     }
-    dstore(n * 2u + 0u, m * 2u + 0u, array<vec4<A>, 6>(o000, o001, o002, o003, o004, o005));
-    dstore(n * 2u + 1u, m * 2u + 0u, array<vec4<A>, 6>(o010, o011, o012, o013, o014, o015));
-    dstore(n * 2u + 0u, m * 2u + 1u, array<vec4<A>, 6>(o100, o101, o102, o103, o104, o105));
-    dstore(n * 2u + 1u, m * 2u + 1u, array<vec4<A>, 6>(o110, o111, o112, o113, o114, o115));
+    dstore(n * 2u + 0u, m * 2u + 0u, wg.z, array<vec4<A>, 6>(o000, o001, o002, o003, o004, o005));
+    dstore(n * 2u + 1u, m * 2u + 0u, wg.z, array<vec4<A>, 6>(o010, o011, o012, o013, o014, o015));
+    dstore(n * 2u + 0u, m * 2u + 1u, wg.z, array<vec4<A>, 6>(o100, o101, o102, o103, o104, o105));
+    dstore(n * 2u + 1u, m * 2u + 1u, wg.z, array<vec4<A>, 6>(o110, o111, o112, o113, o114, o115));
 }
 
 /// A block's end: its 24-channel deconvolution PixelShuffled (factor 2) to

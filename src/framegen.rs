@@ -349,7 +349,7 @@ pub fn generator(mode: Mode, device: &wgpu::Device) -> Option<Box<dyn Generator>
         Mode::FfxQuality => Some(Box::new(ffx::Ffx::new(device, ffx::Quality::BEST))),
         // The weights are embedded and checked by a test (rife.rs): a
         // failure here is a broken build, not a run-time condition.
-        Mode::Rife => Some(Box::new(rife::Rife::new(device, rife::SCALE).expect("the embedded RIFE weights load"))),
+        Mode::Rife => Some(Box::new(rife::Rife::new(device, rife::scale()).expect("the embedded RIFE weights load"))),
     }
 }
 
