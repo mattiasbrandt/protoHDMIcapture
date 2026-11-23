@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use crate::capture::{self, Event, Format, FrameSource, Signal};
 use crate::dashboard::Live;
+use crate::duplicate::{Detector, Kind, Tracker};
 use crate::present::Tag;
 
 /// Why a window run ended.
@@ -116,6 +117,22 @@ pub struct Slot {
     pub superseded: u64,
 }
 
+impl Slot {
+    /// A captured frame replaces whatever waits. A duplicate frame that
+    /// replaces a new frame the window never took stays new: the kind is
+    /// against the last frame the window took (#65).
+    pub fn put(&mut self, data: &[u8], mut tag: Tag) {
+        if let Some(waiting) = self.tag {
+            self.superseded += 1;
+            if waiting.kind == Kind::New {
+                tag.kind = Kind::New;
+            }
+        }
+        self.data.copy_from_slice(data);
+        self.tag = Some(tag);
+    }
+}
+
 /// The host seam: the window side of a run.
 pub trait Host {
     /// Ready for a window: how the run's threads will reach it.
@@ -183,18 +200,18 @@ pub fn run(host: &mut dyn Host, mut source: Box<dyn FrameSource>, plan: Plan, qu
         thread::spawn(move || -> (u64, u64) {
             let mut frames = 0u64;
             let mut gaps = 0u64;
+            let mut detector = Detector::new(format.width, format.height);
+            let mut tracker = Tracker::new();
             let result = capture::run(&mut *source, &capture::Monotonic, &stop, &live.dropped, &mut |e| match e {
                 Event::Frame(f) => {
                     frames += 1;
                     live.frame();
-                    {
-                        let mut s = slot.lock().expect("the slot's lock is never poisoned");
-                        if s.tag.is_some() {
-                            s.superseded += 1;
-                        }
-                        s.data.copy_from_slice(f.data);
-                        s.tag = Some(Tag { captured: f.captured, dequeued: f.dequeued, repaint: false });
-                    }
+                    let kind = detector.classify(f.data);
+                    tracker.push(kind, f.captured);
+                    live.source(kind, &tracker);
+                    slot.lock()
+                        .expect("the slot's lock is never poisoned")
+                        .put(f.data, Tag { captured: f.captured, dequeued: f.dequeued, repaint: false, kind });
                     wake(Wake::Frame);
                 }
                 Event::Gap { from, to, lost } => {
@@ -299,6 +316,29 @@ mod tests {
     use crate::capture::{Mark, Pixels, Raw, Stream};
 
     const FORMAT: Format = Format { width: 4, height: 2, fps: 60.0, pixels: Pixels::Yuyv };
+
+    fn tag(kind: Kind) -> Tag {
+        Tag { captured: Duration::ZERO, dequeued: Duration::ZERO, repaint: false, kind }
+    }
+
+    #[test]
+    fn a_duplicate_over_an_untaken_new_frame_stays_new() {
+        let mut slot = Slot { data: vec![0; 4], tag: None, superseded: 0 };
+        slot.put(&[1; 4], tag(Kind::New));
+        slot.put(&[2; 4], tag(Kind::Duplicate));
+        assert_eq!(slot.superseded, 1);
+        assert_eq!(slot.data, [2; 4]);
+        assert_eq!(slot.tag.map(|t| t.kind), Some(Kind::New), "new since the last frame the window took");
+        // Taken: the next duplicate is a duplicate.
+        slot.tag.take();
+        slot.put(&[3; 4], tag(Kind::Duplicate));
+        assert_eq!(slot.tag.map(|t| t.kind), Some(Kind::Duplicate));
+        assert_eq!(slot.superseded, 1);
+        // A new frame over a waiting duplicate is new.
+        slot.put(&[4; 4], tag(Kind::New));
+        assert_eq!(slot.tag.map(|t| t.kind), Some(Kind::New));
+        assert_eq!(slot.superseded, 2);
+    }
     /// Longer than any test should wait: a hang fails instead.
     const PATIENCE: Duration = Duration::from_secs(10);
 

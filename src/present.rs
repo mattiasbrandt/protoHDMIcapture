@@ -13,6 +13,8 @@
 
 use std::time::Duration;
 
+use crate::duplicate::Kind;
+
 #[cfg(any(windows, test))]
 mod dxgi;
 #[cfg(windows)]
@@ -32,6 +34,9 @@ pub struct Tag {
     /// The last frame drawn again for the overlay (no new frame came): paced
     /// like any present, not measured.
     pub repaint: bool,
+    /// A new frame or a duplicate frame (duplicate.rs), against the last
+    /// frame the window took: a repaint is a duplicate.
+    pub kind: Kind,
 }
 
 /// The platform seam for presentation timing and pacing.

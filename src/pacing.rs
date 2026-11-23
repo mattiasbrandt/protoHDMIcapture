@@ -272,7 +272,7 @@ mod tests {
         // the return counted every refresh since. An HDMI pull, here.
         let refresh = Duration::from_micros(16_681);
         let present = |p: &mut Pacing, at: Duration| {
-            let tag = Tag { captured: at - MS(30), dequeued: at - MS(20), repaint: false };
+            let tag = Tag { captured: at - MS(30), dequeued: at - MS(20), repaint: false, kind: crate::duplicate::Kind::New };
             p.feedback(Outcome::Presented { tag, at, refresh, flags: 0 });
         };
         let gone = Signal::NoSignal { since: Since::Stopped, reason: Reason::Nothing };

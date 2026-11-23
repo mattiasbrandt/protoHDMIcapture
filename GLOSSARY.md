@@ -110,10 +110,18 @@ monitors, and recent events. Never part of the overlay.
 _Avoid_: debug window, stats
 
 **Duplicate frame**:
-A card frame showing the same picture as the one before it, because the
+A card frame showing the same picture as the last new frame, because the
 source sent its picture again: a 30 fps game in a 60 Hz signal sends each
-picture twice. The others are new frames.
+picture twice. The others are new frames. Told by the picture, not by
+counting: a capture card repeats and drops frames itself.
 _Avoid_: repeat, repeated frame (that is close to a repeated refresh)
+
+**Cadence**:
+How many card frames each new frame lasts. 2:2 is every new frame lasting
+two card frames (a 30 fps source in a 60 Hz signal); all new is every card
+frame new. A **cadence break** is a departure from an established 2:2,
+such as a game dipping under 30 fps.
+_Avoid_: pulldown, pacing (that is the window's)
 
 **Frame generation**:
 Making pictures between two new frames, shown in the place of duplicate

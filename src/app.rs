@@ -1287,7 +1287,7 @@ impl App {
                 // last frame (black before the first) drawn again.
                 None if self.pacing.repaint_wanted() => {
                     let now = now_monotonic();
-                    Tag { captured: now, dequeued: now, repaint: true }
+                    Tag { captured: now, dequeued: now, repaint: true, kind: crate::duplicate::Kind::Duplicate }
                 }
                 None => return Ok(()),
             }

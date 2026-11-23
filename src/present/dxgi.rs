@@ -252,7 +252,7 @@ mod tests {
     const P: Duration = Duration::from_micros(16_667);
 
     fn tag(n: u64) -> Tag {
-        Tag { captured: Duration::from_millis(n), dequeued: Duration::from_millis(n), repaint: false }
+        Tag { captured: Duration::from_millis(n), dequeued: Duration::from_millis(n), repaint: false, kind: crate::duplicate::Kind::New }
     }
 
     fn reading(present: u32, shown: u32, sync: u32) -> Reading {

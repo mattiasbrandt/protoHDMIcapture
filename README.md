@@ -266,8 +266,10 @@ to `debug.log` in the run directory (`$XDG_RUNTIME_DIR/protohdmicapture/`;
 on Windows `%LOCALAPPDATA%\protohdmicapture\`).
 
 `DEBUG=window`, or `--debug` for one run, adds the dashboard in its own
-terminal: frame rates, drops, repeated refreshes, latency, CPU, the audio
-sync, underruns, the monitors and recent events, every second.
+terminal: frame rates (the card's, and the source's own, told from its
+duplicate frames, with its cadence and cadence breaks), drops, repeated
+refreshes, latency, CPU, the audio sync, underruns, the monitors and
+recent events, every second.
 `protohdmicapture --dashboard` attaches one to a running viewer, and **d**
 opens it from the window. Closing it never touches the feed.
 

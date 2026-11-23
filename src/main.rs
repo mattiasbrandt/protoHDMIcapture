@@ -8,6 +8,7 @@ mod card;
 mod dashboard;
 mod debuglog;
 mod desktop;
+mod duplicate;
 mod feed;
 mod gputime;
 mod keys;

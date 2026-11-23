@@ -20,7 +20,7 @@
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -30,6 +30,7 @@ use serde_json::{Value, json};
 use crate::audio::{Counters, RATE};
 use crate::capture::{Dropped, Reason, Signal, Since};
 use crate::desktop::{Desktop, fmt_g};
+use crate::duplicate::{Cadence, Kind, Tracker};
 use crate::overlay::Notify;
 use crate::stats::percentiles;
 
@@ -103,6 +104,38 @@ pub struct Live {
     samples: Mutex<Vec<(Duration, Duration)>>,
     events: Mutex<VecDeque<String>>,
     audio: Mutex<AudioLive>,
+    /// New and duplicate frames (duplicate.rs), as the capture thread
+    /// tells them.
+    new_frames: AtomicU64,
+    duplicate_frames: AtomicU64,
+    /// The source's cadence (`cadence_code`) and its breaks.
+    cadence: AtomicU8,
+    cadence_breaks: AtomicU64,
+    /// The card's and the source's frame rates over the last second, as
+    /// f64 bits (`NO_RATE`: not known yet).
+    signal_hz: AtomicU64,
+    source_fps: AtomicU64,
+}
+
+/// A rate not known yet, in `Live`'s f64-bit fields (a NaN's bits).
+const NO_RATE: u64 = u64::MAX;
+
+fn cadence_code(c: Cadence) -> u8 {
+    match c {
+        Cadence::Measuring => 0,
+        Cadence::TwoTwo => 1,
+        Cadence::AllNew => 2,
+        Cadence::Uneven => 3,
+    }
+}
+
+fn cadence_of(code: u8) -> Cadence {
+    match code {
+        1 => Cadence::TwoTwo,
+        2 => Cadence::AllNew,
+        3 => Cadence::Uneven,
+        _ => Cadence::Measuring,
+    }
 }
 
 impl Live {
@@ -120,7 +153,26 @@ impl Live {
             samples: Mutex::new(Vec::with_capacity(256)),
             events: Mutex::new(VecDeque::with_capacity(EVENTS)),
             audio: Mutex::new(AudioLive::Off("not started".into())),
+            new_frames: AtomicU64::new(0),
+            duplicate_frames: AtomicU64::new(0),
+            cadence: AtomicU8::new(cadence_code(Cadence::Measuring)),
+            cadence_breaks: AtomicU64::new(0),
+            signal_hz: AtomicU64::new(NO_RATE),
+            source_fps: AtomicU64::new(NO_RATE),
         }
+    }
+
+    /// A card frame's kind, and the source's cadence and rates after it.
+    pub fn source(&self, kind: Kind, tracker: &Tracker) {
+        match kind {
+            Kind::New => self.new_frames.fetch_add(1, Ordering::Relaxed),
+            Kind::Duplicate => self.duplicate_frames.fetch_add(1, Ordering::Relaxed),
+        };
+        self.cadence.store(cadence_code(tracker.cadence()), Ordering::Relaxed);
+        self.cadence_breaks.store(tracker.breaks(), Ordering::Relaxed);
+        let (signal, source) = tracker.rates().map_or((NO_RATE, NO_RATE), |(s, f)| (s.to_bits(), f.to_bits()));
+        self.signal_hz.store(signal, Ordering::Relaxed);
+        self.source_fps.store(source, Ordering::Relaxed);
     }
 
     pub fn frame(&self) {
@@ -321,7 +373,13 @@ impl Rolling {
             None => Value::Null,
         };
         let refresh_ns = live.refresh_ns.load(Ordering::Relaxed);
+        let picture = *live.signal.lock().expect("the signal's lock is never poisoned") == Signal::Picture;
         let (signal, signal_why) = signal_json(&live.signal.lock().expect("the signal's lock is never poisoned"));
+        // With no picture the last rates are stale: none.
+        let rate = |a: &AtomicU64| match a.load(Ordering::Relaxed) {
+            bits if bits != NO_RATE && picture => json!(f64::from_bits(bits)),
+            _ => Value::Null,
+        };
 
         let snap = json!({
             "v": VERSION,
@@ -337,6 +395,14 @@ impl Rolling {
             "dropped": {
                 "undecodable": live.dropped.undecodable.load(Ordering::Relaxed),
                 "unusable": live.dropped.unusable.load(Ordering::Relaxed),
+            },
+            "source": {
+                "new": live.new_frames.load(Ordering::Relaxed),
+                "duplicate": live.duplicate_frames.load(Ordering::Relaxed),
+                "fps": rate(&live.source_fps),
+                "signal_hz": rate(&live.signal_hz),
+                "cadence": cadence_of(live.cadence.load(Ordering::Relaxed)).as_str(),
+                "breaks": live.cadence_breaks.load(Ordering::Relaxed),
             },
             "window_s": window_s,
             "dequeue_present": latency(&mut to),
@@ -869,6 +935,23 @@ fn render(s: &Value, p: &Paint) -> String {
             }
         ),
     );
+    let src = &s["source"];
+    row(
+        &mut out,
+        "source",
+        match (num(&src["fps"]), num(&src["signal_hz"])) {
+            (Some(fps), Some(hz)) => {
+                let breaks = src["breaks"].as_u64().unwrap_or(0);
+                format!(
+                    "{fps:.1} fps in a {hz:.2} Hz signal ({}) · {} cadence break{}",
+                    src["cadence"].as_str().unwrap_or("?"),
+                    p.good_bad(&breaks.to_string(), breaks == 0),
+                    if breaks == 1 { "" } else { "s" }
+                )
+            }
+            _ => p.dim("no picture yet"),
+        },
+    );
     let gaps = s["gaps"].as_u64().unwrap_or(0);
     row(
         &mut out,
@@ -1350,8 +1433,12 @@ mod tests {
         assert!(first["dequeue_present"].is_null());
         assert_eq!(first["audio"]["state"], "off");
 
-        for _ in 0..6 {
+        let mut tracker = crate::duplicate::Tracker::new();
+        for i in 0..6u64 {
             live.frame();
+            let kind = if i % 2 == 0 { Kind::New } else { Kind::Duplicate };
+            tracker.push(kind, Duration::from_micros(i * 16_667));
+            live.source(kind, &tracker);
         }
         live.gap(10, 13, 2);
         live.signal(&Signal::NoSignal { since: Since::Stopped, reason: Reason::Undecodable("not a JPEG".into()) });
@@ -1378,6 +1465,10 @@ mod tests {
         assert_eq!(s["dequeue_present"]["n"], 2);
         assert_eq!(s["kernel_present"]["median_ms"], 32.0);
         assert_eq!(s["repeated_total"], 2);
+        assert_eq!(s["source"]["new"], 3);
+        assert_eq!(s["source"]["duplicate"], 3);
+        assert_eq!(s["source"]["cadence"], "measuring");
+        assert!(s["source"]["fps"].is_null(), "no picture: the last rates are stale");
         assert_eq!(s["repeated_window"], 2);
         assert!((s["refresh_hz"].as_f64().unwrap() - 59.94).abs() < 0.01);
         let a = &s["audio"];
@@ -1468,6 +1559,7 @@ mod tests {
             "v": 1, "pid": 4242, "up_s": 12.4, "capture_fps": 60.0, "presented_fps": 59.9,
             "frames": 744, "gaps": 0, "lost": 0, "signal": "ok", "signal_why": null,
             "dropped": { "undecodable": 0, "unusable": 0 }, "window_s": 10.0,
+            "source": { "new": 372, "duplicate": 372, "fps": 29.97, "signal_hz": 59.94, "cadence": "2:2", "breaks": 3 },
             "dequeue_present": { "median_ms": 9.31, "p99_ms": 14.2, "n": 599 },
             "kernel_present": { "median_ms": 40.46, "p99_ms": 49.49, "n": 599 },
             "refresh_hz": 59.951, "repeated_window": 0, "repeated_total": 3,
@@ -1480,12 +1572,33 @@ mod tests {
     }
 
     #[test]
+    fn the_source_line_carries_the_trackers_numbers() {
+        let live = Live::new();
+        let mut tracker = crate::duplicate::Tracker::new();
+        for i in 0..120u64 {
+            let kind = if i % 2 == 0 { Kind::New } else { Kind::Duplicate };
+            tracker.push(kind, Duration::from_micros(i * 16_683));
+            live.source(kind, &tracker);
+        }
+        let s = Rolling::new(&live).snapshot(&live);
+        let src = &s["source"];
+        assert_eq!((src["new"].as_u64(), src["duplicate"].as_u64()), (Some(60), Some(60)));
+        assert_eq!(src["cadence"], "2:2");
+        assert_eq!(src["breaks"], 0);
+        assert!((src["signal_hz"].as_f64().unwrap() - 59.94).abs() < 0.01, "{src}");
+        assert!((src["fps"].as_f64().unwrap() - 29.97).abs() < 0.5, "{src}");
+        let text = render(&s, &Paint { on: false });
+        assert!(text.contains("fps in a 59.94 Hz signal (2:2) · 0 cadence breaks"), "{text}");
+    }
+
+    #[test]
     fn the_dashboards_text() {
         let text = render(&sample(), &Paint { on: false });
         let want = [
             "  protoHDMIcapture · live   running · pid 4242 · up 12 s",
             "  fps               60.0 captured · 59.9 presented · display 59.95 Hz",
             "  capture gaps      0 · 0 frames lost · 744 frames captured",
+            "  source            30.0 fps in a 59.94 Hz signal (2:2) · 3 cadence breaks",
             "  signal            ok",
             "  dropped           0 · 0 undecodable · 0 unusable",
             "  dequeue→presented median 9.31 ms · p99 14.20 ms (last 10 s, 599 frames)",
@@ -1506,12 +1619,14 @@ mod tests {
 
         let mut s = sample();
         s["signal"] = json!("never");
+        s["source"]["fps"] = Value::Null;
         s["dequeue_present"] = Value::Null;
         s["audio"] = json!({ "state": "failed", "why": "the card has no PipeWire source" });
         s["events"] = json!([]);
         let text = render(&s, &Paint { on: false });
         for w in [
             "  signal            none since the feed opened",
+            "  source            no picture yet",
             "  dequeue→presented no frame presented yet",
             "  loopback          failed: the card has no PipeWire source",
             "    none",

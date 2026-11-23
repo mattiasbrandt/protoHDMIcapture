@@ -262,7 +262,12 @@ mod tests {
     }
 
     fn present(s: &mut Stats, at: Duration) {
-        let tag = Tag { captured: at - Duration::from_millis(30), dequeued: at - Duration::from_millis(20), repaint: false };
+        let tag = Tag {
+            captured: at - Duration::from_millis(30),
+            dequeued: at - Duration::from_millis(20),
+            repaint: false,
+            kind: crate::duplicate::Kind::New,
+        };
         s.presented(tag, at, REFRESH, 0x7);
     }
 
