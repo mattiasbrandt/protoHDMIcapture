@@ -171,11 +171,18 @@ release build has neither flag: protoHDMIcapture does not record.
   recorded, the seconds asked, `--note "TEXT"` (say what was on screen,
   e.g. "GTA 6, PS5 Pro, standing still"), the card's name and USB id, the
   format, the card and picture settings, the totals, and one entry per
-  frame (index, capture and dequeue times, mean luma). A replay does not
-  need it; copy it along with a clip you keep.
-- **The report** at the end gives the frames, the capture gaps, the length,
-  any frames the disk fell behind on, and the mean luma per second, so a
-  game that dimmed while idle shows.
+  written frame (index, capture and dequeue times, mean luma, new or
+  duplicate, and the duplicate detector's scores for tuning its
+  thresholds). A replay does not need it; copy it along with a clip you
+  keep.
+- **The disk never holds up the capture:** a writer thread takes the
+  frames from a queue of about 2 s of frames (some 500 MB at 1080p60). A
+  disk behind for longer loses frames: counted, and left as gaps in the
+  clip.
+- **The report** at the end gives the frames written, the capture gaps,
+  any frames not written, the length, the mean luma per second, and the
+  share of new frames, so a game that went idle or dimmed shows (a
+  warning when nearly every frame is a duplicate).
 - **Replay:** `target/debug/protohdmicapture --replay FILE`. It plays the
   normal window at the clip's own size and rate, looping, with `--stats`,
   `--seconds` and the dashboard as usual; RES, FPS and FMT are not used.

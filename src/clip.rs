@@ -17,9 +17,12 @@
 //!   lost). About 250 MB a second at 1080p60.
 //! - **Metadata:** `<name>.json` beside the clip (`metadata`), written when
 //!   the recording ends, a quit signal included: what was recorded, from
-//!   which card, with which settings, and one object per frame (index,
-//!   times, mean luma) that later analysis can extend. A replay does not
-//!   need it.
+//!   which card, with which settings, and one object per written frame
+//!   (index, times, mean luma, new or duplicate and the detector's scores)
+//!   that later analysis can extend. A replay does not need it.
+//! - **Never waiting on the disk:** the capture thread only queues each
+//!   frame for a writer thread, in about `QUEUE` of recycled buffers; a
+//!   frame with no buffer free is not written, counted, and left as a gap.
 //! - **Replay:** a `FrameSource` handing the frames back at their recorded
 //!   intervals, with sequence numbers that jump where the recording had a
 //!   gap, looping at the end; `--seconds` ends the run.
@@ -329,8 +332,12 @@ pub struct Recorded {
     pub gaps: u64,
     /// From the first frame's capture to the last's.
     pub length: Duration,
-    /// Frames whose write took longer than one frame interval.
+    /// Frames whose write took longer than one frame interval: the writer
+    /// thread fell behind for a moment, the queue took it up.
     pub behind: u64,
+    /// Card frames not written: the queue was full, the disk behind for
+    /// longer than `QUEUE`. Each run of them is a gap record in the clip.
+    pub skipped: u64,
     /// The mean luma per second, as `Luma::line` writes it.
     pub luma: String,
     /// New frames (duplicate.rs): a recording of a game left idle is all
@@ -402,7 +409,14 @@ pub fn metadata(about: &About, recorded: &str, seconds: u64, header: Header, r: 
         "card": { "name": about.card, "usb_id": about.usb_id },
         "format": { "width": header.width, "height": header.height, "fps": header.fps, "fmt": header.pixels.setting() },
         "settings": settings,
-        "totals": { "frames": r.frames, "new": r.new, "gaps": r.gaps, "behind": r.behind, "length_s": r.length.as_secs_f64() },
+        "totals": {
+            "frames": r.frames,
+            "new": r.new,
+            "gaps": r.gaps,
+            "skipped": r.skipped,
+            "behind": r.behind,
+            "length_s": r.length.as_secs_f64(),
+        },
         "frames": frames,
     })
 }
@@ -448,62 +462,154 @@ fn now_local() -> String {
     }
 }
 
+/// The card frames the writer thread may have queued: about this long of
+/// them, so a disk that stalls this long loses no frame (#66: synchronous
+/// writes on the capture thread lost a third of a 1080p60 recording to
+/// capture stalls of 32 to 500 ms).
+const QUEUE: Duration = Duration::from_secs(2);
+
+/// Where the writer thread puts a recording's records: the clip file, or a
+/// test's stand-in.
+pub trait Sink: Send {
+    fn frame(&mut self, captured: Duration, dequeued: Duration, data: &[u8]) -> io::Result<()>;
+    fn gap(&mut self, from: u32, to: u32, lost: u32) -> io::Result<()>;
+    fn finish(self: Box<Self>) -> io::Result<()>;
+}
+
+impl Sink for Writer {
+    fn frame(&mut self, captured: Duration, dequeued: Duration, data: &[u8]) -> io::Result<()> {
+        Writer::frame(self, captured, dequeued, data)
+    }
+
+    fn gap(&mut self, from: u32, to: u32, lost: u32) -> io::Result<()> {
+        Writer::gap(self, from, to, lost)
+    }
+
+    fn finish(self: Box<Self>) -> io::Result<()> {
+        Writer::finish(*self)
+    }
+}
+
+/// From the capture thread to the writer thread.
+enum Message {
+    Frame { data: Vec<u8>, captured: Duration, dequeued: Duration },
+    Gap { from: u32, to: u32, lost: u32 },
+}
+
 /// Records `source`'s frames into `path` until `stop` is set; the run's
 /// numbers, or the first error (a failed write ends the recording).
 pub fn record_into(source: &mut dyn FrameSource, path: &Path, stop: &AtomicBool) -> Result<Recorded, String> {
     let format = source.format();
-    let mut writer = Writer::create(path, Header::of(format)).map_err(|e| format!("{}: {e}", path.display()))?;
+    let writer = Writer::create(path, Header::of(format)).map_err(|e| format!("{}: {e}", path.display()))?;
+    let buffers = ((format.fps * QUEUE.as_secs_f64()).ceil() as usize).max(2);
+    record_with(source, Box::new(writer), stop, buffers).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The recording's two threads. The capture thread only copies each frame
+/// into a free buffer of `buffers` (preallocated, recycled) and queues it;
+/// it never waits on the disk. With no buffer free the frame is not
+/// written: counted, and the run of such frames written as a gap record so
+/// a replay shows it. The writer thread writes, and measures what it wrote
+/// (mean luma, the duplicate-frame detector): the metadata's per-frame
+/// entries are the written frames.
+fn record_with(source: &mut dyn FrameSource, sink: Box<dyn Sink>, stop: &AtomicBool, buffers: usize) -> Result<Recorded, String> {
+    let format = source.format();
     let interval = Duration::from_secs_f64(1.0 / format.fps.max(1.0));
-    let mut done = Recorded::default();
-    let mut luma = Luma::default();
-    let mut detector = Detector::new(format.width, format.height);
-    let (mut first, mut last) = (None, Duration::ZERO);
-    let mut failed: Option<io::Error> = None;
-    let dropped = capture::Dropped::default();
-    let ran = capture::run(source, &capture::Monotonic, stop, &dropped, &mut |e| {
-        if failed.is_some() {
-            return;
-        }
-        let wrote = match e {
-            Event::Frame(f) => {
-                let t = Instant::now();
-                let w = writer.frame(f.captured, f.dequeued, f.data);
-                if t.elapsed() > interval {
-                    done.behind += 1;
+    let (free_tx, free_rx) = mpsc::channel::<Vec<u8>>();
+    for _ in 0..buffers {
+        free_tx.send(vec![0; format.frame_size()]).expect("the pool's receiver is ours");
+    }
+    let (work_tx, work_rx) = mpsc::channel::<Message>();
+    thread::scope(|scope| {
+        let writer = scope.spawn(move || -> io::Result<Recorded> {
+            let mut sink = sink;
+            let mut done = Recorded::default();
+            let mut luma = Luma::default();
+            let mut detector = Detector::new(format.width, format.height);
+            for m in work_rx {
+                let wrote = match m {
+                    Message::Frame { data, captured, dequeued } => {
+                        let t = Instant::now();
+                        let wrote = sink.frame(captured, dequeued, &data);
+                        if t.elapsed() > interval {
+                            done.behind += 1;
+                        }
+                        done.frames += 1;
+                        let mean = luma.add(captured, &data);
+                        let (kind, scores) = detector.classify_scored(&data);
+                        if kind == Kind::New {
+                            done.new += 1;
+                        }
+                        done.per_frame.push(FrameNote { captured, dequeued, luma: mean, kind, scores });
+                        // Back to the pool; the capture side holds its
+                        // receiver until this thread has ended.
+                        free_tx.send(data).expect("the pool's receiver outlives the writer");
+                        wrote
+                    }
+                    Message::Gap { from, to, lost } => sink.gap(from, to, lost),
+                };
+                if let Err(e) = wrote {
+                    // The recording ends with the error; the capture side
+                    // sees its queue closed.
+                    stop.store(true, Ordering::Relaxed);
+                    return Err(e);
                 }
-                done.frames += 1;
-                first.get_or_insert(f.captured);
-                last = f.captured;
-                let mean = luma.add(f.captured, f.data);
-                let (kind, scores) = detector.classify_scored(f.data);
-                if kind == Kind::New {
-                    done.new += 1;
-                }
-                done.per_frame.push(FrameNote { captured: f.captured, dequeued: f.dequeued, luma: mean, kind, scores });
-                w
             }
-            Event::Gap { from, to, lost } => {
-                done.gaps += 1;
-                writer.gap(from, to, lost)
-            }
-            Event::Signal(s) => {
-                eprintln!("{s}");
-                Ok(())
+            done.luma = luma.line();
+            sink.finish()?;
+            Ok(done)
+        });
+
+        let (mut gaps, mut skipped, mut seen) = (0u64, 0u64, 0u64);
+        let (mut first, mut last) = (None, Duration::ZERO);
+        // A run of frames not written: the frame before it, and how many.
+        let mut skipping: Option<(u32, u32)> = None;
+        let send = |m: Message| {
+            // Closed: the writer thread ended on an error, which its join
+            // reports; stop capturing.
+            if work_tx.send(m).is_err() {
+                stop.store(true, Ordering::Relaxed);
             }
         };
-        if let Err(e) = wrote {
-            failed = Some(e);
-            stop.store(true, Ordering::Relaxed);
+        let dropped = capture::Dropped::default();
+        let ran = capture::run(source, &capture::Monotonic, stop, &dropped, &mut |e| match e {
+            Event::Frame(f) => {
+                first.get_or_insert(f.captured);
+                last = f.captured;
+                let index = seen as u32;
+                seen += 1;
+                match free_rx.try_recv() {
+                    Ok(mut data) => {
+                        if let Some((from, lost)) = skipping.take() {
+                            send(Message::Gap { from, to: index, lost });
+                        }
+                        data.copy_from_slice(f.data);
+                        send(Message::Frame { data, captured: f.captured, dequeued: f.dequeued });
+                    }
+                    Err(_) => {
+                        skipped += 1;
+                        skipping.get_or_insert((index.wrapping_sub(1), 0)).1 += 1;
+                    }
+                }
+            }
+            Event::Gap { from, to, lost } => {
+                gaps += 1;
+                send(Message::Gap { from, to, lost });
+            }
+            Event::Signal(s) => eprintln!("{s}"),
+        });
+        if let Some((from, lost)) = skipping {
+            send(Message::Gap { from, to: seen as u32, lost });
         }
-    });
-    if let Some(e) = failed {
-        return Err(format!("{}: {e}", path.display()));
-    }
-    ran.map_err(|e| format!("the capture ended: {e}"))?;
-    writer.finish().map_err(|e| format!("{}: {e}", path.display()))?;
-    done.length = first.map_or(Duration::ZERO, |f| last.saturating_sub(f));
-    done.luma = luma.line();
-    Ok(done)
+        drop(work_tx);
+        let written = writer.join().map_err(|_| "the clip's writer thread panicked".to_string())?;
+        let mut done = written.map_err(|e| e.to_string())?;
+        ran.map_err(|e| format!("the capture ended: {e}"))?;
+        done.gaps = gaps;
+        done.skipped = skipped;
+        done.length = first.map_or(Duration::ZERO, |f| last.saturating_sub(f));
+        Ok(done)
+    })
 }
 
 /// `--record <name> --seconds N`: `source` headless into `dir/<name>.clip`
@@ -549,8 +655,11 @@ pub fn record(mut source: Box<dyn FrameSource>, dir: &Path, name: &str, seconds:
     let text = serde_json::to_string_pretty(&json).map_err(|e| format!("{}: {e}", meta.display()))?;
     fs::write(&meta, text + "\n").map_err(|e| format!("{}: {e}", meta.display()))?;
     eprintln!("recorded {} frames, {} capture gaps, {:.1} s into {}", r.frames, r.gaps, r.length.as_secs_f64(), path.display());
+    if r.skipped > 0 {
+        eprintln!("warning: {} frames not written: the disk fell behind (gaps in the clip)", r.skipped);
+    }
     if r.behind > 0 {
-        eprintln!("warning: {} frames took longer than a frame interval to write: the disk fell behind", r.behind);
+        eprintln!("note: {} frames took longer than a frame interval to write; the queue took them up", r.behind);
     }
     eprintln!("mean luma per second: {}", r.luma);
     eprintln!("{}", new_share(&r));
@@ -837,6 +946,115 @@ mod tests {
         assert_eq!((frames[1]["largest_block"].as_u64(), frames[1]["over_lo"].as_f64()), (Some(0), Some(0.0)));
         assert_eq!((frames[2]["largest_block"].as_u64(), frames[2]["over_lo"].as_f64()), (Some(3200), Some(1.0)));
         fs::remove_dir_all(d).unwrap();
+    }
+
+    /// A sink as slow as a stalled disk: `delay` a frame, the records kept.
+    struct Slow {
+        delay: Duration,
+        records: Arc<std::sync::Mutex<Vec<Record>>>,
+    }
+
+    impl Sink for Slow {
+        fn frame(&mut self, captured: Duration, dequeued: Duration, data: &[u8]) -> io::Result<()> {
+            thread::sleep(self.delay);
+            self.records.lock().unwrap().push(Record::Frame { captured, dequeued, data: data.to_vec() });
+            Ok(())
+        }
+
+        fn gap(&mut self, from: u32, to: u32, lost: u32) -> io::Result<()> {
+            self.records.lock().unwrap().push(Record::Gap { from, to, lost });
+            Ok(())
+        }
+
+        fn finish(self: Box<Self>) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `n` frames, one every 2 ms, each numbered; the longest the capture
+    /// callback took for one.
+    struct Timed {
+        n: u32,
+        longest: Arc<std::sync::Mutex<Duration>>,
+    }
+
+    impl FrameSource for Timed {
+        fn format(&self) -> Format {
+            FORMAT
+        }
+
+        fn start(&mut self) -> io::Result<Box<dyn Stream + '_>> {
+            Ok(Box::new(TimedStream { n: self.n, sent: 0, longest: self.longest.clone() }))
+        }
+    }
+
+    struct TimedStream {
+        n: u32,
+        sent: u32,
+        longest: Arc<std::sync::Mutex<Duration>>,
+    }
+
+    impl Stream for TimedStream {
+        fn next(&mut self, wait: Duration, take: &mut dyn FnMut(Raw<'_>)) -> io::Result<()> {
+            if self.sent >= self.n {
+                thread::sleep(wait.min(ms(5)));
+                return Ok(());
+            }
+            let data = frame(self.sent as u8);
+            let t = now_monotonic();
+            let called = Instant::now();
+            take(Raw { data: &data, captured: t, dequeued: t, mark: Mark::Sequence(self.sent), flagged: false });
+            let took = called.elapsed();
+            let mut longest = self.longest.lock().unwrap();
+            *longest = (*longest).max(took);
+            self.sent += 1;
+            thread::sleep(ms(2));
+            Ok(())
+        }
+    }
+
+    /// Records `n` frames into a sink `delay` a frame slow, with `buffers`;
+    /// the numbers, the records written and the longest capture callback.
+    fn record_slow(n: u32, delay: Duration, buffers: usize) -> (Recorded, Vec<Record>, Duration) {
+        let records = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let longest = Arc::new(std::sync::Mutex::new(Duration::ZERO));
+        let mut source = Timed { n, longest: longest.clone() };
+        let stop = AtomicBool::new(false);
+        let sink = Box::new(Slow { delay, records: records.clone() });
+        let r = thread::scope(|s| {
+            s.spawn(|| {
+                // The frames are captured in n * 2 ms; the writer drains after.
+                thread::sleep(ms(u64::from(n) * 2 + 100));
+                stop.store(true, Ordering::Relaxed);
+            });
+            record_with(&mut source, sink, &stop, buffers).unwrap()
+        });
+        let records = std::mem::take(&mut *records.lock().unwrap());
+        let longest = *longest.lock().unwrap();
+        (r, records, longest)
+    }
+
+    #[test]
+    fn a_slow_disk_never_holds_up_the_capture() {
+        // 20 ms a write, a frame every 2 ms: written on the capture thread
+        // this took 600 ms of callbacks; queued, each is a copy.
+        let (r, records, longest) = record_slow(30, ms(20), 64);
+        assert!(longest < ms(10), "the capture callback waited {longest:?}");
+        assert_eq!((r.frames, r.skipped, r.behind), (30, 0, 30));
+        let numbers: Vec<u8> =
+            records.iter().filter_map(|r| if let Record::Frame { data, .. } = r { Some(data[0]) } else { None }).collect();
+        assert_eq!(numbers, (0..30).map(|i| frame(i)[0]).collect::<Vec<_>>(), "every frame, in order");
+    }
+
+    #[test]
+    fn frames_with_no_buffer_free_are_counted_and_left_as_a_gap() {
+        let (r, records, longest) = record_slow(20, ms(30), 2);
+        assert!(longest < ms(10), "the capture callback waited {longest:?}");
+        assert!(r.skipped > 0, "{r:?}");
+        assert_eq!(r.frames + r.skipped, 20);
+        let lost: u32 = records.iter().map(|r| if let Record::Gap { lost, .. } = r { *lost } else { 0 }).sum();
+        assert_eq!(u64::from(lost), r.skipped, "each frame not written is in a gap record: {records:?}");
+        assert_eq!(r.per_frame.len() as u64, r.frames, "metadata for written frames only");
     }
 
     #[test]
