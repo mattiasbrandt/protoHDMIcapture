@@ -1293,6 +1293,43 @@ pub mod fake {
 mod tests {
     use super::*;
 
+    /// #76: libpipewire's client module-rt, with RTKit, clamps a client's
+    /// RLIMIT_RTTIME to 0/0, which leaves cpal's RTKit promotion no limit
+    /// it may set (EPERM); DISABLE_RTKIT, set by main's `environment`,
+    /// leaves it unlimited. Needs a running PipeWire and RTKit: run with
+    /// `--ignored`. pw-mon is a plain client: it opens no device.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn pipewire_clients_rttime_limit_with_and_without_rtkit() {
+        let limit = |disable: bool| {
+            let mut cmd = std::process::Command::new("pw-mon");
+            cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+            if disable {
+                cmd.env("DISABLE_RTKIT", "1");
+            } else {
+                cmd.env_remove("DISABLE_RTKIT");
+            }
+            let mut child = cmd.spawn().expect("pw-mon (pipewire's tools)");
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            let limits = std::fs::read_to_string(format!("/proc/{}/limits", child.id())).expect("its limits");
+            child.kill().expect("pw-mon stops");
+            child.wait().expect("pw-mon reaped");
+            limits
+                .lines()
+                .find(|l| l.starts_with("Max realtime timeout"))
+                .expect("the RTTIME line")
+                .split_whitespace()
+                .nth(3)
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(limit(true), "unlimited", "DISABLE_RTKIT leaves RLIMIT_RTTIME alone");
+        // What main's DISABLE_RTKIT works around; if this starts failing,
+        // PipeWire reads RTKit's limit right and the workaround can go.
+        assert_eq!(limit(false), "0", "PipeWire with RTKit clamps the soft limit to 0");
+    }
+
     #[test]
     fn a_loopback_stopped_mid_feed_counts_no_more_underruns() {
         // The laptop (#40): "ring underruns 6706", counted after the card's

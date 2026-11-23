@@ -91,6 +91,15 @@ const USAGE: &str = concat!(
 ///   input must not become the microphone (#5, the Codex review).
 ///   libpipewire adds PIPEWIRE_PROPS to each new stream; WirePlumber
 ///   honours the key. An existing PIPEWIRE_PROPS is kept, with a warning.
+/// - DISABLE_RTKIT=1 for libpipewire's client module-rt (#76): with RTKit
+///   it clamps this process's RLIMIT_RTTIME to 0 (PipeWire 1.6.9 reads
+///   RTKit's RTTimeUSecMax as 0: "clamping rt.time.soft from … to 0
+///   because of RTKit"), and an unprivileged process cannot raise a hard
+///   limit again. cpal then promotes its audio threads through RTKit
+///   itself (audio_thread_priority), which first sets RLIMIT_RTTIME to
+///   (one buffer, RTKit's maximum): from 0/0 that is a raise, refused
+///   (EPERM), and the sound ran without real-time priority. Without
+///   RTKit, module-rt leaves the limit alone and cpal's promotion works.
 fn environment() {
     // Safety: no other thread exists yet.
     unsafe { env::set_var("MANGOHUD", "0") };
@@ -103,6 +112,11 @@ fn environment() {
         // Safety: as above.
         Err(_) => unsafe { env::set_var("PIPEWIRE_PROPS", "{ node.dont-fallback = true }") },
     }
+    // Safety: as above.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        env::set_var("DISABLE_RTKIT", "1")
+    };
 }
 
 /// The audio loopback the settings ask for, not started yet: None for

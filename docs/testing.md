@@ -180,6 +180,27 @@ gst or ffplay are legacy's.
   callback, then the real frame over it in the same refresh (Mailbox), so
   our feedback is always "discarded" and its generated frame never shows.
 
+## Real-time audio (#76)
+
+The dashboard's `priority` line (orange) says the audio thread was
+refused real-time scheduling; the sound may crackle under load. To check
+a run:
+
+- RTKit runs: `busctl get-property org.freedesktop.RealtimeKit1 /org/freedesktop/RealtimeKit1 org.freedesktop.RealtimeKit1 MaxRealtimePriority RTTimeUSecMax`
+  answers (here `i 20`, `x 200000`).
+- The threads: `ps -eLo pid,tid,cls,rtprio,comm` shows `FF` or `RR` with a
+  priority for a real-time thread, `TS` for an ordinary one; RTKit's
+  journal (`journalctl -u rtkit-daemon`) logs each grant.
+- protoHDMIcapture sets `DISABLE_RTKIT=1` for its own libpipewire: with
+  RTKit, PipeWire 1.6.9's client module clamps the process's
+  `RLIMIT_RTTIME` to 0 (`PIPEWIRE_DEBUG=mod.rt:5 pw-mon` shows "clamping
+  rt.time.soft … to 0 because of RTKit"), and cpal's own RTKit promotion
+  then cannot set the limit it needs (`setrlimit` EPERM). The `--ignored`
+  test `pipewire_clients_rttime_limit_with_and_without_rtkit` shows both.
+- PipeWire's own server needs RTKit at its start: one started before RTKit
+  was reachable logs `mod.rt: RTKit error: …ServiceUnknown` and runs its
+  data loop as `TS` until restarted.
+
 ## Recording a clip (dev builds)
 
 For trying frame generation and upscaling on the same card frames every
