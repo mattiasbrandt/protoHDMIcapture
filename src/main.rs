@@ -74,10 +74,13 @@ const USAGE: &str = concat!(
     usage!(),
     "
 
-  dev build (#64): [--record NAME --seconds N [--note TEXT] [--test-pattern]] [--replay FILE] [--framegen MODE]
-  --record NAME   no window: the card's frames into
-                  /var/tmp/protohdmicapture-clips/NAME.clip for --seconds,
-                  and what was recorded into NAME.json beside it
+  dev build (#64): [--record NAME --seconds N [--note TEXT]] [--replay FILE] [--framegen MODE]
+  --record NAME   the card's frames (or --test-pattern's) into
+                  /var/tmp/protohdmicapture-clips/NAME.clip while the
+                  window shows them as in any run, for --seconds or until
+                  the window closes; what was recorded into NAME.json
+                  beside it. With --framegen the window generates frames;
+                  the clip holds the card's frames only
   --note TEXT     a note for NAME.json (\"GTA 6, standing still\")
   --replay FILE   a recorded clip instead of the card, looping
   --framegen MODE frame generation (#66): copy (the last new frame, a
@@ -328,6 +331,18 @@ fn parse_args(args: &[String]) -> Option<Args> {
     Some(a)
 }
 
+/// The dev flags that go together (#64, #79): --note with --record,
+/// --record with --seconds, and not with --replay.
+#[cfg(feature = "dev")]
+fn record_flags(record: Option<&str>, note: Option<&str>, seconds: Option<u64>, replay: Option<&std::path::Path>) -> Result<(), String> {
+    match (record, note, seconds, replay) {
+        (None, Some(_), _, _) => Err("--note goes with --record".into()),
+        (Some(_), _, None, _) => Err("--record needs --seconds N".into()),
+        (Some(_), _, _, Some(_)) => Err("--record and --replay: one at a time".into()),
+        _ => Ok(()),
+    }
+}
+
 fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     // First run: no settings file, so the wizard, as view.sh offers it
     // (not for a measurement run, nor for the wizard's own children).
@@ -383,34 +398,29 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     }
     opts.live_changes = live_changes::LiveChanges::read(&s)?;
     let format = capture::Format::from_settings(s.get("RES"), s.get("FPS"), s.get("FMT"))?;
-    // Dev builds (#64): a clip recorded headless, or replayed at its own format.
+    // Dev builds (#64, #79): a clip recorded while the window shows the
+    // feed, or a clip replayed at its own format.
     #[cfg(feature = "dev")]
-    if note.is_some() && record.is_none() {
-        return Err("--note goes with --record".into());
-    }
+    record_flags(record.as_deref(), note.as_deref(), seconds, replay.as_deref())?;
+    // The card's name for the clip's metadata, once the feed has opened it.
     #[cfg(feature = "dev")]
-    if record.is_some() && opts.framegen.is_some() {
-        return Err("--framegen goes with a window, not --record".into());
-    }
+    let card_about: clip::CardAbout = Arc::default();
     #[cfg(feature = "dev")]
-    if let Some(name) = record {
-        let seconds = seconds.ok_or("--record needs --seconds N")?;
-        if replay.is_some() {
-            return Err("--record and --replay: one at a time".into());
+    let recorded = match record {
+        Some(name) => {
+            let settings = clip::SETTINGS.iter().map(|k| (k.to_string(), s.get(k).to_string())).collect();
+            let mut about = clip::About { note, settings, ..Default::default() };
+            if test_pattern {
+                about.card = "the test pattern".into();
+            }
+            let seconds = seconds.expect("record_flags checked it");
+            let (recording, result) =
+                clip::Recording::start(std::path::Path::new(clip::DIR), &name, seconds, format, about, card_about.clone())?;
+            opts.tap = Some(Box::new(recording));
+            Some(result)
         }
-        let settings = clip::SETTINGS.iter().map(|k| (k.to_string(), s.get(k).to_string())).collect();
-        let mut about = clip::About { note, settings, ..Default::default() };
-        let source: Box<dyn capture::FrameSource> = if test_pattern {
-            about.card = "the test pattern".into();
-            Box::new(pattern::Pattern::new(format))
-        } else {
-            let (source, node) = open_card(&s, format)?;
-            about.card = node.card_type.clone();
-            about.usb_id = card::usb(&node).map(|u| u.id);
-            source
-        };
-        return Ok(clip::record(source, std::path::Path::new(clip::DIR), &name, seconds, &about, quit)?);
-    }
+        None => None,
+    };
     #[cfg(feature = "dev")]
     let (replay, format) = match replay {
         Some(path) => {
@@ -433,13 +443,23 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
         #[cfg(feature = "dev")]
         replay,
     };
-    let parts = feed::Parts {
-        open_card: Box::new(open_card),
-        loopback: Box::new(audio),
-        debug_log: Box::new(debuglog::DebugLog::start),
-        window: Box::new(app::run),
-    };
-    let running = match feed::run(start, parts, quit)? {
+    #[cfg(feature = "dev")]
+    let open_card: feed::OpenCard = Box::new(move |s, f| {
+        let (source, node) = open_card(s, f)?;
+        *card_about.lock().expect("the card's lock is never poisoned") = Some((node.card_type.clone(), card::usb(&node).map(|u| u.id)));
+        Ok((source, node))
+    });
+    #[cfg(not(feature = "dev"))]
+    let open_card: feed::OpenCard = Box::new(open_card);
+    let parts =
+        feed::Parts { open_card, loopback: Box::new(audio), debug_log: Box::new(debuglog::DebugLog::start), window: Box::new(app::run) };
+    let ran = feed::run(start, parts, quit)?;
+    // A recording that failed fails the run (the window has closed).
+    #[cfg(feature = "dev")]
+    if let Some(Some(Err(e))) = recorded.map(|r| r.lock().expect("the recording's result lock is never poisoned").take()) {
+        return Err(format!("recording: {e}").into());
+    }
+    let running = match ran {
         feed::Ran::Ended => return Ok(()),
         // u in the overlay: the feed has let go of the card, so the
         // wizard can open it. The feed comes back with what it saved, or,
@@ -716,6 +736,22 @@ mod tests {
         assert_eq!(parse(&["--record"]), None);
         assert_eq!(parse(&["--record", "a", "--note", "PS5 Pro"]).unwrap().note.as_deref(), Some("PS5 Pro"));
         assert!(super::USAGE.contains("--record NAME") && super::USAGE.contains("--replay FILE"));
+    }
+
+    #[cfg(feature = "dev")]
+    #[test]
+    fn records_flags_go_together() {
+        use std::path::Path;
+        let ok = |r, n, sec, rep: Option<&str>| super::record_flags(r, n, sec, rep.map(Path::new));
+        assert_eq!(ok(Some("a"), None, Some(20), None), Ok(()));
+        assert_eq!(ok(Some("a"), Some("PS5"), Some(20), None), Ok(()));
+        assert_eq!(ok(None, None, None, Some("/x/a.clip")), Ok(()));
+        assert_eq!(ok(None, Some("PS5"), None, None), Err("--note goes with --record".into()));
+        assert_eq!(ok(Some("a"), None, None, None), Err("--record needs --seconds N".into()));
+        assert_eq!(ok(Some("a"), None, Some(20), Some("/x/a.clip")), Err("--record and --replay: one at a time".into()));
+        // A window records now: --framegen goes with it (#79), and the help says so.
+        assert!(super::USAGE.contains("window shows them"));
+        assert!(!super::USAGE.contains("no window"));
     }
 
     #[cfg(not(feature = "dev"))]

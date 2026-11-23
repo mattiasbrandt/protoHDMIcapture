@@ -1,8 +1,9 @@
-//! Clips (#64, `--features dev` only): card frames recorded headless to a
-//! file and replayed through the normal window, so every frame-generation
-//! and upscaling approach (#63) is tried on the same frames without the
-//! source and the card each time. protoHDMIcapture itself does not record;
-//! a release build has none of this.
+//! Clips (#64, `--features dev` only): card frames recorded to a file while
+//! the normal window shows them (#79: the player plays on that window), and
+//! replayed through the same window, so every frame-generation and
+//! upscaling approach (#63) is tried on the same frames without the source
+//! and the card each time. protoHDMIcapture itself does not record; a
+//! release build has none of this.
 //!
 //! - **Where:** `--record <name>` writes `/var/tmp/protohdmicapture-clips/<name>.clip`
 //!   (`DIR`): on disk and temporary by convention (systemd cleans it after
@@ -20,9 +21,11 @@
 //!   which card, with which settings, and one object per written frame
 //!   (index, times, mean luma, new or duplicate and the detector's scores)
 //!   that later analysis can extend. A replay does not need it.
-//! - **Never waiting on the disk:** the capture thread only queues each
-//!   frame for a writer thread, in about `QUEUE` of recycled buffers; a
-//!   frame with no buffer free is not written, counted, and left as a gap.
+//! - **Never costing the picture:** the run's capture thread gives each
+//!   frame to the window first, then (`run::Tap`) only queues a copy for a
+//!   writer thread, in about `QUEUE` of recycled buffers; a frame with no
+//!   buffer free is not written to the clip (the window still showed it),
+//!   counted, and left as a gap.
 //! - **Replay:** a `FrameSource` handing the frames back at their recorded
 //!   intervals, with sequence numbers that jump where the recording had a
 //!   gap, looping at the end; `--seconds` ends the run.
@@ -30,14 +33,12 @@
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::capture::{self, Event, Format, FrameSource, Mark, Pixels, Raw, Stream, now_monotonic};
+use crate::capture::{Format, FrameSource, Mark, Pixels, Raw, Stream, now_monotonic};
 use crate::duplicate::{Detector, Kind, Scores};
-use crate::run::Quit;
 
 /// Where `--record` writes its clips.
 pub const DIR: &str = "/var/tmp/protohdmicapture-clips";
@@ -496,175 +497,272 @@ enum Message {
     Gap { from: u32, to: u32, lost: u32 },
 }
 
-/// Records `source`'s frames into `path` until `stop` is set; the run's
-/// numbers, or the first error (a failed write ends the recording).
-pub fn record_into(source: &mut dyn FrameSource, path: &Path, stop: &AtomicBool) -> Result<Recorded, String> {
-    let format = source.format();
-    let writer = Writer::create(path, Header::of(format)).map_err(|e| format!("{}: {e}", path.display()))?;
-    let buffers = ((format.fps * QUEUE.as_secs_f64()).ceil() as usize).max(2);
-    record_with(source, Box::new(writer), stop, buffers).map_err(|e| format!("{}: {e}", path.display()))
+/// A recording's two halves. The capture side (`frame`, `gap`, on the run's
+/// capture thread) only copies each frame into a free buffer of `buffers`
+/// (preallocated, recycled) and queues it: it never waits on the disk or
+/// on the writer. With no buffer free the frame is not written: counted,
+/// and the run of such frames written as a gap record so a replay shows
+/// it. The writer thread writes, and measures what it wrote (mean luma,
+/// the duplicate-frame detector): the metadata's per-frame entries are the
+/// written frames. A failed write ends the writer; the capture side then
+/// queues nothing more, and `finish` returns the error.
+pub struct Recorder {
+    free: mpsc::Receiver<Vec<u8>>,
+    /// None once the writer has stopped (a failed write) or `finish` ran.
+    work: Option<mpsc::Sender<Message>>,
+    writer: Option<thread::JoinHandle<io::Result<Recorded>>>,
+    gaps: u64,
+    skipped: u64,
+    seen: u64,
+    first: Option<Duration>,
+    last: Duration,
+    /// A run of frames not written: the frame before it, and how many.
+    skipping: Option<(u32, u32)>,
 }
 
-/// The recording's two threads. The capture thread only copies each frame
-/// into a free buffer of `buffers` (preallocated, recycled) and queues it;
-/// it never waits on the disk. With no buffer free the frame is not
-/// written: counted, and the run of such frames written as a gap record so
-/// a replay shows it. The writer thread writes, and measures what it wrote
-/// (mean luma, the duplicate-frame detector): the metadata's per-frame
-/// entries are the written frames.
-fn record_with(source: &mut dyn FrameSource, sink: Box<dyn Sink>, stop: &AtomicBool, buffers: usize) -> Result<Recorded, String> {
-    let format = source.format();
-    let interval = Duration::from_secs_f64(1.0 / format.fps.max(1.0));
-    let (free_tx, free_rx) = mpsc::channel::<Vec<u8>>();
-    for _ in 0..buffers {
-        free_tx.send(vec![0; format.frame_size()]).expect("the pool's receiver is ours");
-    }
-    let (work_tx, work_rx) = mpsc::channel::<Message>();
-    thread::scope(|scope| {
-        let writer = scope.spawn(move || -> io::Result<Recorded> {
-            let mut sink = sink;
-            let mut done = Recorded::default();
-            let mut luma = Luma::default();
-            let mut detector = Detector::new(format.width, format.height);
-            for m in work_rx {
-                let wrote = match m {
-                    Message::Frame { data, captured, dequeued } => {
-                        let t = Instant::now();
-                        let wrote = sink.frame(captured, dequeued, &data);
-                        if t.elapsed() > interval {
-                            done.behind += 1;
-                        }
-                        done.frames += 1;
-                        let mean = luma.add(captured, &data);
-                        let (kind, scores) = detector.classify_scored(&data);
-                        if kind == Kind::New {
-                            done.new += 1;
-                        }
-                        done.per_frame.push(FrameNote { captured, dequeued, luma: mean, kind, scores });
-                        // Back to the pool; the capture side holds its
-                        // receiver until this thread has ended.
-                        free_tx.send(data).expect("the pool's receiver outlives the writer");
-                        wrote
-                    }
-                    Message::Gap { from, to, lost } => sink.gap(from, to, lost),
-                };
-                if let Err(e) = wrote {
-                    // The recording ends with the error; the capture side
-                    // sees its queue closed.
-                    stop.store(true, Ordering::Relaxed);
-                    return Err(e);
-                }
-            }
-            done.luma = luma.line();
-            sink.finish()?;
-            Ok(done)
-        });
-
-        let (mut gaps, mut skipped, mut seen) = (0u64, 0u64, 0u64);
-        let (mut first, mut last) = (None, Duration::ZERO);
-        // A run of frames not written: the frame before it, and how many.
-        let mut skipping: Option<(u32, u32)> = None;
-        let send = |m: Message| {
-            // Closed: the writer thread ended on an error, which its join
-            // reports; stop capturing.
-            if work_tx.send(m).is_err() {
-                stop.store(true, Ordering::Relaxed);
-            }
-        };
-        let dropped = capture::Dropped::default();
-        let ran = capture::run(source, &capture::Monotonic, stop, &dropped, &mut |e| match e {
-            Event::Frame(f) => {
-                first.get_or_insert(f.captured);
-                last = f.captured;
-                let index = seen as u32;
-                seen += 1;
-                match free_rx.try_recv() {
-                    Ok(mut data) => {
-                        if let Some((from, lost)) = skipping.take() {
-                            send(Message::Gap { from, to: index, lost });
-                        }
-                        data.copy_from_slice(f.data);
-                        send(Message::Frame { data, captured: f.captured, dequeued: f.dequeued });
-                    }
-                    Err(_) => {
-                        skipped += 1;
-                        skipping.get_or_insert((index.wrapping_sub(1), 0)).1 += 1;
-                    }
-                }
-            }
-            Event::Gap { from, to, lost } => {
-                gaps += 1;
-                send(Message::Gap { from, to, lost });
-            }
-            Event::Signal(s) => eprintln!("{s}"),
-        });
-        if let Some((from, lost)) = skipping {
-            send(Message::Gap { from, to: seen as u32, lost });
+impl Recorder {
+    pub fn start(format: Format, sink: Box<dyn Sink>, buffers: usize) -> Result<Self, String> {
+        let interval = Duration::from_secs_f64(1.0 / format.fps.max(1.0));
+        let (free_tx, free) = mpsc::channel::<Vec<u8>>();
+        for _ in 0..buffers {
+            free_tx.send(vec![0; format.frame_size()]).expect("the pool's receiver is ours");
         }
-        drop(work_tx);
-        let written = writer.join().map_err(|_| "the clip's writer thread panicked".to_string())?;
-        let mut done = written.map_err(|e| e.to_string())?;
-        ran.map_err(|e| format!("the capture ended: {e}"))?;
-        done.gaps = gaps;
-        done.skipped = skipped;
-        done.length = first.map_or(Duration::ZERO, |f| last.saturating_sub(f));
+        let (work, work_rx) = mpsc::channel::<Message>();
+        let writer = thread::Builder::new()
+            .name("clip writer".into())
+            .spawn(move || -> io::Result<Recorded> {
+                let mut sink = sink;
+                let mut done = Recorded::default();
+                let mut luma = Luma::default();
+                let mut detector = Detector::new(format.width, format.height);
+                for m in work_rx {
+                    let wrote = match m {
+                        Message::Frame { data, captured, dequeued } => {
+                            let t = Instant::now();
+                            let wrote = sink.frame(captured, dequeued, &data);
+                            if t.elapsed() > interval {
+                                done.behind += 1;
+                            }
+                            done.frames += 1;
+                            let mean = luma.add(captured, &data);
+                            let (kind, scores) = detector.classify_scored(&data);
+                            if kind == Kind::New {
+                                done.new += 1;
+                            }
+                            done.per_frame.push(FrameNote { captured, dequeued, luma: mean, kind, scores });
+                            // Back to the pool: its receiver is the
+                            // Recorder's, which joins this thread first.
+                            free_tx.send(data).expect("the pool's receiver outlives the writer");
+                            wrote
+                        }
+                        Message::Gap { from, to, lost } => sink.gap(from, to, lost),
+                    };
+                    if let Err(e) = wrote {
+                        // The viewer goes on; the recording has ended.
+                        eprintln!("warning: the clip's writer stopped: {e}; nothing more is recorded");
+                        return Err(e);
+                    }
+                }
+                done.luma = luma.line();
+                sink.finish()?;
+                Ok(done)
+            })
+            .map_err(|e| format!("the clip's writer thread: {e}"))?;
+        Ok(Self {
+            free,
+            work: Some(work),
+            writer: Some(writer),
+            gaps: 0,
+            skipped: 0,
+            seen: 0,
+            first: None,
+            last: Duration::ZERO,
+            skipping: None,
+        })
+    }
+
+    fn send(&mut self, m: Message) {
+        // Closed: the writer ended on an error, which `finish` reports.
+        if let Some(w) = &self.work
+            && w.send(m).is_err()
+        {
+            self.work = None;
+        }
+    }
+
+    /// A card frame: queued for the writer, or counted as not written.
+    pub fn frame(&mut self, data: &[u8], captured: Duration, dequeued: Duration) {
+        if self.work.is_none() {
+            return;
+        }
+        self.first.get_or_insert(captured);
+        self.last = captured;
+        let index = self.seen as u32;
+        self.seen += 1;
+        match self.free.try_recv() {
+            Ok(mut buf) => {
+                if let Some((from, lost)) = self.skipping.take() {
+                    self.send(Message::Gap { from, to: index, lost });
+                }
+                buf.copy_from_slice(data);
+                self.send(Message::Frame { data: buf, captured, dequeued });
+            }
+            Err(_) => {
+                self.skipped += 1;
+                self.skipping.get_or_insert((index.wrapping_sub(1), 0)).1 += 1;
+            }
+        }
+    }
+
+    /// Buffers that never reached the capture.
+    pub fn gap(&mut self, from: u32, to: u32, lost: u32) {
+        self.gaps += 1;
+        self.send(Message::Gap { from, to, lost });
+    }
+
+    /// The last records written and the writer joined: what was recorded,
+    /// or the write that failed.
+    pub fn finish(mut self) -> Result<Recorded, String> {
+        if let Some((from, lost)) = self.skipping.take() {
+            self.send(Message::Gap { from, to: self.seen as u32, lost });
+        }
+        self.work = None;
+        let writer = self.writer.take().expect("joined only here or in Drop");
+        let mut done = writer.join().map_err(|_| "the clip's writer thread panicked".to_string())?.map_err(|e| e.to_string())?;
+        done.gaps = self.gaps;
+        done.skipped = self.skipped;
+        done.length = self.first.map_or(Duration::ZERO, |f| self.last.saturating_sub(f));
         Ok(done)
-    })
+    }
 }
 
-/// `--record <name> --seconds N`: `source` headless into `dir/<name>.clip`
-/// for `seconds`, or until a quit signal; the report on stderr.
-pub fn record(mut source: Box<dyn FrameSource>, dir: &Path, name: &str, seconds: u64, about: &About, quit: &Quit) -> Result<(), String> {
-    let path = path_for(dir, name)?;
-    fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let format = source.format();
-    let need = estimate(format, seconds);
-    fits(need, free_space(dir)?, dir)?;
-    eprintln!(
-        "recording {}x{} at {} fps for {seconds} s into {} (about {})",
-        format.width,
-        format.height,
-        format.fps,
-        path.display(),
-        gb(need)
-    );
-    let stop = Arc::new(AtomicBool::new(false));
-    let (cancel, cancelled) = mpsc::channel::<()>();
-    let timer = {
-        let (stop, quit) = (stop.clone(), quit.clone());
-        let until = Instant::now() + Duration::from_secs(seconds);
-        thread::spawn(move || {
-            // --seconds, a quit signal, or the recording ending first.
-            while Instant::now() < until && !quit.requested() {
-                if cancelled.recv_timeout(Duration::from_millis(50)) != Err(mpsc::RecvTimeoutError::Timeout) {
-                    return;
-                }
-            }
-            stop.store(true, Ordering::Relaxed);
-        })
-    };
-    let result = record_into(&mut *source, &path, &stop);
-    drop(cancel);
-    if timer.join().is_err() {
-        return Err("the --seconds timer panicked".into());
+impl Drop for Recorder {
+    /// Never finished (the run never started): the writer still ends.
+    fn drop(&mut self) {
+        self.work = None;
+        if let Some(w) = self.writer.take()
+            && w.join().is_err()
+        {
+            eprintln!("warning: the clip's writer thread panicked");
+        }
     }
-    let r = result?;
-    let recorded = now_local();
-    let meta = metadata_path(&path);
-    let json = metadata(about, &recorded, seconds, Header::of(format), &r);
-    let text = serde_json::to_string_pretty(&json).map_err(|e| format!("{}: {e}", meta.display()))?;
-    fs::write(&meta, text + "\n").map_err(|e| format!("{}: {e}", meta.display()))?;
-    eprintln!("recorded {} frames, {} capture gaps, {:.1} s into {}", r.frames, r.gaps, r.length.as_secs_f64(), path.display());
-    if r.skipped > 0 {
-        eprintln!("warning: {} frames not written: the disk fell behind (gaps in the clip)", r.skipped);
+}
+
+/// The buffers a recording queues in: about `QUEUE` of frames.
+fn buffers(format: Format) -> usize {
+    ((format.fps * QUEUE.as_secs_f64()).ceil() as usize).max(2)
+}
+
+/// The card's name and USB id for the metadata, filled once the feed has
+/// opened the card (main.rs): the card is opened after the recording
+/// starts.
+pub type CardAbout = Arc<std::sync::Mutex<Option<(String, Option<String>)>>>;
+
+/// How a recording ended, set when it concludes: None before, then its
+/// result (main.rs turns an error into the run's).
+pub type Finished = Arc<std::sync::Mutex<Option<Result<(), String>>>>;
+
+/// `--record <name> --seconds N` (#79): the window run's frames
+/// (`run::Tap`) into `<dir>/<name>.clip`, while the window shows them as in
+/// any run. Ends with the run's capture: `--seconds`, q, a signal or the
+/// card gone; the metadata and the report are written then, for what was
+/// recorded. A run that never captured a frame leaves no clip.
+pub struct Recording {
+    recorder: Option<Recorder>,
+    path: PathBuf,
+    seconds: u64,
+    format: Format,
+    about: About,
+    card: CardAbout,
+    /// What ending it came to, for main's exit status.
+    result: Finished,
+}
+
+impl Recording {
+    /// Checks the name and the space, creates the clip and starts its
+    /// writer; the recording and where its result lands.
+    pub fn start(dir: &Path, name: &str, seconds: u64, format: Format, about: About, card: CardAbout) -> Result<(Self, Finished), String> {
+        let path = path_for(dir, name)?;
+        fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let need = estimate(format, seconds);
+        fits(need, free_space(dir)?, dir)?;
+        let writer = Writer::create(&path, Header::of(format)).map_err(|e| format!("{}: {e}", path.display()))?;
+        let recorder = Recorder::start(format, Box::new(writer), buffers(format))?;
+        eprintln!(
+            "recording {}x{} at {} fps for {seconds} s into {} (about {}); the window shows the feed",
+            format.width,
+            format.height,
+            format.fps,
+            path.display(),
+            gb(need)
+        );
+        let result = Arc::new(std::sync::Mutex::new(None));
+        Ok((Self { recorder: Some(recorder), path, seconds, format, about, card, result: result.clone() }, result))
     }
-    if r.behind > 0 {
-        eprintln!("note: {} frames took longer than a frame interval to write; the queue took them up", r.behind);
+
+    /// The recording's end: the writer joined, then the metadata and the
+    /// report; a clip with no frame removed.
+    fn conclude(&mut self) {
+        let Some(recorder) = self.recorder.take() else { return };
+        let outcome = recorder.finish().and_then(|r| self.report(&r));
+        if let Err(e) = &outcome {
+            eprintln!("error: recording: {e}");
+        }
+        *self.result.lock().expect("the recording's result lock is never poisoned") = Some(outcome);
     }
-    eprintln!("mean luma per second: {}", r.luma);
-    eprintln!("{}", new_share(&r));
-    eprintln!("metadata: {}", meta.display());
-    Ok(())
+
+    fn report(&mut self, r: &Recorded) -> Result<(), String> {
+        let path = &self.path;
+        if r.frames == 0 {
+            fs::remove_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            eprintln!("recorded nothing: no frame reached the recording; {} removed", path.display());
+            return Ok(());
+        }
+        if let Some((card, usb)) = self.card.lock().expect("the card's lock is never poisoned").take() {
+            self.about.card = card;
+            self.about.usb_id = usb;
+        }
+        let meta = metadata_path(path);
+        let json = metadata(&self.about, &now_local(), self.seconds, Header::of(self.format), r);
+        let text = serde_json::to_string_pretty(&json).map_err(|e| format!("{}: {e}", meta.display()))?;
+        fs::write(&meta, text + "\n").map_err(|e| format!("{}: {e}", meta.display()))?;
+        eprintln!("recorded {} frames, {} capture gaps, {:.1} s into {}", r.frames, r.gaps, r.length.as_secs_f64(), path.display());
+        if r.skipped > 0 {
+            eprintln!("warning: {} frames not written: the disk fell behind (gaps in the clip; the window showed them)", r.skipped);
+        }
+        if r.behind > 0 {
+            eprintln!("note: {} frames took longer than a frame interval to write; the queue took them up", r.behind);
+        }
+        eprintln!("mean luma per second: {}", r.luma);
+        eprintln!("{}", new_share(r));
+        eprintln!("metadata: {}", meta.display());
+        Ok(())
+    }
+}
+
+impl crate::run::Tap for Recording {
+    fn frame(&mut self, data: &[u8], captured: Duration, dequeued: Duration) {
+        if let Some(r) = self.recorder.as_mut() {
+            r.frame(data, captured, dequeued);
+        }
+    }
+
+    fn gap(&mut self, from: u32, to: u32, lost: u32) {
+        if let Some(r) = self.recorder.as_mut() {
+            r.gap(from, to, lost);
+        }
+    }
+
+    fn end(mut self: Box<Self>) {
+        self.conclude();
+    }
+}
+
+impl Drop for Recording {
+    /// The run never started, or never ended its capture: concluded here.
+    fn drop(&mut self) {
+        self.conclude();
+    }
 }
 
 /// `--replay <file>`: a clip as a source.
@@ -762,10 +860,34 @@ impl Stream for Replaying {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
+    use crate::capture::{self, Event};
     use crate::pattern::Pattern;
 
     const FORMAT: Format = Format { width: 8, height: 2, fps: 100.0, pixels: Pixels::Yuyv };
+
+    /// `source` through the capture policy into a `Recorder`, as a run's
+    /// capture thread feeds it, until `stop`.
+    fn record_with(source: &mut dyn FrameSource, sink: Box<dyn Sink>, stop: &AtomicBool, buffers: usize) -> Result<Recorded, String> {
+        let mut rec = Recorder::start(source.format(), sink, buffers)?;
+        let dropped = capture::Dropped::default();
+        capture::run(source, &capture::Monotonic, stop, &dropped, &mut |e| match e {
+            Event::Frame(f) => rec.frame(f.data, f.captured, f.dequeued),
+            Event::Gap { from, to, lost } => rec.gap(from, to, lost),
+            Event::Signal(_) => {}
+        })
+        .map_err(|e| format!("the capture ended: {e}"))?;
+        rec.finish()
+    }
+
+    /// As `record_with`, into the clip file `path`.
+    fn record_into(source: &mut dyn FrameSource, path: &Path, stop: &AtomicBool) -> Result<Recorded, String> {
+        let format = source.format();
+        let writer = Writer::create(path, Header::of(format)).map_err(|e| format!("{}: {e}", path.display()))?;
+        record_with(source, Box::new(writer), stop, buffers(format))
+    }
 
     fn dir() -> PathBuf {
         let d = std::env::temp_dir().join(format!("phc-clip-test-{}-{:?}", std::process::id(), thread::current().id()));
@@ -1055,6 +1177,84 @@ mod tests {
         let lost: u32 = records.iter().map(|r| if let Record::Gap { lost, .. } = r { *lost } else { 0 }).sum();
         assert_eq!(u64::from(lost), r.skipped, "each frame not written is in a gap record: {records:?}");
         assert_eq!(r.per_frame.len() as u64, r.frames, "metadata for written frames only");
+    }
+
+    /// A sink whose second frame fails to write, as a full disk would.
+    struct Failing(u32);
+
+    impl Sink for Failing {
+        fn frame(&mut self, _: Duration, _: Duration, _: &[u8]) -> io::Result<()> {
+            self.0 += 1;
+            if self.0 >= 2 { Err(io::Error::other("no space left on device")) } else { Ok(()) }
+        }
+        fn gap(&mut self, _: u32, _: u32, _: u32) -> io::Result<()> {
+            Ok(())
+        }
+        fn finish(self: Box<Self>) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_failed_write_ends_the_recording_not_the_capture() {
+        let mut rec = Recorder::start(FORMAT, Box::new(Failing(0)), 4).unwrap();
+        let started = Instant::now();
+        for i in 0..50u8 {
+            rec.frame(&frame(i), ms(u64::from(i)), ms(u64::from(i)));
+            thread::sleep(ms(1));
+        }
+        assert!(started.elapsed() < ms(500), "the capture side waited: {:?}", started.elapsed());
+        assert!(rec.work.is_none(), "nothing is queued after the writer stopped");
+        assert_eq!(rec.finish(), Err("no space left on device".into()));
+    }
+
+    /// A recording through the run's tap, in `d`, and its result's slot.
+    fn tapped(d: &Path, name: &str, card: &CardAbout) -> (Box<dyn crate::run::Tap>, Finished) {
+        let wide = Format { width: 64, ..FORMAT };
+        let about = About { note: Some("driving".into()), ..Default::default() };
+        let (r, result) = Recording::start(d, name, 1, wide, about, card.clone()).unwrap();
+        (Box::new(r), result)
+    }
+
+    #[test]
+    fn a_runs_tap_records_a_clip_with_its_metadata() {
+        let d = dir();
+        let card: CardAbout = Arc::default();
+        let (mut tap, result) = tapped(&d, "drive", &card);
+        // The feed opens the card after the recording started.
+        *card.lock().unwrap() = Some(("USB3 Video".into(), Some("345f:2130".into())));
+        let size = Format { width: 64, ..FORMAT }.frame_size();
+        for i in 0..6u8 {
+            tap.frame(&vec![16 + 30 * i; size], ms(10 * u64::from(i)), ms(10 * u64::from(i) + 3));
+        }
+        tap.gap(6, 9, 2);
+        tap.end();
+        assert_eq!(*result.lock().unwrap(), Some(Ok(())));
+        let (_, back) = read_all(&d.join("drive.clip"));
+        assert_eq!(back.iter().filter(|r| matches!(r, Record::Frame { .. })).count(), 6);
+        assert!(back.contains(&Record::Gap { from: 6, to: 9, lost: 2 }), "{back:?}");
+        let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(d.join("drive.json")).unwrap()).unwrap();
+        assert_eq!((json["totals"]["frames"].as_u64(), json["totals"]["gaps"].as_u64()), (Some(6), Some(1)));
+        assert_eq!((json["card"]["name"].as_str(), json["card"]["usb_id"].as_str()), (Some("USB3 Video"), Some("345f:2130")));
+        assert_eq!(json["note"], "driving");
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn a_run_that_recorded_nothing_leaves_no_clip() {
+        let d = dir();
+        let card: CardAbout = Arc::default();
+        // Ended by the run with no frame (the card never sent one).
+        let (tap, result) = tapped(&d, "empty", &card);
+        tap.end();
+        assert_eq!(*result.lock().unwrap(), Some(Ok(())));
+        assert!(!d.join("empty.clip").exists() && !d.join("empty.json").exists());
+        // Never run at all (another viewer had the lock): dropped, the same.
+        let (tap, result) = tapped(&d, "never", &card);
+        drop(tap);
+        assert_eq!(*result.lock().unwrap(), Some(Ok(())));
+        assert!(!d.join("never.clip").exists(), "the name is free for the next try");
+        fs::remove_dir_all(d).unwrap();
     }
 
     #[test]

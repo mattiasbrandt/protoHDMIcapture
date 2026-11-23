@@ -151,6 +151,19 @@ pub trait Host {
     fn show(&mut self, format: Format, slot: &Arc<Mutex<Slot>>, end: &End);
 }
 
+/// Where a run's frames also go besides the window: a dev build's
+/// recording (clip.rs, #79). Called on the capture thread, after the slot
+/// has the frame and the window was woken, so it never delays the picture;
+/// it must not block.
+pub trait Tap: Send {
+    /// A frame the slot was given: valid only during the call.
+    fn frame(&mut self, data: &[u8], captured: Duration, dequeued: Duration);
+    /// Buffers never reached us (`capture::Event::Gap`).
+    fn gap(&mut self, from: u32, to: u32, lost: u32);
+    /// The capture ended: the run's last call.
+    fn end(self: Box<Self>);
+}
+
 /// What the run needs beyond its source and window.
 pub struct Plan {
     /// `--seconds`: the run ends `TimeUp` after this.
@@ -161,6 +174,8 @@ pub struct Plan {
     pub log_signal: bool,
     /// `--stats`: the capture's summary at the end.
     pub stats: bool,
+    /// The frames also go here (a dev build's `--record`).
+    pub tap: Option<Box<dyn Tap>>,
 }
 
 /// One window over `source`, until it ends; why it did.
@@ -204,6 +219,7 @@ pub fn run(host: &mut dyn Host, mut source: Box<dyn FrameSource>, plan: Plan, qu
     let capture_thread = {
         let (slot, stop, end, live) = (slot.clone(), stop.clone(), end.clone(), plan.live.clone());
         let log_signal = plan.log_signal;
+        let mut tap = plan.tap;
         thread::spawn(move || -> (u64, u64) {
             let mut frames = 0u64;
             let mut gaps = 0u64;
@@ -221,10 +237,16 @@ pub fn run(host: &mut dyn Host, mut source: Box<dyn FrameSource>, plan: Plan, qu
                         Tag { captured: f.captured, dequeued: f.dequeued, repaint: false, kind, generated: false, withheld: 0 },
                     );
                     wake(Wake::Frame);
+                    if let Some(t) = tap.as_mut() {
+                        t.frame(f.data, f.captured, f.dequeued);
+                    }
                 }
                 Event::Gap { from, to, lost } => {
                     gaps += 1;
                     live.gap(from, to, lost);
+                    if let Some(t) = tap.as_mut() {
+                        t.gap(from, to, lost);
+                    }
                     eprintln!("capture gap: sequence {from} -> {to}, {lost} lost");
                 }
                 Event::Signal(s) => {
@@ -242,6 +264,9 @@ pub fn run(host: &mut dyn Host, mut source: Box<dyn FrameSource>, plan: Plan, qu
                     end.set(Outcome::CaptureEnded("the capture stopped".into()));
                 }
                 Ok(()) => {}
+            }
+            if let Some(t) = tap {
+                t.end();
             }
             (frames, gaps)
         })
@@ -477,7 +502,7 @@ mod tests {
     }
 
     fn plan(seconds: Option<Duration>) -> Plan {
-        Plan { seconds, live: Arc::new(Live::new()), log_signal: false, stats: false }
+        Plan { seconds, live: Arc::new(Live::new()), log_signal: false, stats: false, tap: None }
     }
 
     fn card(frames: u32, fail: bool) -> Box<dyn FrameSource> {
@@ -537,6 +562,43 @@ mod tests {
         assert_eq!(run(&mut host, card(0, false), plan(Some(Duration::from_millis(100))), &quit), Outcome::Closed);
         assert_eq!(run(&mut host, card(0, false), plan(None), &quit), Outcome::Closed);
         assert!(!quit.requested(), "the timer is the run's, not a quit request");
+    }
+
+    /// A tap that counts what it is given.
+    #[derive(Default)]
+    struct Counted {
+        frames: u64,
+        gaps: u64,
+        ended: u32,
+    }
+
+    struct Counting(Arc<Mutex<Counted>>);
+
+    impl Tap for Counting {
+        fn frame(&mut self, data: &[u8], _: Duration, _: Duration) {
+            assert_eq!(data.len(), FORMAT.frame_size());
+            self.0.lock().unwrap().frames += 1;
+        }
+        fn gap(&mut self, _: u32, _: u32, _: u32) {
+            self.0.lock().unwrap().gaps += 1;
+        }
+        fn end(self: Box<Self>) {
+            self.0.lock().unwrap().ended += 1;
+        }
+    }
+
+    #[test]
+    fn a_runs_frames_reach_both_the_window_and_its_tap() {
+        let quit = Quit::new();
+        let counted = Arc::new(Mutex::new(Counted::default()));
+        let plan = Plan { tap: Some(Box::new(Counting(counted.clone()))), ..plan(None) };
+        // The card sends 20 frames and is gone: the run ends with its capture.
+        let mut host = Scripted::new([Act::Wait]);
+        assert_eq!(run(&mut host, card(20, true), plan, &quit), Outcome::CaptureEnded("the card is gone".into()));
+        let c = counted.lock().unwrap();
+        assert_eq!(c.frames, 20, "every frame the slot got");
+        assert_eq!(host.frames, 20, "the window was woken for each of them");
+        assert_eq!((c.gaps, c.ended), (0, 1), "ended once, when the capture ended");
     }
 
     #[test]

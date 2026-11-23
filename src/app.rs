@@ -109,6 +109,8 @@ pub struct Options {
     /// Frame generation's mode (framegen.rs, #66): a dev build's
     /// `--framegen`; None, the frames as the card sends them.
     pub framegen: Option<Mode>,
+    /// Where the frames also go: a dev build's `--record` (clip.rs, #79).
+    pub tap: Option<Box<dyn crate::run::Tap>>,
 }
 
 impl Options {
@@ -130,6 +132,7 @@ impl Options {
             dashboard: None,
             refocus: None,
             framegen: None,
+            tap: None,
         }
     }
 }
@@ -512,13 +515,14 @@ fn posts(pending: &AtomicBool, w: &Wake) -> bool {
 }
 
 /// One window over `source` (run.rs), on winit: until it ends, and why.
-pub fn run(source: Box<dyn FrameSource>, opts: Options, quit: &Quit) -> Outcome {
+pub fn run(source: Box<dyn FrameSource>, mut opts: Options, quit: &Quit) -> Outcome {
     let plan = Plan {
         seconds: opts.seconds.map(Duration::from_secs),
         live: opts.live.clone(),
         // The wizard's page says what its feed does (its signal check).
         log_signal: opts.wizard.is_none(),
         stats: opts.stats,
+        tap: opts.tap.take(),
     };
     let mut host = Winit { opts: Some(opts), event_loop: None, window_no: 0, frame_wake: Arc::default() };
     crate::run::run(&mut host, source, plan, quit)

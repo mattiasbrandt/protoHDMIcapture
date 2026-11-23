@@ -238,15 +238,21 @@ a run:
 ## Recording a clip (dev builds)
 
 For trying frame generation and upscaling on the same card frames every
-time (#63, #64), a dev build records them headless and replays them. A
-release build has neither flag: protoHDMIcapture does not record.
+time (#63, #64), a dev build records them while its window shows the feed
+(#79), and replays them. A release build has neither flag:
+protoHDMIcapture does not record.
 
 - **Build:** `cargo build --features dev`.
 - **Record:** `target/debug/protohdmicapture --record NAME --seconds N`.
-  It runs headless: no window, no audio, no dashboard. The card is the
-  one a normal run opens, at RES, FPS and FMT; add `--test-pattern` to
-  record the pattern instead. It is a card run: brief it and wait for a
-  go, like any other.
+  It is a normal run with its window (the sound, the keys, the overlay,
+  the dashboard and `--stats` as usual), so the player can play on it
+  with no screen on the card's loop-out. The card is the one a normal run
+  opens, at RES, FPS and FMT; add `--test-pattern` to record the pattern
+  instead. With `--framegen` the window generates frames; the clip holds
+  the card's frames only. It ends at `--seconds`, or earlier when the
+  window closes (q, Ctrl-C), with the report and the metadata for what
+  was recorded; a run that recorded no frame leaves no clip. It is a card
+  run: brief it and wait for a go, like any other.
 - **Where clips go:** `/var/tmp/protohdmicapture-clips/NAME.clip`. That is
   on disk, and systemd empties it after 30 days; `/tmp` is RAM-backed on
   many desktops. An existing clip is never written over.
@@ -261,10 +267,14 @@ release build has neither flag: protoHDMIcapture does not record.
   duplicate, and the duplicate detector's scores for tuning its
   thresholds). A replay does not need it; copy it along with a clip you
   keep.
-- **The disk never holds up the capture:** a writer thread takes the
-  frames from a queue of about 2 s of frames (some 500 MB at 1080p60). A
-  disk behind for longer loses frames: counted, and left as gaps in the
-  clip.
+- **The recording never costs the picture:** the capture thread gives
+  each frame to the window first, then only copies it into a queue of
+  about 2 s of frames (some 500 MB at 1080p60) for a writer thread. A disk
+  behind for longer loses frames from the clip, never from the window:
+  counted, and left as gaps in the clip. A failed write (a full disk) ends
+  the recording with a warning; the window goes on, and the run exits
+  with the error. To check it on the card, compare `--stats`'
+  kernel → presented against a plain run's.
 - **The report** at the end gives the frames written, the capture gaps,
   any frames not written, the length, the mean luma per second, and the
   share of new frames, so a game that went idle or dimmed shows (a
