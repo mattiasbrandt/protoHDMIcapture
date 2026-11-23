@@ -31,6 +31,7 @@ use crate::card::{AudioInput, Node};
 pub use crate::card::{Mode, Usb};
 use crate::live_changes;
 use crate::overlay::wrap;
+use crate::scale;
 use crate::settings;
 use crate::sources;
 
@@ -71,6 +72,8 @@ pub enum Stage {
     Audio,
     Display,
     Refresh,
+    /// Upscaling, and what frame generation would do (#85).
+    Gpu,
     Player,
     Sync,
     Debug,
@@ -89,6 +92,7 @@ impl Stage {
             Stage::Audio => "Audio",
             Stage::Display => "Display mode",
             Stage::Refresh => "Refresh rate",
+            Stage::Gpu => "GPU enhancements",
             Stage::Player => "Player",
             Stage::Sync => "Audio sync",
             Stage::Debug => "Troubleshooting",
@@ -247,7 +251,7 @@ enum Step {
     DisplayCustom,
     RefreshPick,
     PlayerSwitch,
-    PlayerScaling,
+    GpuUpscaling,
     SyncNone,
     SyncAsk,
     SyncTune,
@@ -303,6 +307,11 @@ pub struct Wizard {
     ask: Ask,
     /// The window setup.rs has open.
     pub running: Phase,
+    /// The monitor the wizard's window is on, and the graphics card (its
+    /// name, and whether it is a dedicated one), when known (app.rs, #85):
+    /// the GPU enhancements step decides Upscaling from them.
+    pub monitor: Option<(u32, u32)>,
+    pub gpu: Option<(String, bool)>,
     outcome: Option<Outcome>,
     cancelled: bool,
 
@@ -455,6 +464,27 @@ fn choose_labelled(prompt: &str, default: &str, label: &'static str, items: Vec<
     Ask::Choose { prompt: prompt.into(), items, default: d, default_label: label, sel: d.unwrap_or(0) }
 }
 
+/// Upscaling's automatic value and the reason, in words (#85): on (FSR 1)
+/// with a dedicated GPU on a monitor that enlarges the picture; off
+/// otherwise. `gpu`: the card's name and whether it is dedicated.
+fn upscaling_auto(gpu: Option<(&str, bool)>, monitor: Option<(u32, u32)>, fit: Option<&scale::Fit>) -> (scale::Upscaling, String) {
+    use scale::Upscaling::{Fsr, Off};
+    let Some((name, dedicated)) = gpu else {
+        return (Off, "The graphics card is not known yet, so Upscaling stays off".into());
+    };
+    if !dedicated {
+        return (Off, format!("{name} is a built-in GPU: Upscaling is meant for a dedicated gaming GPU, so it stays off"));
+    }
+    let (Some((w, h)), Some(fit)) = (monitor, fit) else {
+        return (Off, format!("{name}: the monitor is not known yet, so Upscaling stays off"));
+    };
+    if fit.enlarged {
+        (Fsr, format!("{name}, {w}x{h} monitor: the picture is {}, so Upscaling is on", fit.reason))
+    } else {
+        (Off, format!("{name}, {w}x{h} monitor: the picture is {}, so Upscaling has nothing to do", fit.reason))
+    }
+}
+
 impl Wizard {
     /// `first_run`: no settings file yet; the welcome offers to skip.
     /// Err: the settings file is there but cannot be read, so its values
@@ -484,7 +514,7 @@ impl Wizard {
         if sys.can_match_refresh() {
             stages.push(Stage::Refresh);
         }
-        stages.extend([Stage::Player, Stage::Sync, Stage::Debug, Stage::Review]);
+        stages.extend([Stage::Gpu, Stage::Player, Stage::Sync, Stage::Debug, Stage::Review]);
         let mut w = Self {
             sys,
             config_file,
@@ -500,6 +530,8 @@ impl Wizard {
             body: Vec::new(),
             ask: Ask::Continue,
             running: Phase::Choose,
+            monitor: None,
+            gpu: None,
             outcome: None,
             cancelled: false,
             card: None,
@@ -619,6 +651,7 @@ impl Wizard {
             Stage::Audio => self.audio_stage(),
             Stage::Display => self.display_stage(),
             Stage::Refresh => self.refresh_stage(),
+            Stage::Gpu => self.gpu_stage(),
             Stage::Player => self.player_stage(),
             Stage::Sync => self.sync_stage(),
             Stage::Debug => self.debug_stage(),
@@ -1294,34 +1327,56 @@ impl Wizard {
             ];
             return self.show(Step::PlayerSwitch, body, yes_no("Switch to mpv?", true));
         }
-        self.player_scaling("mpv");
+        self.player_set("mpv");
     }
 
-    fn player_scaling(&mut self, backend: &str) {
+    fn player_set(&mut self, backend: &str) {
+        // The resize filter (SCALING) is not asked (#85): it keeps its
+        // value, and the GPU enhancements step decides Upscaling.
         self.set("BACKEND", backend);
-        if backend != "mpv" {
-            self.set("SCALING", "");
-            return self.next_stage();
-        }
-        let mut items = vec![
-            tagged("balanced", "Balanced · sharp upscale, low GPU cost", "recommended"),
-            item("fast", "Fast · bilinear, lowest GPU time, softer"),
-            item("high-quality", "High quality · EWA Lanczos upscale, more GPU time"),
-        ];
-        let text = if self.sys.has_view_sh() {
-            items.push(item("config", "Your mpv.conf · whatever it sets (may be expensive)"));
-            "How the picture is scaled to the window. legacy/view.sh's mpv reads it, and protoHDMIcapture too (where \
-             \"Your mpv.conf\" reads as balanced). The feed behind this page keeps the saved scaling; \
-             the choice shows from the next start."
-        } else {
-            "How the picture is scaled to the window. The feed behind this page keeps the saved scaling; \
-             the choice shows from the next start."
-        };
-        let ask = choose("Scaling", &self.cur("SCALING"), items);
-        let body = wrap(text, WIDTH);
-        self.show(Step::PlayerScaling, body, ask);
+        self.next_stage();
     }
 
+    /// GPU enhancements (#85): Upscaling, on by itself with a dedicated GPU
+    /// on a monitor that enlarges the picture (`upscaling_auto`), and what
+    /// frame generation would do.
+    fn gpu_stage(&mut self) {
+        let fit = self.frame_size().zip(self.monitor).map(|(f, m)| scale::fit(f, m));
+        let (auto, reason) = upscaling_auto(self.gpu.as_ref().map(|(n, d)| (n.as_str(), *d)), self.monitor, fit.as_ref());
+        let mut items = vec![
+            item("off", "Off · the resize filter enlarges the picture"),
+            item("fsr", "AMD FSR 1 · enlarge and sharpen, on any GPU"),
+            item("nis", "NVIDIA Image Scaling · enlarge and sharpen, up to 2x"),
+        ];
+        for i in items.iter_mut().filter(|i| i.key == auto.as_str()) {
+            i.tag = Some("recommended".into());
+        }
+        let mut body = wrap(
+            "A gaming GPU can make the picture better. Upscaling enlarges the picture with sharpening when the monitor \
+             shows it bigger than the capture card sends it (a 1440p, 4K or ultrawide monitor).",
+            WIDTH,
+        );
+        body.push(String::new());
+        body.extend(wrap(&format!("{reason}."), WIDTH));
+        body.push(String::new());
+        body.extend(wrap(
+            "Change it any time with c in the overlay (Tab). Frame generation (30 fps games shown at 60, with about one \
+             refresh of extra delay) is not in this version yet.",
+            WIDTH,
+        ));
+        // The value chosen so far (the file's) if there is one; else the
+        // automatic one (`cur` would give the row's default, off).
+        let chosen = self.new.get("UPSCALING").filter(|v| !v.is_empty()).cloned();
+        let default = chosen.unwrap_or_else(|| auto.as_str().to_string());
+        self.show(Step::GpuUpscaling, body, choose("Upscaling", &default, items));
+    }
+
+    /// RES as a size; None when it is not one.
+    fn frame_size(&self) -> Option<(u32, u32)> {
+        let res = self.cur("RES");
+        let (w, h) = res.split_once('x')?;
+        Some((w.parse().ok()?, h.parse().ok()?))
+    }
     fn sync_stage(&mut self) {
         if self.new["AUDIO"] == "none" {
             let body = vec!["No audio was chosen, so there is nothing to line up.".into()];
@@ -1668,10 +1723,10 @@ impl Wizard {
             }
             Step::PlayerSwitch => {
                 let backend = if a == "yes" { "mpv".to_string() } else { self.new["BACKEND"].clone() };
-                self.player_scaling(&backend);
+                self.player_set(&backend);
             }
-            Step::PlayerScaling => {
-                self.set("SCALING", a);
+            Step::GpuUpscaling => {
+                self.set("UPSCALING", a);
                 self.next_stage();
             }
             Step::SyncAsk => match a {
@@ -2149,6 +2204,65 @@ pub(crate) mod tests {
         f
     }
 
+    #[test]
+    fn upscaling_turns_on_by_itself_with_a_dedicated_gpu_on_an_enlarging_monitor() {
+        use scale::Upscaling::{Fsr, Off};
+        let hd = (1920, 1080);
+        let at = |m| (Some(m), scale::fit(hd, m));
+        let (m, f) = at((3440, 1440));
+        let (up, why) = upscaling_auto(Some(("Radeon RX 9070 XT", true)), m, Some(&f));
+        assert_eq!(up, Fsr);
+        assert_eq!(
+            why,
+            "Radeon RX 9070 XT, 3440x1440 monitor: the picture is enlarged 1.33x on this 3440x1440 monitor, black bars at the sides, so Upscaling is on"
+        );
+        // A built-in GPU: off, whatever the monitor.
+        let (up, why) = upscaling_auto(Some(("Intel UHD 620", false)), m, Some(&f));
+        assert_eq!(up, Off);
+        assert!(why.contains("built-in GPU"), "{why}");
+        // 1:1 and a downscale: nothing to do.
+        for mon in [(1920, 1080), (2560, 1080), (1280, 720)] {
+            let (m, f) = at(mon);
+            let (up, why) = upscaling_auto(Some(("RX", true)), m, Some(&f));
+            assert_eq!(up, Off, "{mon:?}");
+            assert!(why.ends_with("so Upscaling has nothing to do"), "{why}");
+        }
+        // Not known yet: off.
+        assert_eq!(upscaling_auto(None, m, Some(&f)).0, Off);
+        assert_eq!(upscaling_auto(Some(("RX", true)), None, None).0, Off);
+    }
+
+    #[test]
+    fn the_gpu_step_starts_on_the_automatic_value_unless_the_file_has_one() {
+        let selected_key = |w: &Wizard| {
+            let Ask::Choose { items, sel, .. } = &w.ask else { panic!("not a choice") };
+            items[*sel].key.clone()
+        };
+        let tags = |w: &Wizard| {
+            let Ask::Choose { items, .. } = &w.ask else { panic!("not a choice") };
+            items.iter().filter(|i| i.tag.is_some()).map(|i| i.key.clone()).collect::<Vec<_>>()
+        };
+        let f = scratch("gpu-step", Some("RES=1920x1080\n"));
+        let mut w = wizard(fake(), &f, false);
+        w.monitor = Some((3840, 2160));
+        w.gpu = Some(("Radeon RX 9070 XT".into(), true));
+        w.gpu_stage();
+        assert_eq!(w.step, Step::GpuUpscaling);
+        assert_eq!((selected_key(&w), tags(&w)), ("fsr".to_string(), vec!["fsr".to_string()]));
+        assert!(w.body.join(" ").contains("so Upscaling is on"), "{:?}", w.body);
+        // A built-in GPU: off, recommended.
+        w.gpu = Some(("Intel UHD 620".into(), false));
+        w.gpu_stage();
+        assert_eq!((selected_key(&w), tags(&w)), ("off".to_string(), vec!["off".to_string()]));
+        // The file's own value stays the start, the automatic one tagged.
+        let f = scratch("gpu-step-file", Some("RES=1920x1080\nUPSCALING=nis\n"));
+        let mut w = wizard(fake(), &f, false);
+        w.monitor = Some((3840, 2160));
+        w.gpu = Some(("Radeon RX 9070 XT".into(), true));
+        w.gpu_stage();
+        assert_eq!((selected_key(&w), tags(&w)), ("nis".to_string(), vec!["fsr".to_string()]));
+    }
+
     fn wizard(sys: Fake, file: &std::path::Path, first_run: bool) -> Wizard {
         Wizard::new(Box::new(sys), file.to_path_buf(), first_run, Vec::new()).unwrap()
     }
@@ -2252,8 +2366,11 @@ pub(crate) mod tests {
         assert_eq!(w.stage, Stage::Refresh);
         assert_eq!(selected(&w), "match");
         press(&mut w, &["Enter"]);
-        assert_eq!(w.stage, Stage::Player);
-        assert_eq!(selected(&w), "balanced");
+        // GPU enhancements: no monitor or GPU known here, so Upscaling off;
+        // then the player (mpv already) asks nothing, not even the resize
+        // filter (#85).
+        assert_eq!(w.stage, Stage::Gpu);
+        assert_eq!(selected(&w), "off");
         press(&mut w, &["Enter"]);
         // Sync: the loopback starts at the current DELAY; 6 steps later is kept.
         assert_eq!(w.stage, Stage::Sync);
@@ -2283,7 +2400,7 @@ pub(crate) mod tests {
             "# protoHDMIcapture settings, written by the setup wizard.\n\
              # One KEY=value per line; see config.example in the repo.\n\
              SOURCE=ps5\nCARD_SERIAL=20000130041415\nIGNORE_CARDS_RE='OBSBOT Meet 2'\nRES=1920x1080\nFPS=60\n\
-             FMT=yuyv422\nDELAY=0.110\nBACKEND=mpv\nWINDOW=fullscreen\nSCALING=balanced\nREFRESH=match\n"
+             FMT=yuyv422\nDELAY=0.110\nBACKEND=mpv\nWINDOW=fullscreen\nUPSCALING=off\nREFRESH=match\n"
         );
         std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
     }
@@ -2311,8 +2428,10 @@ pub(crate) mod tests {
         press(&mut w, &["BS", "x", "7", "6", "8", "Enter"]);
         assert_eq!(w.new["WINDOW_SIZE"], "1024x768");
         press(&mut w, &["2"]); // refresh: keep
+        assert_eq!(w.stage, Stage::Gpu);
+        press(&mut w, &["Enter"]); // Upscaling: off (nothing known here)
         assert_eq!(w.step, Step::PlayerSwitch);
-        press(&mut w, &["n"]); // stay on gst: no scaling question
+        press(&mut w, &["n"]); // stay on gst: no resize filter question
         assert_eq!(w.stage, Stage::Sync);
         press(&mut w, &["n", "1"]); // no sync; debug off
         assert_eq!(w.stage, Stage::Review);
@@ -2324,7 +2443,7 @@ pub(crate) mod tests {
         assert_eq!(
             rust,
             "# mine\nLEVELS=full\nBACKEND=gst\nCARD_SERIAL=20000130041415\nIGNORE_CARDS_RE='OBSBOT Meet 2'\nSRC=alsa_input.mic\n\
-             RES=1920x1080\nFPS=60\nFMT=yuyv422\nWINDOW=windowed\nWINDOW_SIZE=1024x768\nREFRESH=keep\n"
+             RES=1920x1080\nFPS=60\nFMT=yuyv422\nWINDOW=windowed\nWINDOW_SIZE=1024x768\nUPSCALING=off\nREFRESH=keep\n"
         );
         assert!(rust.contains("WINDOW=windowed\n") && !rust.contains("FULLSCREEN") && !rust.contains("DEV="), "{rust}");
         assert!(rust.contains("SRC=alsa_input.mic\n") && rust.contains("BACKEND=gst\n") && rust.contains("LEVELS=full\n"), "{rust}");

@@ -1130,6 +1130,12 @@ impl App {
         let Some(gfx) = self.gfx.as_mut() else { return };
         let frame = (self.format.width, self.format.height);
         self.monitor_size = gfx.window.current_monitor().map(|m| (m.size().width, m.size().height)).filter(|&(w, h)| w > 0 && h > 0);
+        // The wizard's GPU enhancements step decides Upscaling from these (#85).
+        if let Some(w) = &self.opts.wizard {
+            let mut w = w.borrow_mut();
+            w.monitor = self.monitor_size;
+            w.gpu = self.adapter.as_ref().map(|(_, _, name)| (name.clone(), self.device_type == Some(wgpu::DeviceType::DiscreteGpu)));
+        }
         gfx.viewport = letterbox((gfx.config.width, gfx.config.height), frame);
         let [_, _, vw, vh] = gfx.viewport;
         let scaling = self.opts.live_changes.scaling();
