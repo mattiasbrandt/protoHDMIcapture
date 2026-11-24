@@ -18,9 +18,9 @@ streaming, no account: one small program that opens straight to the game.
 
 ## Why you'll like it
 
-- 🎮 **Low delay.** About 45 ms from the card to your screen at 1080p60.
-  Picture and sound each take their own fast path, with no buffering in
-  between.
+- 🎮 **Low delay.** About 45 ms from the moment a frame reaches the PC to
+  the moment it is on screen at 1080p60, on our test setup. Picture and
+  sound each take their own fast path, with no buffering in between.
 - ✨ **Sharper on a big monitor.** Upscaling enlarges and sharpens a 1080p
   picture for a 1440p, 4K or ultrawide monitor, on your GPU.
 - 🏎️ **30 fps games shown at 60.** Frame generation makes the in-between
@@ -174,7 +174,7 @@ The console settings that give a black picture or bad sound when wrong
 | **The card drops out** | connect its power cable, and avoid hubs without their own power |
 | **Sound before or after the picture** | **ctrl −/+** until it lines up, then **w** to save; menu clicks make a good test. Tune again after changing the card or the monitor |
 | **Upscaling or frame generation slower than expected** | let GameMode raise the GPU's clocks ([how](docs/testing.md#gamemode-77)) |
-| **Every frame matters (fast shooters)** | the card itself adds most of the delay: play on a TV from the card's HDMI loop-out and use the PC for the picture |
+| **Every frame matters (fast shooters)** | the card itself adds most of the delay: play on a TV or monitor plugged into the card's HDMI loop-out (no delay at all), and keep protoHDMIcapture for watching on the PC |
 
 `--debug` opens the dashboard, and `DEBUG=log` writes a log of every
 decision. Less common problems, and the details behind all this:
@@ -189,6 +189,15 @@ The setup wizard and **w** write the settings file for you:
 `protohdmicapture --settings` shows every value and where it came from.
 
 ### The settings worth knowing
+
+The ones you are most likely to change:
+
+- `UPSCALING`: sharper enlarging on a bigger monitor (`off`, `fsr`, `nis`).
+- `FRAMEGEN`: 30 fps games shown at 60 (`off`, `ffx`, `rife`).
+- `WINDOW`: `fullscreen`, `borderless` or `windowed`.
+- `REFRESH`: `match` switches the monitor to the game's refresh rate.
+- `DELAY`: the audio sync, in seconds.
+- `SOURCE`: your console, for its setup tips.
 
 <details>
 <summary>Every setting (click to open)</summary>

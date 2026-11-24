@@ -72,7 +72,7 @@ pub enum Stage {
     Audio,
     Display,
     Refresh,
-    /// Upscaling, and what frame generation would do (#85).
+    /// Upscaling, then frame generation offered on a dedicated GPU (#84, #85).
     Gpu,
     Player,
     Sync,
