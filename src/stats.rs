@@ -383,10 +383,11 @@ impl Stats {
         if !gpu_scale.is_empty() {
             eprintln!("summary: GPU time ({} frames)  convert {}  | scale {}", gpu_scale.len(), fmt(&mut gpu_convert), fmt(&mut gpu_scale));
         }
-        if !gpu_generate.is_empty() {
+        let switched = self.stretches.len() > 1;
+        // A switching run's generators each get their own line (`mode_lines`).
+        if !gpu_generate.is_empty() && !switched {
             eprintln!("summary: GPU time ({} frames)  frame generation {}", gpu_generate.len(), fmt(&mut gpu_generate));
         }
-        let switched = self.stretches.len() > 1;
         for line in gpu_timing_lines(&passes, !switched) {
             eprintln!("{line}");
         }
@@ -502,7 +503,9 @@ fn gpu_timing_lines(passes: &[Pass; 3], generation_ranges: bool) -> Vec<String> 
     let mut settled: Vec<String> = Vec::new();
     let mut lines = Vec::new();
     for (name, pass) in names.iter().zip(passes) {
-        if pass.is_empty() {
+        // Modes switched mid-run: one p99 or median across generators says
+        // nothing; `mode_lines` gives each its own.
+        if pass.is_empty() || (*name == "frame generation" && !generation_ranges) {
             continue;
         }
         let mut after: Vec<Duration> = pass.iter().filter(|(at, _)| *at >= SETTLING).map(|(_, d)| *d).collect();
@@ -510,11 +513,6 @@ fn gpu_timing_lines(passes: &[Pass; 3], generation_ranges: bool) -> Vec<String> 
             Some((_, p99)) => format!("{name} {p99:.2} ms"),
             None => format!("{name} no samples"),
         });
-        // Modes switched mid-run: one median across generators says
-        // nothing; `mode_lines` gives each its own.
-        if *name == "frame generation" && !generation_ranges {
-            continue;
-        }
         let ranges = slow_ranges(pass);
         if ranges.is_empty() {
             continue;
@@ -777,14 +775,15 @@ mod tests {
     }
 
     #[test]
-    fn a_switching_run_leaves_the_mixed_generation_ranges_out() {
+    fn a_switching_run_leaves_the_mixed_generation_ranges_and_p99_out() {
         // Two thirds blend: one median across both makes every ffx frame "slow".
         let gpu: Vec<GpuSample> = (0..600)
             .map(|i| fg_sample(i as f64 / 60.0, if i < 400 { 0.02 } else { 3.0 }, Some(if i < 400 { "blend" } else { "ffx" })))
             .collect();
         let passes = gpu_passes(&gpu);
         assert!(gpu_timing_lines(&passes, true).iter().any(|l| l.contains("slow GPU frames, frame generation")));
-        assert!(!gpu_timing_lines(&passes, false).iter().any(|l| l.contains("slow GPU frames, frame generation")));
+        // Nor its p99: the settled line names convert and scale only.
+        assert_eq!(gpu_timing_lines(&passes, false), ["summary: GPU p99 after the first 2 s  convert 0.03 ms  | scale 0.20 ms"]);
     }
 
     #[test]

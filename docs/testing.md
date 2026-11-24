@@ -187,7 +187,8 @@ gst or ffplay are legacy's.
 - **Per mode and over time** (`--stats` summary, #86): a run whose frame
   generation changed (a dev build's `g`) gets one `frame generation MODE`
   line per mode (its time, counts, repeated refreshes, its generator's GPU
-  time and slow ranges against its own median), and every run a `repeated
+  time and slow ranges against its own median) in place of the mixed
+  frame-generation GPU time, p99 and slow ranges, and every run a `repeated
   refreshes by time` line. Bursts about every 33 s are the card's beat
   against the display (a 60.003 Hz signal on a 59.973 Hz mode slips a frame
   each beat); with frame generation on they cost several refreshes.
