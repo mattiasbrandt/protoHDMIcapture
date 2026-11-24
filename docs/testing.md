@@ -153,9 +153,9 @@ gst or ffplay are legacy's.
 
 ## Reading GPU use (#72)
 
-- **Only with a GPU enhancement on**: frame generation (`--framegen`) or
-  Upscaling while it enlarges the picture (`UPSCALING`). A plain run
-  samples and shows nothing new.
+- **Only with a GPU enhancement on**: frame generation (`FRAMEGEN`,
+  **g**, or a dev build's `--framegen`) or Upscaling while it enlarges the
+  picture (`UPSCALING`). A plain run samples and shows nothing new.
 - **The dashboard's GPU section**, the last 10 s at 10 Hz, as nvtop and
   amdgpu_top read them:
   - `busy`, `clocks`, `VRAM`, `power`, `temperature` and `fan`: the whole
@@ -186,7 +186,7 @@ gst or ffplay are legacy's.
   is settling; one at a script's screenshot is the compositor's copy; spread
   evenly, it is a real cost.
 - **Per mode and over time** (`--stats` summary, #86): a run whose frame
-  generation changed (a dev build's `g`) gets one `frame generation MODE`
+  generation changed (**g**) gets one `frame generation MODE`
   line per mode (its time, counts, repeated refreshes, its generator's GPU
   time and slow ranges against its own median) in place of the mixed
   frame-generation GPU time, p99 and slow ranges, and every run a `repeated
