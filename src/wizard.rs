@@ -1393,15 +1393,16 @@ impl Wizard {
         let (auto, reason) = upscaling_auto(self.gpu.as_ref().map(|(n, d)| (n.as_str(), *d)), self.monitor, fit.as_ref());
         let mut items = vec![
             item("off", "Off · the resize filter enlarges the picture"),
-            item("fsr", "AMD FSR 1 · enlarge and sharpen, on any GPU"),
-            item("nis", "NVIDIA Image Scaling · enlarge and sharpen, up to 2x"),
+            item("fsr", "AMD FSR 1 · up to the monitor's resolution, on any GPU"),
+            item("nis", "NVIDIA Image Scaling · up to the monitor's resolution, up to 2x"),
         ];
         for i in items.iter_mut().filter(|i| i.key == auto.as_str()) {
             i.tag = Some("recommended".into());
         }
         let mut body = wrap(
-            "A gaming GPU can make the picture better. Upscaling enlarges the picture with sharpening when the monitor \
-             shows it bigger than the capture card sends it (a 1440p, 4K or ultrawide monitor).",
+            "A gaming GPU can make the picture better. Upscaling raises the picture to your monitor's resolution, with clean \
+             edges where a plain stretch looks soft, when the monitor is bigger than what the capture card sends (a \
+             1440p, 4K or ultrawide monitor).",
             WIDTH,
         );
         body.push(String::new());

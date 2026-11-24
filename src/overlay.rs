@@ -286,7 +286,7 @@ pub fn upscaling_hint(setting: Upscaling, running: Upscaling, frame: (u32, u32),
     let times = if (ratio - ratio.round()).abs() < 1e-6 { format!("{ratio:.0}x") } else { format!("{ratio:.2}x") };
     match (setting, running) {
         (Upscaling::Off, _) if enlarged => {
-            Some(format!("the resize filter enlarges the picture {times}; Upscaling sharpens it (setup wizard, u)"))
+            Some(format!("the resize filter enlarges the picture {times}; Upscaling does it with clean edges (setup wizard, u)"))
         }
         (Upscaling::Off, _) => None,
         (_, Upscaling::Off) if enlarged => Some(format!("works up to 2x a side: the resize filter enlarges this {times}")),
@@ -356,7 +356,7 @@ mod tests {
         // Off and enlarged: a suggestion, no switch.
         assert_eq!(
             hint(Upscaling::Off, Upscaling::Off, (3840, 2160)).as_deref(),
-            Some("the resize filter enlarges the picture 2x; Upscaling sharpens it (setup wizard, u)")
+            Some("the resize filter enlarges the picture 2x; Upscaling does it with clean edges (setup wizard, u)")
         );
         // Off at 1:1 or shrunk: nothing to say.
         assert_eq!(hint(Upscaling::Off, Upscaling::Off, hd), None);
