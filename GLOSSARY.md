@@ -127,6 +127,10 @@ _Avoid_: pulldown, pacing (that is the window's)
 Making pictures between two new frames, shown in the place of duplicate
 frames, so a 30 fps source looks like 60. Each one is a **generated
 frame**; it costs about one refresh of delay.
+`FRAMEGEN` picks the **frame generator**: `ffx` (optical flow after AMD
+FidelityFX, #73) or `rife` (RIFE v4.6, #74); **g** cycles them. A dev
+build also has `--framegen ffx-base` (#68, ffx's base), `blend`, `copy`
+and `new-only`, which do not ship.
 _Avoid_: interpolation (one way to do it), frame enhancer, motion smoothing
 
 **Upscaling**:
