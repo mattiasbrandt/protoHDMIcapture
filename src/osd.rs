@@ -6,6 +6,8 @@
 
 use egui::{Align2, Color32, FontId, LayerId, Pos2, Rect, Vec2};
 
+use crate::overlay::VALUE_COL;
+
 /// The box: `&H101010&` at ASS alpha `&H30&` (0x30 transparent).
 const BOX: Color32 = Color32::from_rgba_unmultiplied_const(16, 16, 16, 255 - 0x30);
 const TEXT: Color32 = Color32::from_rgb(0xDD, 0xDD, 0xDD);
@@ -199,10 +201,10 @@ fn char_colors(text: &str, base: Color32, kind: PageKind, index: usize, count: u
         return colors;
     }
     if kind == PageKind::Panel && chars.len() > 6 && chars[5] == ' ' && chars[6].is_alphabetic() {
-        // "key   Label        value"
+        // "key   Label             value" (overlay.rs's columns)
         paint(&mut colors, 0, 6, ACCENT);
-        paint(&mut colors, 6, 19, DIM);
-        paint(&mut colors, 19, chars.len(), TITLE);
+        paint(&mut colors, 6, VALUE_COL, DIM);
+        paint(&mut colors, VALUE_COL, chars.len(), TITLE);
         return colors;
     }
     if kind == PageKind::Wizard {
@@ -653,8 +655,8 @@ mod tests {
         // Labels dim, values bright: the wizard's and the panel's.
         assert_eq!(colored("USB id  : 1e4e:7016", PageKind::Wizard, 1, 3), vec![s("USB id  : ", DIM), s("1e4e:7016", TITLE)]);
         assert_eq!(
-            colored("f     Display      Fullscreen", PageKind::Panel, 1, 3),
-            vec![s("f     ", ACCENT), s("Display      ", DIM), s("Fullscreen", TITLE)]
+            colored("f     Display           Fullscreen", PageKind::Panel, 1, 3),
+            vec![s("f     ", ACCENT), s("Display           ", DIM), s("Fullscreen", TITLE)]
         );
         // A note the wizard wrapped itself stays dim on its later lines.
         let rows = page_rows(&["T".into(), "• a note".into(), "  that wraps".into(), "Next".into(), "k".into()], 80, PageKind::Wizard);
@@ -702,7 +704,7 @@ mod tests {
             size: "1920x1080",
             upscaling: "off",
             upscaling_hint: None,
-            framegen: None,
+            framegen: "off",
             colour: [0, 0, 0, 0],
             audio: overlay::Audio::Running { level: Some(Ok(crate::level::Level { volume: 80, mute: false })), delay_ms: 50 },
             tips_name: "PlayStation 5".into(),

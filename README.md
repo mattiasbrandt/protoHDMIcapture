@@ -128,6 +128,7 @@ focuses the running window, or says it is already running.
 | **d** | open the dashboard (on another monitor, on Hyprland); with one open, raise it |
 | **s** | a screenshot to `~/Pictures/protoHDMIcapture/` |
 | **c** | the picture's size: 1080p → 1440p → 4K, the sizes your monitor fits (bars keep the shape); a short message says which |
+| **g** | frame generation: off → ffx → rife → off (`FRAMEGEN`); a short message says which |
 | **ctrl −** / **ctrl +** | audio sync 10 ms earlier / later, live |
 | **alt −** / **alt +** | audio sync 50 ms earlier / later |
 | **m**, **9** / **0** | mute; volume down / up of the loopback |

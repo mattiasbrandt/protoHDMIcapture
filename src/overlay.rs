@@ -170,14 +170,23 @@ pub struct Panel<'a> {
     /// and its line under the row (`upscaling_hint`), #85.
     pub upscaling: &'a str,
     pub upscaling_hint: Option<&'a str>,
-    /// Frame generation's mode, or "off": a dev build's `g` row (#83);
-    /// None, no row (a release build).
-    pub framegen: Option<&'a str>,
+    /// Frame generation's mode, or "off": `g`'s row (#83, #84).
+    pub framegen: &'a str,
     /// contrast, brightness, gamma, saturation.
     pub colour: [i32; 4],
     pub audio: Audio,
     pub tips_name: String,
     pub changes: &'a [String],
+}
+
+/// Where a panel row's value starts: after its key (6 columns) and its
+/// label, the longest of which is "Frame generation" (#84). osd.rs colours
+/// a row's parts by it.
+pub const VALUE_COL: usize = 24;
+
+/// A panel row: its key, its label and its value, in their columns.
+fn row(key: &str, label: &str, value: &str) -> String {
+    format!("{key:<6}{label:<w$}{value}", w = VALUE_COL - 6).trim_end().to_string()
 }
 
 pub fn panel_lines(p: &Panel) -> Vec<String> {
@@ -187,42 +196,40 @@ pub fn panel_lines(p: &Panel) -> Vec<String> {
         "protoHDMIcapture".to_string(),
         String::new(),
         "GPU enhancements".to_string(),
-        format!("c     Size         {}", p.size),
-        format!("      Upscaling    {}", p.upscaling),
+        row("c", "Size", p.size),
+        row("", "Upscaling", p.upscaling),
     ];
     if let Some(hint) = p.upscaling_hint {
-        lines.push(format!("                   {hint}"));
-    }
-    if let Some(fg) = p.framegen {
-        lines.push(format!("g     Framegen     {fg}"));
+        lines.push(row("", "", hint));
     }
     lines.extend([
+        row("g", "Frame generation", p.framegen),
         String::new(),
-        format!("f     Display      {}", p.display),
-        format!("l     Levels       {}", p.levels),
-        format!("      Resizing     {}", p.scaling),
-        format!("1-8   Colour       contrast {c} · brightness {b} · gamma {g} · saturation {s}"),
+        row("f", "Display", p.display),
+        row("l", "Levels", p.levels),
+        row("", "Resizing", p.scaling),
+        row("1-8", "Colour", &format!("contrast {c} · brightness {b} · gamma {g} · saturation {s}")),
     ]);
     match &p.audio {
-        Audio::Other(v) => lines.push(format!("      Audio        {}", if v.is_empty() { "?" } else { v })),
+        Audio::Other(v) => lines.push(row("", "Audio", if v.is_empty() { "?" } else { v })),
         Audio::Failed(why) => {
-            lines.push(format!("m 9 0 Audio        not running, see the log: {why}"));
+            lines.push(row("m 9 0", "Audio", &format!("not running, see the log: {why}")));
         }
         Audio::Running { level, delay_ms } => {
-            let row = match level {
+            let value = match level {
                 None => "…".to_string(),
                 Some(Err(e)) => format!("unavailable: {e}"),
                 Some(Ok(l)) => format!("{}volume {}%", if l.mute { "muted · " } else { "" }, l.volume),
             };
-            lines.push(format!("m 9 0 Audio        {row}"));
-            lines.push(format!("^-/^+ Audio sync   {delay_ms} ms   (alt -/+: 50 ms steps)"));
+            lines.push(row("m 9 0", "Audio", &value));
+            lines.push(row("^-/^+", "Audio sync", &format!("{delay_ms} ms   (alt -/+: 50 ms steps)")));
         }
     }
     lines.extend([
-        "r     Reset colour".to_string(),
-        format!("t     Setup tips   {}", p.tips_name),
-        format!("w     Save         {}", if p.changes.is_empty() { "nothing changed".to_string() } else { p.changes.join(" ") }),
-        "u     Setup wizard (the feed stops)".to_string(),
+        row("r", "Reset colour", ""),
+        row("t", "Setup tips", &p.tips_name),
+        row("w", "Save", &if p.changes.is_empty() { "nothing changed".to_string() } else { p.changes.join(" ") }),
+        row("u", "Setup wizard", "(the feed stops)"),
         String::new(),
         "s screenshot   d dashboard   Tab/Esc close   q quit".to_string(),
     ]);
@@ -383,7 +390,7 @@ mod tests {
             size: "1920x1080",
             upscaling: "off",
             upscaling_hint: None,
-            framegen: None,
+            framegen: "off",
             colour: [1, -2, 0, 3],
             audio,
             tips_name: "PlayStation 5".into(),
@@ -403,34 +410,38 @@ mod tests {
                 "protoHDMIcapture",
                 "",
                 "GPU enhancements",
-                "c     Size         1920x1080",
-                "      Upscaling    off",
+                "c     Size              1920x1080",
+                "      Upscaling         off",
+                "g     Frame generation  off",
                 "",
-                "f     Display      Fullscreen",
-                "l     Levels       auto",
-                "      Resizing     balanced",
-                "1-8   Colour       contrast 1 · brightness -2 · gamma 0 · saturation 3",
-                "m 9 0 Audio        muted · volume 80%",
-                "^-/^+ Audio sync   50 ms   (alt -/+: 50 ms steps)",
+                "f     Display           Fullscreen",
+                "l     Levels            auto",
+                "      Resizing          balanced",
+                "1-8   Colour            contrast 1 · brightness -2 · gamma 0 · saturation 3",
+                "m 9 0 Audio             muted · volume 80%",
+                "^-/^+ Audio sync        50 ms   (alt -/+: 50 ms steps)",
                 "r     Reset colour",
-                "t     Setup tips   PlayStation 5",
-                "w     Save         LEVELS=full DELAY=0.060",
-                "u     Setup wizard (the feed stops)",
+                "t     Setup tips        PlayStation 5",
+                "w     Save              LEVELS=full DELAY=0.060",
+                "u     Setup wizard      (the feed stops)",
                 "",
                 "s screenshot   d dashboard   Tab/Esc close   q quit",
             ]
         );
         let other = panel(Audio::Other("none".into()), &[]);
-        assert_eq!(other[10], "      Audio        none");
-        assert_eq!(other[13], "w     Save         nothing changed");
-        assert_eq!(panel(Audio::Failed("no card source".into()), &[])[10], "m 9 0 Audio        not running, see the log: no card source");
-        assert_eq!(panel(Audio::Running { level: None, delay_ms: 0 }, &[])[10], "m 9 0 Audio        …");
+        assert_eq!(other[11], "      Audio             none");
+        assert_eq!(other[14], "w     Save              nothing changed");
+        assert_eq!(
+            panel(Audio::Failed("no card source".into()), &[])[11],
+            "m 9 0 Audio             not running, see the log: no card source"
+        );
+        assert_eq!(panel(Audio::Running { level: None, delay_ms: 0 }, &[])[11], "m 9 0 Audio             …");
     }
 
     #[test]
     fn the_gpu_enhancements_lead_the_page() {
-        // Upscaling with its hint, then a dev build's frame generation (#83;
-        // a release build passes none), then the picture's details (#85).
+        // Upscaling with its hint, then frame generation (#83, #84), then
+        // the picture's details (#85).
         let with = |fg| {
             panel_lines(&Panel {
                 display: "Fullscreen",
@@ -446,23 +457,29 @@ mod tests {
                 changes: &[],
             })
         };
-        let on = with(Some("ffx-quality"));
+        let on = with("ffx");
         assert_eq!(
             on[2..9],
             [
                 "GPU enhancements",
-                "c     Size         3840x2160",
-                "      Upscaling    AMD FSR 1",
-                "                   enlarges the picture 2x",
-                "g     Framegen     ffx-quality",
+                "c     Size              3840x2160",
+                "      Upscaling         AMD FSR 1",
+                "                        enlarges the picture 2x",
+                "g     Frame generation  ffx",
                 "",
-                "f     Display      Fullscreen",
+                "f     Display           Fullscreen",
             ]
         );
-        assert_eq!(with(Some("off"))[6], "g     Framegen     off");
-        assert!(!with(None).iter().any(|l| l.contains("Framegen")));
+        assert_eq!(with("off")[6], "g     Frame generation  off");
+        // Every row with a value has it in one column (osd.rs colours by
+        // it): the label fits before it.
+        let rows = on.iter().filter(|l| l.get(5..7).is_some_and(|k| k.starts_with(' ') && k.ends_with(|c: char| c.is_alphabetic())));
+        for l in rows.filter(|l| l.chars().count() > VALUE_COL) {
+            let c: Vec<char> = l.chars().collect();
+            assert!(c[VALUE_COL - 1] == ' ' && c[VALUE_COL] != ' ', "{l:?}");
+        }
         // The resize filter has no key.
-        assert!(on.iter().any(|l| l == "      Resizing     balanced"));
+        assert!(on.iter().any(|l| l == "      Resizing          balanced"));
         assert!(!on.iter().any(|l| l.starts_with("c     Scaling")));
     }
 

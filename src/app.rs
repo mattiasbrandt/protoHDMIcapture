@@ -805,10 +805,9 @@ impl App {
         let mut required_features =
             if self.opts.stats && adapter.features().contains(timestamps) { timestamps } else { wgpu::Features::empty() };
         // fp16 shaders, for a frame generator that runs them (RIFE, #74),
-        // only where the GPU has them and only when one may run.
-        if self.opts.framegen.is_some_and(|m| m.generates()) {
-            required_features |= adapter.features() & wgpu::Features::SHADER_F16;
-        }
+        // where the GPU has them: g can turn one on mid-run (#84), so not
+        // only when the run starts with it (RIFE without them runs in f32).
+        required_features |= adapter.features() & wgpu::Features::SHADER_F16;
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features, ..Default::default() }))
                 .map_err(|e| format!("graphics device: {e}"))?;
@@ -881,13 +880,15 @@ impl App {
             }
             why.is_none()
         });
-        // With frame generation, what is shown is copied into it; in a dev
-        // build `g` can turn it on mid-run (#83).
-        let copied = if framegen.is_some() || cfg!(feature = "dev") { wgpu::TextureUsages::COPY_DST } else { wgpu::TextureUsages::empty() };
+        // With frame generation, what is shown is copied into it; `g` can
+        // turn it on mid-run (#83, #84).
         let rgb = frame_texture(
             "rgb",
             w,
-            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | copied,
+            wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
         );
         if let Some(mode) = framegen {
             if self.opts.stats {
@@ -1636,7 +1637,7 @@ impl App {
                     size: &size,
                     upscaling: setting.name(),
                     upscaling_hint: hint.as_deref(),
-                    framegen: cfg!(feature = "dev").then(|| self.framegen.as_ref().map_or("off", |f| f.schedule.mode().as_str())),
+                    framegen: self.framegen.as_ref().map_or("off", |f| f.schedule.mode().as_str()),
                     colour: [p.contrast, p.brightness, p.gamma, p.saturation],
                     audio: match &self.opts.audio {
                         AudioSetup::Off(v) => overlay::Audio::Other(v.clone()),
@@ -2272,28 +2273,14 @@ mod tests {
         true
     }
 
-    /// The panel's lines, without a dev build's `g` row (#83), so a line's
-    /// number is the same in every build; `framegen_row` reads that row.
+    /// The panel's lines.
     fn panel(app: &App) -> Vec<String> {
-        app.scene_text(Instant::now())
-            .and_then(|t| t.page)
-            .expect("the panel is open")
-            .into_iter()
-            .filter(|l| !l.starts_with("g     Framegen"))
-            .collect()
+        app.scene_text(Instant::now()).and_then(|t| t.page).expect("the panel is open")
     }
 
     /// The panel's row whose label (after the key column) starts so.
     fn row(app: &App, label: &str) -> String {
         panel(app).into_iter().find(|l| l.get(6..).is_some_and(|r| r.starts_with(label))).unwrap_or_else(|| panic!("no {label} row"))
-    }
-
-    fn framegen_row(app: &App) -> Option<String> {
-        app.scene_text(Instant::now())
-            .and_then(|t| t.page)
-            .expect("the panel is open")
-            .into_iter()
-            .find(|l| l.starts_with("g     Framegen"))
     }
 
     /// The app with a stand-in loopback started at 50 ms (#29), its
@@ -2377,12 +2364,12 @@ mod tests {
             app.overlay.current_message(Instant::now()),
             Some("Audio stopped (output: Device disconnected): ctrl -/+, m, 9 or 0 start it again")
         );
-        assert_eq!(audio_line(&mut app), "m 9 0 Audio        not running, see the log: output: Device disconnected");
+        assert_eq!(audio_line(&mut app), "m 9 0 Audio             not running, see the log: output: Device disconnected");
         assert!(!app.apply(Action::Sync(10)));
         app.notice();
         assert_eq!(*script.starts.borrow(), [50, 60]);
         assert_eq!(app.overlay.current_message(Instant::now()), Some("Audio sync 60 ms"));
-        assert_eq!(row(&app, "Audio sync"), "^-/^+ Audio sync   60 ms   (alt -/+: 50 ms steps)");
+        assert_eq!(row(&app, "Audio sync"), "^-/^+ Audio sync        60 ms   (alt -/+: 50 ms steps)");
         assert!(!app.apply(Action::Level(LevelChange::Mute)));
         assert_eq!(script.starts.borrow().len(), 2, "a running one is not started again");
         // AUDIO=none: the keys do nothing.
@@ -2397,31 +2384,30 @@ mod tests {
         let (mut app, file) = app_with("# mine\nLEVELS=auto\nCONTRAST=2\n");
         assert!(!press(&mut app, "l"), "l only with the overlay open");
         assert!(press(&mut app, "Tab"));
-        // A dev build names frame generation under Upscaling (#83, #85); a
-        // release build has no row.
-        assert_eq!(framegen_row(&app), cfg!(feature = "dev").then(|| "g     Framegen     off".to_string()));
+        // Frame generation under Upscaling, in every build (#83, #84, #85).
+        assert_eq!(row(&app, "Frame generation"), "g     Frame generation  off");
         // The output size (c, #85; no window here: the setting's value) and
         // the method, without a key.
-        assert_eq!(row(&app, "Size"), "c     Size         fit");
-        assert_eq!(row(&app, "Upscaling"), "      Upscaling    off");
-        assert_eq!(row(&app, "Resizing"), "      Resizing     balanced");
-        assert_eq!(row(&app, "Levels"), "l     Levels       auto");
-        assert_eq!(row(&app, "Colour"), "1-8   Colour       contrast 2 · brightness 0 · gamma 0 · saturation 0");
-        assert_eq!(row(&app, "Audio        "), "      Audio        none");
-        assert_eq!(row(&app, "Setup tips"), "t     Setup tips   PlayStation 5");
-        assert_eq!(row(&app, "Save"), "w     Save         nothing changed");
+        assert_eq!(row(&app, "Size"), "c     Size              fit");
+        assert_eq!(row(&app, "Upscaling"), "      Upscaling         off");
+        assert_eq!(row(&app, "Resizing"), "      Resizing          balanced");
+        assert_eq!(row(&app, "Levels"), "l     Levels            auto");
+        assert_eq!(row(&app, "Colour"), "1-8   Colour            contrast 2 · brightness 0 · gamma 0 · saturation 0");
+        assert_eq!(row(&app, "Audio        "), "      Audio             none");
+        assert_eq!(row(&app, "Setup tips"), "t     Setup tips        PlayStation 5");
+        assert_eq!(row(&app, "Save"), "w     Save              nothing changed");
 
         assert!(press(&mut app, "l"));
         // c steps the output size; with no window here it has nothing to
         // step and changes nothing (scale.rs tests the steps).
         assert!(press(&mut app, "c"));
-        assert_eq!(row(&app, "Save"), "w     Save         LEVELS=limited");
+        assert_eq!(row(&app, "Save"), "w     Save              LEVELS=limited");
         assert!(press(&mut app, "w"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "# mine\nLEVELS=limited\nCONTRAST=2\n");
         assert_eq!(app.overlay.current_message(Instant::now()), Some("Saved: LEVELS=limited"));
-        assert_eq!(row(&app, "Save"), "w     Save         nothing changed", "the save is the new baseline");
+        assert_eq!(row(&app, "Save"), "w     Save              nothing changed", "the save is the new baseline");
         assert!(press(&mut app, "r"));
-        assert_eq!(row(&app, "Save"), "w     Save         CONTRAST=0");
+        assert_eq!(row(&app, "Save"), "w     Save              CONTRAST=0");
         assert!(press(&mut app, "t"));
         assert_eq!(app.overlay.page, Some(Page::Tips));
         assert!(press(&mut app, "Esc"));
@@ -2435,7 +2421,7 @@ mod tests {
         // f: the panel's Display line and w's WINDOW follow it.
         press(&mut app, "Tab");
         press(&mut app, "f");
-        assert_eq!(row(&app, "Display"), "f     Display      Borderless");
+        assert_eq!(row(&app, "Display"), "f     Display           Borderless");
         assert!(row(&app, "Save").contains("WINDOW=borderless"));
         press(&mut app, "f");
         assert_eq!(app.opts.live_changes.window(), WindowMode::Windowed { width: 1280, height: 720 });

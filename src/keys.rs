@@ -32,8 +32,8 @@ pub enum Action {
     /// c (#85), overlay open or not: the next output size (UPSCALE_TO);
     /// the method (UPSCALING) and the resize filter (SCALING) have no key.
     CycleUpscaleSize,
-    /// g, dev builds (#83): frame generation off, then each judged
-    /// approach, then off.
+    /// g (#83, #84), overlay open or not: frame generation off, then each
+    /// shipped mode (FRAMEGEN's), then off.
     CycleFramegen,
     ResetColour,
     Save,
@@ -82,8 +82,8 @@ pub fn action(key: &Key, m: ModifiersState, repeat: bool, mode: Mode) -> Option<
 }
 
 /// f, d, s, c and g, overlay open or not: the display mode, the
-/// dashboard, a screenshot, the output size (#85) and, in dev builds,
-/// frame generation (#83, #85).
+/// dashboard, a screenshot, the output size (#85) and frame generation
+/// (#83, #84).
 fn window(key: &Key) -> Option<Action> {
     let Key::Character(c) = key else { return None };
     Some(match c.as_str() {
@@ -91,7 +91,7 @@ fn window(key: &Key) -> Option<Action> {
         "d" => Action::Dashboard,
         "s" => Action::Screenshot,
         "c" => Action::CycleUpscaleSize,
-        "g" if cfg!(feature = "dev") => Action::CycleFramegen,
+        "g" => Action::CycleFramegen,
         _ => return None,
     })
 }
@@ -296,12 +296,11 @@ mod tests {
             assert_eq!(press(k, NONE, TIPS), Some(want), "{k}, the tips open");
             assert_eq!(press(k, CTRL, PANEL), None, "ctrl+{k}");
         }
-        // c (the output size) and, in a dev build, g (frame generation) act
-        // with the overlay closed or open (#85).
-        let g = cfg!(feature = "dev").then_some(Action::CycleFramegen);
+        // c (the output size) and g (frame generation) act with the overlay
+        // closed or open (#84, #85), in every build.
         for page in [VIEWER, PANEL, TIPS] {
             assert_eq!(press("c", NONE, page), Some(Action::CycleUpscaleSize), "c, {page:?}");
-            assert_eq!(press("g", NONE, page), g.clone(), "g, {page:?}");
+            assert_eq!(press("g", NONE, page), Some(Action::CycleFramegen), "g, {page:?}");
         }
         assert_eq!(press("c", CTRL, VIEWER), None, "ctrl+c is the desktop's");
         assert_eq!(press("g", CTRL, PANEL), None, "ctrl+g");
