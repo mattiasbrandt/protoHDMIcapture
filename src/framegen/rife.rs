@@ -76,6 +76,54 @@ fn split((x, y, z): (u32, u32, u32), cin: u32, step: u32) -> (u32, u32) {
     (cin.div_ceil(per), per)
 }
 
+/// The size `plan` pads a `w` x `h` frame to at `scale`: the smallest
+/// block works at 1/(8/scale) and halves twice more.
+fn padded((w, h): (u32, u32), scale: f32) -> (u32, u32) {
+    let pad = (32.0 / scale) as u32;
+    (w.div_ceil(pad) * pad, h.div_ceil(pad) * pad)
+}
+
+/// The largest buffer `plan` makes for a `size` frame at `scale`, in bytes
+/// (#74): each is bound whole, so the device's storage-binding limit must
+/// allow it. A 3840x2160 capture needs 267 MB, over wgpu's default 128 MiB.
+/// `plan` checks its own buffers against this, so the two cannot drift.
+pub fn largest_binding(size: (u32, u32), scale: f32) -> u64 {
+    let (pw, ph) = padded(size, scale);
+    let plane = u64::from(pw) * u64::from(ph);
+    // frames, flow, warped and result: 7, 5, 8 and 3 planes.
+    let mut floats = 8 * plane;
+    for (i, &(c, base)) in BLOCKS.iter().enumerate() {
+        let s = (base as f32 / scale) as u32;
+        let (bw, bh) = (pw / s, ph / s);
+        let cin = if i == 0 { 7 } else { 12 };
+        let (w1, h1) = (bw / 2, bh / 2);
+        let (w2, h2) = (bw / 4, bh / 4);
+        let area = |c: u32, w: u32, h: u32| u64::from(c) * u64::from(w) * u64::from(h);
+        // A convolution split over its input channels sums into slices.
+        let partial = |d_c: u32, d_w: u32, d_h: u32, s_c: u32, step: u32| {
+            let (slices, _) = split(conv_groups(d_w, d_h, d_c), s_c, step);
+            if slices == 1 { 0 } else { u64::from(slices) * area(d_c, d_w, d_h) }
+        };
+        let (deconv_slices, _) = split((w2.div_ceil(8), h2.div_ceil(8), 1), c, DECONV_CHANNELS);
+        let deconv_partial = if deconv_slices == 1 { 0 } else { u64::from(deconv_slices) * area(DECONV_OUT, w1, h1) };
+        floats = [
+            floats,
+            area(cin, bw, bh),
+            area(c / 2, w1, h1),
+            area(c, w2, h2),
+            area(DECONV_OUT, w1, h1),
+            partial(c / 2, w1, h1, cin, 2),
+            partial(c, w2, h2, c / 2, 2),
+            partial(c, w2, h2, c, 8),
+            deconv_partial,
+        ]
+        .into_iter()
+        .max()
+        .expect("not empty");
+    }
+    floats * 4
+}
+
 /// The timestep the generated frame sits at: halfway.
 const TIMESTEP: f32 = 0.5;
 
@@ -106,6 +154,18 @@ fn scale_from(v: Option<&str>) -> Result<f32, String> {
         None => Ok(SCALE),
         Some(v) => v.parse::<f32>().ok().filter(|x| [1.0, 0.5, 0.25].contains(x)).ok_or_else(|| v.to_string()),
     }
+}
+
+#[cfg(test)]
+#[test]
+fn the_largest_buffer_follows_the_padded_picture() {
+    // At SCALE the frame pads to 128: the warped planes (8 floats a
+    // pixel) are the largest buffer (#74's 4K finding: 267 MB).
+    assert_eq!(largest_binding((1920, 1080), SCALE), 8 * 1920 * 1152 * 4);
+    assert_eq!(largest_binding((2560, 1440), SCALE), 8 * 2560 * 1536 * 4);
+    assert_eq!(largest_binding((3840, 2160), SCALE), 267_386_880);
+    let default = wgpu::Limits::default().max_storage_buffer_binding_size;
+    assert!(largest_binding((2560, 1440), SCALE) <= default && largest_binding((3840, 2160), SCALE) > default);
 }
 
 #[cfg(test)]
@@ -360,11 +420,12 @@ impl Rife {
 
     /// The buffers and dispatches for a `w` x `h` frame.
     fn plan(&self, device: &wgpu::Device, (w, h): (u32, u32)) -> Plan {
-        // The smallest block works at 1/(8/scale) and halves twice more.
-        let pad = (32.0 / self.scale) as u32;
-        let (pw, ph) = (w.div_ceil(pad) * pad, h.div_ceil(pad) * pad);
+        let (pw, ph) = padded((w, h), self.scale);
         let plane = u64::from(pw) * u64::from(ph);
+        // The largest buffer made, against `largest_binding` (#74).
+        let largest = std::cell::Cell::new(0u64);
         let storage = |label: &str, floats: u64| {
+            largest.set(largest.get().max(floats * 4));
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
                 size: floats * 4,
@@ -568,6 +629,7 @@ impl Rife {
                 wgpu::BindGroupEntry { binding: 3, resource: cut.as_entire_binding() },
             ],
         });
+        debug_assert_eq!(largest.get(), largest_binding((w, h), self.scale), "largest_binding follows plan's buffers");
         Plan { size: (w, h), padded: (pw, ph), load_uniform, frames, hist, result, ops, out_bind }
     }
 

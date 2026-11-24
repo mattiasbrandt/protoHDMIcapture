@@ -873,7 +873,7 @@ impl App {
         // Frame generation, unless this GPU is refused it: said once, here.
         let framegen = self.opts.framegen.filter(|&mode| {
             let info = adapter.get_info();
-            let why = framegen::refusal(mode, info.device_type, &info.name);
+            let why = framegen::refusal(mode, info.device_type, &info.name, (w, h), &device.limits());
             if let Some(why) = &why {
                 eprintln!("note: {why}");
                 self.opts.live.event(why.clone());
@@ -1111,8 +1111,10 @@ impl App {
 
     fn cycle_framegen(&mut self) {
         let mut next = framegen::cycle(self.framegen.as_ref().map(|f| f.schedule.mode()), &framegen::shipped());
+        let frame = (self.format.width, self.format.height);
+        let limits = self.gfx.as_ref().map_or_else(wgpu::Limits::default, |g| g.device.limits());
         let refused = match (next, self.device_type, self.adapter.as_ref()) {
-            (Some(mode), Some(kind), Some((_, _, name))) => framegen::refusal(mode, kind, name),
+            (Some(mode), Some(kind), Some((_, _, name))) => framegen::refusal(mode, kind, name, frame, &limits),
             _ => None,
         };
         if refused.is_some() {
@@ -2217,6 +2219,24 @@ mod tests {
         assert!(app.framegen.is_none(), "ffx refused on an integrated GPU");
         assert_eq!(app.opts.live_changes.framegen(), None, "nothing runs, nothing to save");
         assert!(app.overlay.current_message(Instant::now()).unwrap().starts_with("Warning: "));
+    }
+
+    #[test]
+    fn g_refuses_rife_on_a_picture_too_large_for_it() {
+        // #74: a 4K capture's rife buffers exceed what the device binds
+        // (wgpu's default 128 MiB with no window yet): ffx runs, rife is
+        // refused with a warning and frame generation stays off, unsaved.
+        let (mut app, _) = app_with("SCALING=balanced\n");
+        app.adapter = Some((0x1002, 1, "a test GPU".into()));
+        app.device_type = Some(wgpu::DeviceType::DiscreteGpu);
+        (app.format.width, app.format.height) = (3840, 2160);
+        app.cycle_framegen();
+        assert_eq!(app.framegen.as_ref().map(|f| f.schedule.mode()), Some(Mode::Ffx), "ffx fits a 4K picture");
+        app.cycle_framegen();
+        assert!(app.framegen.is_none(), "rife refused at 4K");
+        assert_eq!(app.opts.live_changes.framegen(), None, "nothing runs, nothing to save");
+        let said = app.overlay.current_message(Instant::now()).unwrap();
+        assert!(said.starts_with("Warning: rife cannot run on a 3840x2160 picture"), "{said}");
     }
 
     #[test]

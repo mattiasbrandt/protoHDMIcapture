@@ -138,11 +138,21 @@ pub fn shipped() -> Vec<Mode> {
 
 /// Why frame generation is refused on this GPU, if it is: it is meant for
 /// dedicated gaming GPUs (decided on #63), so an integrated one shows real
-/// frames, said once at the start. New-frames-only runs no generator and
-/// is never refused.
-pub fn refusal(mode: Mode, device: wgpu::DeviceType, name: &str) -> Option<String> {
-    (mode.generates() && device == wgpu::DeviceType::IntegratedGpu)
-        .then(|| format!("frame generation needs a dedicated GPU, and {name} is integrated: showing real frames"))
+/// frames, said once at the start. rife is refused, too, where a `size`
+/// frame needs a bigger buffer than the device's `limits` bind (#74: a 4K
+/// capture), which wgpu would otherwise end in a panic. New-frames-only
+/// runs no generator and is never refused.
+pub fn refusal(mode: Mode, device: wgpu::DeviceType, name: &str, size: (u32, u32), limits: &wgpu::Limits) -> Option<String> {
+    if mode.generates() && device == wgpu::DeviceType::IntegratedGpu {
+        return Some(format!("frame generation needs a dedicated GPU, and {name} is integrated: showing real frames"));
+    }
+    let room = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
+    (mode == Mode::Rife && rife::largest_binding(size, rife::scale()) > room).then(|| {
+        format!(
+            "rife cannot run on a {}x{} picture on {name} (too large for this method): showing real frames; ffx works at this size",
+            size.0, size.1
+        )
+    })
 }
 
 /// What the window shows for a card frame.
@@ -588,11 +598,28 @@ mod tests {
     #[test]
     fn integrated_gpus_are_refused_a_generator_and_nothing_else() {
         use wgpu::DeviceType::*;
-        assert!(refusal(Mode::Copy, IntegratedGpu, "Intel UHD 620").is_some_and(|m| m.contains("Intel UHD 620")));
+        let (hd, limits) = ((1920, 1080), wgpu::Limits::default());
+        assert!(refusal(Mode::Copy, IntegratedGpu, "Intel UHD 620", hd, &limits).is_some_and(|m| m.contains("Intel UHD 620")));
         for d in [DiscreteGpu, VirtualGpu, Cpu, Other] {
-            assert_eq!(refusal(Mode::Copy, d, "x"), None, "{d:?}");
+            assert_eq!(refusal(Mode::Copy, d, "x", hd, &limits), None, "{d:?}");
         }
-        assert_eq!(refusal(Mode::NewOnly, IntegratedGpu, "x"), None, "no generator, nothing refused");
+        assert_eq!(refusal(Mode::NewOnly, IntegratedGpu, "x", hd, &limits), None, "no generator, nothing refused");
+    }
+
+    #[test]
+    fn rife_is_refused_a_picture_too_large_for_the_devices_buffers() {
+        // wgpu's default limits: 128 MiB a storage binding (#74's finding).
+        let limits = wgpu::Limits::default();
+        let at = |size| refusal(Mode::Rife, wgpu::DeviceType::DiscreteGpu, "RX 9070 XT", size, &limits);
+        assert_eq!(at((1920, 1080)), None, "1080p fits");
+        assert_eq!(at((2560, 1440)), None, "1440p fits");
+        let why = at((3840, 2160)).expect("4K needs 267 MB, over 128 MiB");
+        assert!(why.contains("3840x2160") && why.contains("ffx works"), "{why}");
+        // The same picture with ffx is not refused; nor rife where the
+        // device binds enough.
+        assert_eq!(refusal(Mode::Ffx, wgpu::DeviceType::DiscreteGpu, "x", (3840, 2160), &limits), None);
+        let big = wgpu::Limits { max_storage_buffer_binding_size: 1 << 30, max_buffer_size: 1 << 30, ..limits };
+        assert_eq!(refusal(Mode::Rife, wgpu::DeviceType::DiscreteGpu, "x", (3840, 2160), &big), None);
     }
 
     /// Two pictures with something different in every texel.
