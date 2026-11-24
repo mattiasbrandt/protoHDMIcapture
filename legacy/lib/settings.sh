@@ -11,8 +11,11 @@
 #                             SETTINGS_ERRORS when any is out of bounds
 #   settings_with FLAG        the names carrying a flag (save, wizard, pin,
 #                             suggest, empty); `ignored-by=PLAYER` for the
-#                             player-specific settings PLAYER does not honour;
-#                             no argument for every name
+#                             player-specific settings PLAYER does not honour
+#                             and another of legacy's players (BACKEND's
+#                             values) does: a setting only protoHDMIcapture
+#                             honours (UPSCALING) is not legacy's, so never
+#                             listed; no argument for every name
 #   settings_fact NAME WHAT   one fact: default | values | players | flags
 #
 # SETTINGS_NOTES collects what resolve wants said (a deprecated alias in use).
@@ -41,13 +44,24 @@ _settings_load || { echo "settings: cannot read $_SETTINGS_ROWS_FILE" >&2; retur
 
 _settings_has_flag() { [[ ",${_S_FLAGS[$1]}," == *",$2,"* ]]; }
 
+# Does one of legacy's players (BACKEND's values) honour NAME? Not where its
+# players are protoHDMIcapture's alone (#85).
+_settings_legacy_honours() {
+    local b
+    local -a backends
+    IFS=',' read -ra backends <<<"${_S_VALUES[BACKEND]#enum:}"
+    for b in "${backends[@]}"; do [[ ",${_S_PLAYERS[$1]}," == *",$b,"* ]] && return 0; done
+    return 1
+}
+
 settings_with() {
     local n
     for n in "${SETTINGS[@]}"; do
         case "${1:-}" in
             "") echo "$n" ;;
             ignored-by=*)
-                [ "${_S_PLAYERS[$n]}" != all ] && ! [[ ",${_S_PLAYERS[$n]}," == *",${1#ignored-by=},"* ]] && echo "$n" ;;
+                [ "${_S_PLAYERS[$n]}" != all ] && ! [[ ",${_S_PLAYERS[$n]}," == *",${1#ignored-by=},"* ]] \
+                    && _settings_legacy_honours "$n" && echo "$n" ;;
             *) _settings_has_flag "$n" "$1" && echo "$n" ;;
         esac
     done

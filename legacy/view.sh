@@ -239,6 +239,8 @@ take_audio_lock() {
 # Which players honour which setting is in lib/settings.sh: gst and ffplay
 # have no equivalent for some of mpv's settings, and a value you set for a
 # player that ignores it earns a warning, never silence (a default does not).
+# A setting only protoHDMIcapture honours (UPSCALING) is not legacy's and
+# earns none: the wizard saves it for protoHDMIcapture (#85).
 # The WINDOW modes each backend can produce on its own. waylandsink has no
 # decorations to remove and no way to ask for a size.
 declare -A BACKEND_WINDOWS=(
