@@ -256,6 +256,8 @@ enum Step {
     RefreshPick,
     PlayerSwitch,
     GpuUpscaling,
+    /// Frame generation, offered off on a dedicated GPU (#84).
+    GpuFramegen,
     SyncNone,
     SyncAsk,
     SyncTune,
@@ -467,6 +469,17 @@ fn choose(prompt: &str, default: &str, items: Vec<Item>) -> Ask {
 fn choose_labelled(prompt: &str, default: &str, label: &'static str, items: Vec<Item>) -> Ask {
     let d = items.iter().position(|i| i.key == default);
     Ask::Choose { prompt: prompt.into(), items, default: d, default_label: label, sel: d.unwrap_or(0) }
+}
+
+/// Whether the GPU enhancements step offers frame generation (#84): on a
+/// dedicated GPU only (a run refuses it on an integrated one:
+/// framegen::refusal). Err says why not.
+fn framegen_offer(gpu: Option<(&str, bool)>) -> Result<(), String> {
+    match gpu {
+        Some((_, true)) => Ok(()),
+        Some((name, false)) => Err(format!("it is meant for dedicated gaming GPUs, and {name} is not one")),
+        None => Err("the graphics card is not known yet".into()),
+    }
 }
 
 /// Upscaling's automatic value and the reason, in words (#85): on (FSR 1)
@@ -1396,8 +1409,13 @@ impl Wizard {
         body.push(String::new());
         body.extend(wrap(
             "The method is kept in the settings file; run the setup again to change it. While watching, c steps the \
-             picture's size (1080p, 1440p, 4K: the sizes your monitor fits). Frame generation (30 fps games shown at 60, \
-             with about one refresh of extra delay) is not in this version yet.",
+             picture's size (1080p, 1440p, 4K: the sizes your monitor fits).",
+            WIDTH,
+        ));
+        body.push(String::new());
+        body.extend(wrap(
+            &framegen_offer(self.gpu.as_ref().map(|(n, d)| (n.as_str(), *d)))
+                .map_or_else(|why| format!("Frame generation is not offered: {why}."), |()| "Next: frame generation.".to_string()),
             WIDTH,
         ));
         // The value chosen so far (the file's) if there is one; else the
@@ -1405,6 +1423,31 @@ impl Wizard {
         let chosen = self.new.get("UPSCALING").filter(|v| !v.is_empty()).cloned();
         let default = chosen.unwrap_or_else(|| auto.as_str().to_string());
         self.show(Step::GpuUpscaling, body, choose("Upscaling", &default, items));
+    }
+
+    /// Frame generation (#84): offered on a dedicated GPU (`framegen_offer`),
+    /// never preselected: the file's value if it has one, else off. A plain
+    /// offer with typical costs, not a measurement of this GPU.
+    fn gpu_framegen_stage(&mut self) {
+        let items = vec![
+            tagged("off", "Off · every picture is the game's own", "recommended"),
+            item("ffx", "ffx · optical flow after AMD FidelityFX, about 3 ms a frame"),
+            item("rife", "rife · a neural interpolator (RIFE v4.6), about 7 ms a frame"),
+        ];
+        let mut body = wrap(
+            "Frame generation shows a 30 fps game at 60: between two new frames from the game it makes the picture \
+             halfway, from the captured pixels alone. It adds about one refresh of delay (17 ms at 60 Hz), and fast \
+             turns or repeating patterns such as a building's windows can smear or sparkle.",
+            WIDTH,
+        );
+        body.push(String::new());
+        body.extend(wrap(
+            "The times are typical of a gaming GPU like an RX 9070 XT, out of the 16.7 ms a frame has at 60 Hz; it runs \
+             only on a steady 30 fps source. While watching, g switches it live and w saves.",
+            WIDTH,
+        ));
+        let default = self.cur("FRAMEGEN");
+        self.show(Step::GpuFramegen, body, choose("Frame generation", &default, items));
     }
 
     /// RES as a size; None when it is not one.
@@ -1763,6 +1806,14 @@ impl Wizard {
             }
             Step::GpuUpscaling => {
                 self.set("UPSCALING", a);
+                if framegen_offer(self.gpu.as_ref().map(|(n, d)| (n.as_str(), *d))).is_ok() {
+                    self.gpu_framegen_stage();
+                } else {
+                    self.next_stage();
+                }
+            }
+            Step::GpuFramegen => {
+                self.set("FRAMEGEN", a);
                 self.next_stage();
             }
             Step::SyncAsk => match a {
@@ -2296,6 +2347,75 @@ pub(crate) mod tests {
         w.gpu = Some(("Radeon RX 9070 XT".into(), true));
         w.gpu_stage();
         assert_eq!((selected_key(&w), tags(&w)), ("nis".to_string(), vec!["fsr".to_string()]));
+    }
+
+    #[test]
+    fn frame_generation_is_offered_off_on_a_dedicated_gpu_and_saved_only_when_chosen() {
+        let selected_key = |w: &Wizard| {
+            let Ask::Choose { items, sel, .. } = &w.ask else { panic!("not a choice") };
+            items[*sel].key.clone()
+        };
+        let tags = |w: &Wizard| {
+            let Ask::Choose { items, .. } = &w.ask else { panic!("not a choice") };
+            items.iter().filter(|i| i.tag.is_some()).map(|i| i.key.clone()).collect::<Vec<_>>()
+        };
+        // A dedicated GPU: Upscaling's page says what follows, then frame
+        // generation's page starts on off, off recommended.
+        let f = scratch("gpu-framegen", Some("RES=1920x1080\n"));
+        let mut w = wizard(fake(), &f, false);
+        w.set_display(Some((3840, 2160)), Some(("Radeon RX 9070 XT".into(), true)));
+        w.enter(Stage::Gpu);
+        assert!(w.body.join(" ").contains("Next: frame generation."), "{:?}", w.body);
+        press(&mut w, &["Enter"]);
+        assert_eq!(w.step, Step::GpuFramegen);
+        assert_eq!((selected_key(&w), tags(&w)), ("off".to_string(), vec!["off".to_string()]));
+        let text = w.body.join(" ");
+        assert!(text.contains("30 fps game at 60") && text.contains("one refresh of delay"), "{text}");
+        let Ask::Choose { items, .. } = &w.ask else { panic!("not a choice") };
+        assert_eq!(items.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), ["off", "ffx", "rife"]);
+        // An explicit choice is saved, and the review lists it.
+        press(&mut w, &["Down", "Enter"]);
+        assert_eq!(w.new["FRAMEGEN"], "ffx");
+        assert_ne!(w.stage, Stage::Gpu, "on to the next stage");
+        w.enter(Stage::Review);
+        assert!(w.lines().iter().any(|l| l == "+ FRAMEGEN=ffx"), "{:?}", w.lines());
+        // Off taken as offered: the file says off, the review says it.
+        let f = scratch("gpu-framegen-off", Some("RES=1920x1080\n"));
+        let mut w = wizard(fake(), &f, false);
+        w.set_display(Some((3840, 2160)), Some(("Radeon RX 9070 XT".into(), true)));
+        w.enter(Stage::Gpu);
+        press(&mut w, &["Enter", "Enter"]);
+        assert_eq!(w.new["FRAMEGEN"], "off");
+        // The file's own value is the start; off stays the recommended one.
+        let f = scratch("gpu-framegen-file", Some("RES=1920x1080\nFRAMEGEN=rife\n"));
+        let mut w = wizard(fake(), &f, false);
+        w.set_display(Some((3840, 2160)), Some(("Radeon RX 9070 XT".into(), true)));
+        w.enter(Stage::Gpu);
+        press(&mut w, &["Enter"]);
+        assert_eq!((selected_key(&w), tags(&w)), ("rife".to_string(), vec!["off".to_string()]));
+    }
+
+    #[test]
+    fn frame_generation_is_not_offered_on_a_gpu_that_is_not_dedicated() {
+        let f = scratch("gpu-framegen-igpu", Some("RES=1920x1080\n"));
+        let mut w = wizard(fake(), &f, false);
+        w.set_display(Some((3840, 2160)), Some(("Intel UHD 620".into(), false)));
+        w.enter(Stage::Gpu);
+        let text = w.body.join(" ");
+        assert!(
+            text.contains("Frame generation is not offered: it is meant for dedicated gaming GPUs, and Intel UHD 620 is not one."),
+            "{text}"
+        );
+        press(&mut w, &["Enter"]);
+        assert_ne!(w.step, Step::GpuFramegen);
+        assert_ne!(w.stage, Stage::Gpu, "on to the next stage");
+        assert_eq!(w.new["FRAMEGEN"], "", "not asked, not written");
+        // No GPU known: not offered either, and said so.
+        let mut w = wizard(fake(), &f, false);
+        w.enter(Stage::Gpu);
+        assert!(w.body.join(" ").contains("Frame generation is not offered: the graphics card is not known yet."), "{:?}", w.body);
+        press(&mut w, &["Enter"]);
+        assert_ne!(w.step, Step::GpuFramegen);
     }
 
     #[test]
