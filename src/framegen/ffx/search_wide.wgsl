@@ -25,7 +25,7 @@
 
 // ComputeOpticalFlowAdvanced as search.wgsl ports it, with the search
 // window as a parameter (#73): `RADIUS` is set by the host before this
-// source (16 for ffx-quality: candidates -16..+15 on each axis, 1024 a
+// source (16 for ffx: candidates -16..+15 on each axis, 1024 a
 // block, where search.wgsl's +-8 has 256). The block's pixels are loaded
 // as there (four 8x8 blocks a workgroup of 64); each thread now scores
 // 4 x-offsets on several candidate rows. The minimum key is SAD above,

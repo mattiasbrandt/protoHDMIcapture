@@ -234,7 +234,7 @@ impl Live {
         *self.framegen.lock().expect("the frame generation's lock is never poisoned") = Some(mode);
     }
 
-    /// Frame generation was switched off mid-run (a dev build's `g`, #83).
+    /// Frame generation was switched off mid-run (`g`, #83, #84).
     pub fn framegen_off(&self) {
         *self.framegen.lock().expect("the frame generation's lock is never poisoned") = None;
     }

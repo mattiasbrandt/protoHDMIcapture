@@ -24,7 +24,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// ffx-quality's static-HUD mask (#73 step 4), openfg's static-UI block
+// ffx's static-HUD mask (#73 step 4), openfg's static-UI block
 // detector: an 8x8 block of frame pixels with at least four pixels that
 // are the same in both frames and have high-contrast detail (HUD text, a
 // minimap's edges, icons) is static. Unlike openfg's, the mask has a

@@ -1,12 +1,13 @@
-//! The `ffx` generator (#68): AMD FidelityFX Optical Flow (SDK v1.1.4,
+//! The FidelityFX generators, `ffx-base` (#68) and `ffx` (#73, judged as
+//! ffx-quality): AMD FidelityFX Optical Flow (SDK v1.1.4,
 //! MIT; the WGSL ports in `ffx/` keep AMD's notice) finds where each 8x8
 //! block of the new frame was in the previous one, and an interpolation
 //! pass after afmf-linux's (MIT) warps both frames halfway along that flow.
 //!
 //! Per generated frame, on the GPU, in the SDK's order:
-//! - **Luma** of both frames at half resolution for `ffx` (afmf-linux's
+//! - **Luma** of both frames at half resolution for `ffx-base` (afmf-linux's
 //!   choice: a 1080p frame's flow at 960x540, ~0.6 ms a frame at 3440x1440
-//!   on RADV by its own measurement), at full resolution for `ffx-quality`
+//!   on RADV by its own measurement), at full resolution for `ffx`
 //!   (`Quality`), and a pyramid of up to 7 levels, each the
 //!   2x2 mean of the one above (the SDK's single-pass downsampler computes
 //!   the same means).
@@ -14,12 +15,12 @@
 //!   divergence; over the SDK's 0.45 the pair is a cut, and every later
 //!   pass sees it.
 //! - **Flow**, coarsest level first: block search around the coarser
-//!   level's vector (+-8 pixels; `ffx-quality` +-16 above level 0), a 3x3
+//!   level's vector (+-8 pixels; `ffx` +-16 above level 0), a 3x3
 //!   vector median, and the scale-up that seeds the next finer level;
-//!   `ffx-quality` then refines level 0's 8x8 vectors to 4x4 blocks and
+//!   `ffx` then refines level 0's 8x8 vectors to 4x4 blocks and
 //!   takes their median again.
 //! - **Interpolation** into the output, a render pass at the frames' size;
-//!   `ffx-quality` searches the flow both ways (the previous frame's
+//!   `ffx` searches the flow both ways (the previous frame's
 //!   blocks into the new frame too) and interpolates knowing which frame
 //!   sees a region (interpolate_two.wgsl), and keeps blocks of still HUD
 //!   (hud_mask.wgsl, after openfg's static-UI mask) blended unmoved.
@@ -55,8 +56,8 @@ use crate::gputime::PassTimes;
 const MAX_LEVELS: u32 = 7;
 /// Pixels a side of a flow block, at every level.
 const BLOCK: u32 = 8;
-/// How hard the generator works: `ffx` (#68) as it was measured, and
-/// `ffx-quality` (#73), which spends more of a gaming GPU's headroom on
+/// How hard the generator works: `ffx-base` (#68) as it was measured, and
+/// `ffx` (#73), which spends more of a gaming GPU's headroom on
 /// the picture, each step measured (`gpu_ffx_time_at_1080p`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Quality {
@@ -70,7 +71,7 @@ pub struct Quality {
     /// a block whose motion the coarser level's vector, or the top level's
     /// zero, misses by up to 16. Level 0 keeps the SDK's 8: it starts from
     /// level 1's vector, rarely more than a pixel or two out, and holds
-    /// most of the blocks (16 there was 3.3 ms of ffx-quality's 3.6 at
+    /// most of the blocks (16 there was 3.3 ms of ffx's 3.6 at
     /// 1080p, against 0.75 ms at the levels above).
     pub radius: i32,
     /// Level 0's 8x8 vectors refined to 4x4 blocks (refine.wgsl, #73 step
@@ -91,9 +92,9 @@ pub struct Quality {
 }
 
 impl Quality {
-    /// `ffx`: #68's generator, unchanged.
+    /// `ffx-base`: #68's generator, unchanged.
     pub const FAST: Self = Self { scale: 2, radius: 8, refine: false, two_way: false, hud_mask: false };
-    /// `ffx-quality`.
+    /// `ffx`.
     pub const BEST: Self = Self { scale: 1, radius: 16, refine: true, two_way: true, hud_mask: true };
 }
 
@@ -105,9 +106,9 @@ const HUD_FRAMES: u32 = 3;
 const MIN_LEVEL_SIDE: u32 = 8;
 /// Motion beyond this (frame pixels between the two frames) is not
 /// believed and blends the frames unmoved: afmf-linux's value, half of
-/// what its search reaches at half resolution (`ffx`).
+/// what its search reaches at half resolution (`ffx-base`).
 const MAX_MOTION: f32 = 128.0;
-/// `ffx-quality`'s: its search, at full resolution with a 16-pixel window
+/// `ffx`'s: its search, at full resolution with a 16-pixel window
 /// above level 0, reaches about 1000 frame pixels, and 128 threw away
 /// the motions of a fast camera turn it had found and both flows agreed
 /// on (#73, the driving clip).
@@ -546,7 +547,7 @@ impl Ffx {
             down: compute(device, "ffx down", include_str!("ffx/down.wgsl")),
             histogram: compute(device, "ffx histogram", include_str!("ffx/histogram.wgsl")),
             divergence: compute(device, "ffx divergence", include_str!("ffx/divergence.wgsl")),
-            // ffx-quality: level 0 also tries the previous pair's vector
+            // ffx: level 0 also tries the previous pair's vector
             // (search.wgsl's TEMPORAL).
             search: compute(
                 device,
@@ -1045,7 +1046,7 @@ mod tests {
         assert!(right * 100 >= inner.len() * 95, "{right} of {} blocks at (-4, -2): {:?}", inner.len(), &inner[..16]);
     }
 
-    /// `ffx-quality`'s flow is at the frame's resolution: the same motion
+    /// `ffx`'s flow is at the frame's resolution: the same motion
     /// reads (-8, -4), one vector per 8x8 block of frame pixels.
     #[test]
     #[ignore = "needs a GPU"]
@@ -1101,7 +1102,7 @@ mod tests {
         assert!(at(25).iter().all(|v| *v == (0, 0)), "100..104 stands: {:?}", at(25));
     }
 
-    /// ffx-quality's generated frame of a picture moved by (8, 4) is the
+    /// ffx's generated frame of a picture moved by (8, 4) is the
     /// picture moved by (4, 2), as ffx's is.
     #[test]
     #[ignore = "needs a GPU"]
@@ -1124,9 +1125,9 @@ mod tests {
     }
 
     /// The halo: an object moves 16 to the right over a still background.
-    /// ffx-quality's halfway frame around the object's outline is much
+    /// ffx's halfway frame around the object's outline is much
     /// closer to the truth than ffx's (#73 step 3). Measured on the RX
-    /// 9070 XT: ffx 41.1 levels, ffx-quality 14.2 (2.9 times smaller).
+    /// 9070 XT: ffx-base 41.1 levels, ffx 14.2 (2.9 times smaller).
     /// What is left sits in the two strips only one frame sees (the
     /// background the object uncovers and the one it covers), about half
     /// of each: there the flow of the seen side is unreliable, and which

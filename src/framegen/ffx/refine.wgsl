@@ -1,4 +1,4 @@
-// protoHDMIcapture (#73), ffx-quality's finer flow: each 4x4 block of the
+// protoHDMIcapture (#73), ffx's finer flow: each 4x4 block of the
 // level-0 luma takes the best of the 8x8 flow's vectors around it (its own
 // block's and its eight neighbours'), then the best one-pixel step from
 // that, each judged by the SAD of a 6x6 window (the 4x4 block and a

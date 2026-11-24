@@ -39,7 +39,7 @@
 @group(0) @binding(2) var<storage, read> previous: array<u32>;
 @group(0) @binding(3) var<storage, read_write> flow: array<vec2i>;
 @group(0) @binding(4) var<storage, read> scd: array<u32>;
-// The previous pair's level-0 flow (#73): with TEMPORAL (ffx-quality, the
+// The previous pair's level-0 flow (#73): with TEMPORAL (ffx, the
 // constant prepended), level 0 also tries the block's vector of a moment
 // ago, and keeps it when it matches about as well as the window's best.
 // A facade's identical windows match equally well one window over; the

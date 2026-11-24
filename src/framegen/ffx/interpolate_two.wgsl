@@ -23,7 +23,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// ffx-quality's interpolation (#73 step 3): the flow both ways. Forward
+// ffx's interpolation (#73 step 3): the flow both ways. Forward
 // (`flow_n`, the new frame's blocks): previous = new + v. Backward
 // (`flow_p`, the previous frame's blocks): new = previous + w. A motion u
 // carries content from the previous frame at x to the new frame at

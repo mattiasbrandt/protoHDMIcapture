@@ -560,8 +560,8 @@ fn repeat_line(repeats: &[(Duration, usize)]) -> Option<String> {
     (!r.is_empty()).then(|| format!("summary: repeated refreshes by time: {}", named_ranges(&r, REPEAT_RANGES)))
 }
 
-/// `--stats`' lines for a run whose frame-generation mode changed (#86, a
-/// dev build's `g`): per mode, in the order first used, its time, its
+/// `--stats`' lines for a run whose frame-generation mode changed (#86,
+/// `g`): per mode, in the order first used, its time, its
 /// counts, its repeated refreshes, and its generator's GPU time and slow
 /// ranges against its own median.
 fn mode_lines(stretches: &[Stretch], gpu: &[GpuSample], end: Duration, last_counts: [u64; 4], last_repeated: u64) -> Vec<String> {
