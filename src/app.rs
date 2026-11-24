@@ -1066,8 +1066,8 @@ impl App {
     }
 
     /// GPU use sampled and shown, and GameMode asked for, while a GPU
-    /// enhancement is on (frame generation, an enhancement SCALING preset),
-    /// not otherwise (#72, #77): called where either can change.
+    /// enhancement is on (frame generation, or Upscaling while it enlarges
+    /// the picture), not otherwise (#72, #77): called where either can change.
     fn update_gpu(&mut self) {
         let on = gpustat::enhanced(self.framegen.as_ref().map(|f| f.schedule.mode()), self.upscaling_running());
         self.gamemode.set(on);

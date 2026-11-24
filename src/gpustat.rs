@@ -11,8 +11,8 @@
 //!   (`/proc/self/fdinfo/*`: `drm-engine-*` ns, `drm-memory-vram`), the
 //!   kernel's vendor-neutral per-client numbers, turned into a busy %.
 //! - **Only while a GPU enhancement is on** (`enhanced`, decided on #72):
-//!   frame generation, or an enhancement SCALING preset. A plain run
-//!   starts no sampler and shows nothing new; `Monitor` starts and stops
+//!   frame generation, or Upscaling while it enlarges the picture. A plain
+//!   run starts no sampler and shows nothing new; `Monitor` starts and stops
 //!   it as the enhancement goes on and off.
 //!
 //! One sampler thread reads it all at 10 Hz into a shared window of the

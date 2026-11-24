@@ -153,8 +153,9 @@ gst or ffplay are legacy's.
 
 ## Reading GPU use (#72)
 
-- **Only with a GPU enhancement on**: frame generation (`--framegen`) or an
-  enhancement SCALING preset. A plain run samples and shows nothing new.
+- **Only with a GPU enhancement on**: frame generation (`--framegen`) or
+  Upscaling while it enlarges the picture (`UPSCALING`). A plain run
+  samples and shows nothing new.
 - **The dashboard's GPU section**, the last 10 s at 10 Hz, as nvtop and
   amdgpu_top read them:
   - `busy`, `clocks`, `VRAM`, `power`, `temperature` and `fan`: the whole
