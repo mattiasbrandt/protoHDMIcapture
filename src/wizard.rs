@@ -152,6 +152,10 @@ pub trait Tuner {
 
 /// How often the tune page looks whether its loopback stopped.
 const TUNE_LOOK: Duration = Duration::from_millis(250);
+/// How often the GPU enhancements page wakes the window to look at its
+/// monitor again: on Wayland a move to another monitor of the same scale
+/// sends the window no event (app.rs's `follow_monitor`).
+const MONITOR_LOOK: Duration = Duration::from_millis(500);
 
 /// What the wizard asks of the machine.
 pub trait System {
@@ -308,10 +312,11 @@ pub struct Wizard {
     /// The window setup.rs has open.
     pub running: Phase,
     /// The monitor the wizard's window is on, and the graphics card (its
-    /// name, and whether it is a dedicated one), when known (app.rs, #85):
-    /// the GPU enhancements step decides Upscaling from them.
-    pub monitor: Option<(u32, u32)>,
-    pub gpu: Option<(String, bool)>,
+    /// name, and whether it is a dedicated one), when known (app.rs through
+    /// `set_display`, #85): the GPU enhancements step decides Upscaling from
+    /// them.
+    monitor: Option<(u32, u32)>,
+    gpu: Option<(String, bool)>,
     outcome: Option<Outcome>,
     cancelled: bool,
 
@@ -1149,10 +1154,14 @@ impl Wizard {
     }
 
     /// When the page next changes on its own: the signal check's timeout,
-    /// or the tune page's next look at its loopback.
+    /// the tune page's next look at its loopback, or the GPU enhancements
+    /// page's next look at its monitor.
     pub fn next_change(&self, now: Instant) -> Option<Instant> {
         if self.step == Step::SyncTune {
             return Some(now + TUNE_LOOK);
+        }
+        if self.step == Step::GpuUpscaling {
+            return Some(now + MONITOR_LOOK);
         }
         (self.step == Step::SignalWait && self.running == Phase::Feed).then(|| self.measure.started.map_or(now, |s| s + SIGNAL_TIMEOUT))
     }
@@ -1337,6 +1346,32 @@ impl Wizard {
         self.next_stage();
     }
 
+    /// The monitor the window is on and the graphics card, from app.rs;
+    /// true when either changed. An open GPU enhancements page follows: its
+    /// recommendation and reason are worked out again, and a selection still
+    /// on the page's start moves to the new one, while one the user moved
+    /// stays where they put it.
+    pub fn set_display(&mut self, monitor: Option<(u32, u32)>, gpu: Option<(String, bool)>) -> bool {
+        if self.monitor == monitor && self.gpu == gpu {
+            return false;
+        }
+        self.monitor = monitor;
+        self.gpu = gpu;
+        if self.step == Step::GpuUpscaling && self.outcome.is_none() {
+            let moved = match &self.ask {
+                Ask::Choose { items, default, sel, .. } if *default != Some(*sel) => Some(items[*sel].key.clone()),
+                _ => None,
+            };
+            self.gpu_stage();
+            if let (Some(key), Ask::Choose { items, sel, .. }) = (moved, &mut self.ask)
+                && let Some(i) = items.iter().position(|i| i.key == key)
+            {
+                *sel = i;
+            }
+        }
+        true
+    }
+
     /// GPU enhancements (#85): Upscaling, on by itself with a dedicated GPU
     /// on a monitor that enlarges the picture (`upscaling_auto`), and what
     /// frame generation would do.
@@ -1357,7 +1392,7 @@ impl Wizard {
             WIDTH,
         );
         body.push(String::new());
-        body.extend(wrap(&format!("{reason}."), WIDTH));
+        body.extend(wrap(&format!("{reason}. This window's monitor decides: move it to the monitor you watch on."), WIDTH));
         body.push(String::new());
         body.extend(wrap(
             "The method is kept in the settings file; run the setup again to change it. While watching, c steps the \
@@ -2245,8 +2280,7 @@ pub(crate) mod tests {
         };
         let f = scratch("gpu-step", Some("RES=1920x1080\n"));
         let mut w = wizard(fake(), &f, false);
-        w.monitor = Some((3840, 2160));
-        w.gpu = Some(("Radeon RX 9070 XT".into(), true));
+        w.set_display(Some((3840, 2160)), Some(("Radeon RX 9070 XT".into(), true)));
         w.gpu_stage();
         assert_eq!(w.step, Step::GpuUpscaling);
         assert_eq!((selected_key(&w), tags(&w)), ("fsr".to_string(), vec!["fsr".to_string()]));
@@ -2262,6 +2296,51 @@ pub(crate) mod tests {
         w.gpu = Some(("Radeon RX 9070 XT".into(), true));
         w.gpu_stage();
         assert_eq!((selected_key(&w), tags(&w)), ("nis".to_string(), vec!["fsr".to_string()]));
+    }
+
+    #[test]
+    fn the_gpu_step_follows_a_move_to_another_monitor() {
+        let selected_key = |w: &Wizard| {
+            let Ask::Choose { items, sel, .. } = &w.ask else { panic!("not a choice") };
+            items[*sel].key.clone()
+        };
+        let tags = |w: &Wizard| {
+            let Ask::Choose { items, .. } = &w.ask else { panic!("not a choice") };
+            items.iter().filter(|i| i.tag.is_some()).map(|i| i.key.clone()).collect::<Vec<_>>()
+        };
+        let gpu = || Some(("Radeon RX 9070 XT".to_string(), true));
+        // Moved before the step: the step starts from the monitor it is on now.
+        let f = scratch("gpu-move-before", Some("RES=1920x1080\n"));
+        let mut w = wizard(fake(), &f, false);
+        assert!(w.set_display(Some((1920, 1080)), gpu()));
+        assert!(w.set_display(Some((3840, 2160)), gpu()));
+        w.gpu_stage();
+        assert_eq!((selected_key(&w), tags(&w)), ("fsr".to_string(), vec!["fsr".to_string()]));
+        // Moved during the step, the selection untouched: it follows, both ways.
+        let f = scratch("gpu-move-during", Some("RES=1920x1080\n"));
+        let mut w = wizard(fake(), &f, false);
+        w.set_display(Some((1920, 1080)), gpu());
+        w.gpu_stage();
+        assert_eq!((selected_key(&w), tags(&w)), ("off".to_string(), vec!["off".to_string()]));
+        // The page wakes the window to look again: Wayland sends no event
+        // for a move between monitors of the same scale.
+        let t0 = Instant::now();
+        assert_eq!(w.next_change(t0), Some(t0 + MONITOR_LOOK));
+        assert!(w.set_display(Some((3840, 2160)), gpu()));
+        assert_eq!((selected_key(&w), tags(&w)), ("fsr".to_string(), vec!["fsr".to_string()]));
+        assert!(w.body.join(" ").contains("3840x2160 monitor"), "{:?}", w.body);
+        assert!(w.set_display(Some((1920, 1080)), gpu()));
+        assert_eq!((selected_key(&w), tags(&w)), ("off".to_string(), vec!["off".to_string()]));
+        // The same monitor again changes nothing.
+        assert!(!w.set_display(Some((1920, 1080)), gpu()));
+        // A choice the user moved to stays, the recommendation follows.
+        press(&mut w, &["Down", "Down"]);
+        assert_eq!(selected_key(&w), "nis");
+        assert!(w.set_display(Some((3840, 2160)), gpu()));
+        assert_eq!((selected_key(&w), tags(&w)), ("nis".to_string(), vec!["fsr".to_string()]));
+        // Enter saves what is selected.
+        press(&mut w, &["Enter"]);
+        assert_eq!(w.new["UPSCALING"], "nis");
     }
 
     fn wizard(sys: Fake, file: &std::path::Path, first_run: bool) -> Wizard {

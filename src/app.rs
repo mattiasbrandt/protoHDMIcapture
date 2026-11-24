@@ -1140,18 +1140,38 @@ impl App {
         self.gfx.as_ref().is_some_and(|g| (g.viewport[2], g.viewport[3]) != (self.format.width, self.format.height))
     }
 
+    /// The size of the monitor the window is on, when known.
+    fn current_monitor_size(&self) -> Option<(u32, u32)> {
+        let gfx = self.gfx.as_ref()?;
+        gfx.window.current_monitor().map(|m| (m.size().width, m.size().height)).filter(|&(w, h)| w > 0 && h > 0)
+    }
+
+    /// A move to another monitor without a resize: the layout and the
+    /// wizard's GPU enhancements page follow, only when the monitor did
+    /// change (a drag sends many events). Looked at on Moved and
+    /// ScaleFactorChanged and on every wake: winit 0.30 on Wayland sends
+    /// no Moved, and nothing at all for a move between monitors of the same
+    /// scale (its surface_enter is empty; current_monitor reads the
+    /// surface's outputs).
+    fn follow_monitor(&mut self) {
+        if self.gfx.is_some() && self.current_monitor_size() != self.monitor_size {
+            self.relayout();
+            self.pacing.repaint();
+        }
+    }
+
     /// The viewport and the scaler for the surface's size, UPSCALING and
-    /// SCALING; after a resize, a move to another monitor and on c. Then
-    /// GPU use and GameMode follow whether Upscaling runs (`update_gpu`).
+    /// SCALING; after a resize, a move to another monitor (`follow_monitor`)
+    /// and on c. Then GPU use and GameMode follow whether Upscaling runs
+    /// (`update_gpu`).
     fn relayout(&mut self) {
+        self.monitor_size = self.current_monitor_size();
         let Some(gfx) = self.gfx.as_mut() else { return };
         let frame = (self.format.width, self.format.height);
-        self.monitor_size = gfx.window.current_monitor().map(|m| (m.size().width, m.size().height)).filter(|&(w, h)| w > 0 && h > 0);
         // The wizard's GPU enhancements step decides Upscaling from these (#85).
         if let Some(w) = &self.opts.wizard {
-            let mut w = w.borrow_mut();
-            w.monitor = self.monitor_size;
-            w.gpu = self.adapter.as_ref().map(|(_, _, name)| (name.clone(), self.device_type == Some(wgpu::DeviceType::DiscreteGpu)));
+            let gpu = self.adapter.as_ref().map(|(_, _, name)| (name.clone(), self.device_type == Some(wgpu::DeviceType::DiscreteGpu)));
+            w.borrow_mut().set_display(self.monitor_size, gpu);
         }
         gfx.viewport = letterbox((gfx.config.width, gfx.config.height), frame, self.opts.live_changes.upscale_to());
         let [_, _, vw, vh] = gfx.viewport;
@@ -2040,6 +2060,7 @@ impl ApplicationHandler<UserEvent> for App {
                     self.close(event_loop);
                 }
             }
+            WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => self.follow_monitor(),
             WindowEvent::Resized(size) => {
                 if let Some(gfx) = self.gfx.as_mut() {
                     // A surface cannot be configured at zero size.
@@ -2059,6 +2080,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.follow_monitor();
         if let Some(w) = &self.opts.wizard
             && w.borrow_mut().tick(Instant::now())
         {
