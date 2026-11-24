@@ -58,18 +58,23 @@ pub enum Wake {
 /// How the run's threads reach the window, from any thread.
 pub type Waker = Arc<dyn Fn(Wake) + Send + Sync>;
 
-/// A run's end: the first outcome set is the run's; the window is woken
-/// for it. Each run has its own, so an earlier run's end, however late,
-/// cannot end a later run.
+/// A run's end: the first outcome set is the run's; the capture is told
+/// to stop and the window is woken for it. Each run has its own, so an
+/// earlier run's end, however late, cannot end a later run.
 #[derive(Clone)]
 pub struct End {
     outcome: Arc<Mutex<Option<Outcome>>>,
+    /// The capture's stop: set with the outcome, not when the window has
+    /// gone, so a window whose teardown blocks (GameMode's unregister can
+    /// wait 10 s on D-Bus) does not keep the capture and a recording going
+    /// past the end (#79).
+    stop: Arc<AtomicBool>,
     wake: Waker,
 }
 
 impl End {
     pub fn new(wake: Waker) -> Self {
-        Self { outcome: Arc::default(), wake }
+        Self { outcome: Arc::default(), stop: Arc::default(), wake }
     }
 
     /// Ends the run with `outcome`, unless it has ended already: false then.
@@ -81,6 +86,7 @@ impl End {
             }
             *o = Some(outcome);
         }
+        self.stop.store(true, Ordering::Relaxed);
         (self.wake)(Wake::End);
         true
     }
@@ -214,8 +220,9 @@ pub fn run(host: &mut dyn Host, mut source: Box<dyn FrameSource>, plan: Plan, qu
 
     let format = source.format();
     let slot = Arc::new(Mutex::new(Slot { data: vec![0; format.frame_size()], tag: None, superseded: 0, superseded_duplicates: 0 }));
-    // Stops the capture: set once the window has ended.
-    let stop = Arc::new(AtomicBool::new(false));
+    // Stops the capture: set with the run's end, and again once the window
+    // has gone (a window that returned without setting one).
+    let stop = end.stop.clone();
     let capture_thread = {
         let (slot, stop, end, live) = (slot.clone(), stop.clone(), end.clone(), plan.live.clone());
         let log_signal = plan.log_signal;
@@ -426,6 +433,9 @@ mod tests {
         Close,
         /// Closes after this many frames.
         CloseAfter(u32),
+        /// Closes after this many frames, then takes this long to go (a
+        /// teardown that blocks, as GameMode's unregister can).
+        CloseAfterThenHold(u32, Duration),
         /// Closes after this long.
         CloseIn(Duration),
         /// Cannot go on.
@@ -473,7 +483,7 @@ mod tests {
                     return;
                 }
                 Act::CloseIn(d) => Some(started + d),
-                Act::CloseAfter(_) | Act::Wait => None,
+                Act::CloseAfter(_) | Act::CloseAfterThenHold(..) | Act::Wait => None,
             };
             loop {
                 let wait = close_at.map_or(PATIENCE, |t| t.saturating_duration_since(Instant::now()));
@@ -484,6 +494,13 @@ mod tests {
                             && self.frames >= n
                         {
                             end.set(Outcome::Closed);
+                            return;
+                        }
+                        if let Act::CloseAfterThenHold(n, hold) = act
+                            && self.frames >= n
+                        {
+                            end.set(Outcome::Closed);
+                            thread::sleep(hold);
                             return;
                         }
                     }
@@ -599,6 +616,21 @@ mod tests {
         assert_eq!(c.frames, 20, "every frame the slot got");
         assert_eq!(host.frames, 20, "the window was woken for each of them");
         assert_eq!((c.gaps, c.ended), (0, 1), "ended once, when the capture ended");
+    }
+
+    #[test]
+    fn the_capture_and_its_tap_stop_at_the_end_not_when_the_window_has_gone() {
+        let quit = Quit::new();
+        let counted = Arc::new(Mutex::new(Counted::default()));
+        let plan = Plan { tap: Some(Box::new(Counting(counted.clone()))), ..plan(None) };
+        // A frame a millisecond: q after 3, then a teardown of 300 ms (#79:
+        // GameMode's unregister blocking the window's drop). The recording
+        // stops at q, not some 300 frames later.
+        let mut host = Scripted::new([Act::CloseAfterThenHold(3, Duration::from_millis(300))]);
+        assert_eq!(run(&mut host, card(100_000, false), plan, &quit), Outcome::Closed);
+        let c = counted.lock().unwrap();
+        assert!(c.frames < 20, "{} frames reached the tap after the window closed at 3", c.frames);
+        assert_eq!(c.ended, 1);
     }
 
     #[test]
