@@ -4,6 +4,28 @@ Work is tracked in the [open issues](https://github.com/mattiasbrandt/protoHDMIc
 [GLOSSARY.md](GLOSSARY.md) names the project's terms, and code, docs,
 commits and issues use them.
 
+## The repository
+
+| Path | What it is |
+|---|---|
+| `Cargo.toml`, `build.rs`, `src/`, `tests/`, `vendor/` | protoHDMIcapture, the Rust program |
+| `settings.rows` | the settings table: names, defaults, ranges, flags |
+| `capture-cards/`, `sources/` | capture card profiles and source profiles, read by protoHDMIcapture and legacy |
+| `legacy/` | protoHDMIcapture legacy: `view.sh`, `launch.sh`, `lib/`, `desktop/`, its harnesses |
+| `packaging/` | the Linux release archive, the Windows installer, the icons |
+| `tools/` | `check`, the hardware-free harnesses, the lost-frame simulation, fixtures |
+| `docs/` | testing, the run directory, the capture card table, ADRs, research |
+| `assets/brand/` | the logo and the social preview |
+
+Building: `cargo build --release` from inside the checkout
+([packaging/INSTALL.md](packaging/INSTALL.md#from-source)).
+
+`tools/check` runs every check: lint, syntax, consistency between code and
+docs, protoHDMIcapture's formatting, build, tests and clippy (for Windows
+too, with the `x86_64-pc-windows-msvc` target), and the harnesses in
+`tools/harness/`; legacy gets lint and syntax only.
+[docs/run-dir.md](docs/run-dir.md) is the contract for the session files.
+
 ## Workflow
 
 1. Enable the hooks once per clone: `git config core.hooksPath .githooks`.

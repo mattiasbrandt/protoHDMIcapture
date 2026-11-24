@@ -72,6 +72,9 @@ accepted for this project in the script). `packaging\windows\test-msi.ps1
 
 ## From source
 
+Needs Rust stable, clang, and the development files of PipeWire, ALSA,
+D-Bus, Wayland and libxkbcommon. Build from inside the checkout:
+
 ```bash
 cargo build --release
 target/release/protohdmicapture
