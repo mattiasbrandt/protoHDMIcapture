@@ -30,6 +30,11 @@
 #WINDOW=fullscreen
 #WINDOW_SIZE=1280x720
 
+# Frame generation for a 30 fps game: off | ffx | rife. A picture made
+# between each two new frames, shown as a 60 fps picture, at one refresh of
+# delay; on a dedicated GPU only. g in the window cycles it, w saves it.
+#FRAMEGEN=off
+
 # Troubleshooting: off | log | window (log plus a live dashboard)
 #DEBUG=off
 

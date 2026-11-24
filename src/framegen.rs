@@ -25,15 +25,12 @@
 //! - **A generator** writes the picture halfway between two new frames,
 //!   the convert pass's RGB frames at the capture's size, before scaling.
 //!   Copy (the last new frame again) is for the wiring and its tests;
-//!   blend (#67, half and half) is round one's baseline; `Ffx`, FidelityFX
-//!   optical flow (#68, framegen/ffx.rs), and the others come on their own
-//!   branches, gathered here on the judging branch (#83).
-//!
-//! The user-facing setting (FRAMEGEN), its key and its overlay row come
-//! with the generator that wins round one; until then the mode is a dev
-//! build's `--framegen` (main.rs), and a default build picks none: the
-//! seam is compiled and tested there, but nothing reaches it.
-#![cfg_attr(not(feature = "dev"), allow(dead_code))]
+//!   blend (#67, half and half) is round one's baseline; ffx-base,
+//!   FidelityFX optical flow (#68, framegen/ffx.rs), is ffx's base.
+//! - **What ships** (#84): FRAMEGEN=off|ffx|rife, `g` and the overlay's
+//!   Frame generation row: ffx (#73, the FidelityFX flow at full
+//!   resolution) and rife (#74, RIFE v4.6). The other generators are a
+//!   dev build's, by `--framegen` (main.rs).
 
 mod ffx;
 
@@ -54,30 +51,32 @@ pub enum Mode {
     /// No generator: each new frame once, duplicates not presented.
     NewOnly,
     /// AMD FidelityFX Optical Flow and an interpolation along it (#68,
-    /// framegen/ffx.rs).
-    Ffx,
+    /// framegen/ffx.rs `Quality::FAST`): ffx's base, a dev build's.
+    FfxBase,
     /// The same, spending more GPU time on the picture (#73,
-    /// framegen/ffx.rs `Quality::BEST`).
-    FfxQuality,
+    /// framegen/ffx.rs `Quality::BEST`): FRAMEGEN=ffx.
+    Ffx,
     /// RIFE v4.6's machine-learned interpolation (#74, rife.rs).
     Rife,
 }
 
 impl Mode {
     /// Every mode, as `--framegen` names them.
-    pub const ALL: [Mode; 6] = [Mode::Copy, Mode::Blend, Mode::NewOnly, Mode::Ffx, Mode::FfxQuality, Mode::Rife];
+    pub const ALL: [Mode; 6] = [Mode::Copy, Mode::Blend, Mode::NewOnly, Mode::FfxBase, Mode::Ffx, Mode::Rife];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Mode::Copy => "copy",
             Mode::Blend => "blend",
             Mode::NewOnly => "new-only",
+            Mode::FfxBase => "ffx-base",
             Mode::Ffx => "ffx",
-            Mode::FfxQuality => "ffx-quality",
             Mode::Rife => "rife",
         }
     }
 
+    /// A dev build's `--framegen MODE` (main.rs, score.rs): every mode.
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))]
     pub fn from_flag(v: &str) -> Result<Self, String> {
         Self::ALL
             .into_iter()
@@ -88,20 +87,37 @@ impl Mode {
     /// The mode runs a generator on the GPU.
     pub fn generates(self) -> bool {
         match self {
-            Mode::Copy | Mode::Blend | Mode::Ffx | Mode::FfxQuality | Mode::Rife => true,
+            Mode::Copy | Mode::Blend | Mode::FfxBase | Mode::Ffx | Mode::Rife => true,
             Mode::NewOnly => false,
         }
     }
 
-    /// The mode is one of the approaches judged by eye, which `g` cycles
-    /// through in a dev build (#83): a real generator. `Copy` (a test
-    /// generator) and `NewOnly` (for external layers) are not. Each
-    /// branch's mode adds its arm.
-    pub fn judged(self) -> bool {
+    /// The mode ships (#84): FRAMEGEN names it and `g` cycles through it.
+    /// The rest are a dev build's `--framegen`: `Copy` (a test generator),
+    /// `NewOnly` (for external layers), and blend and ffx-base, judged and
+    /// not shipped (#63).
+    pub fn shipped(self) -> bool {
         match self {
-            Mode::Copy | Mode::NewOnly => false,
-            Mode::Blend | Mode::Ffx | Mode::FfxQuality | Mode::Rife => true,
+            Mode::Ffx | Mode::Rife => true,
+            Mode::Copy | Mode::Blend | Mode::NewOnly | Mode::FfxBase => false,
         }
+    }
+
+    /// FRAMEGEN's value (#84): off, or a shipped mode by its name.
+    pub fn from_setting(v: &str) -> Result<Option<Self>, String> {
+        if v == "off" {
+            return Ok(None);
+        }
+        shipped().into_iter().find(|m| m.as_str() == v).map(Some).ok_or_else(|| {
+            let names: Vec<&str> = ["off"].into_iter().chain(shipped().into_iter().map(Mode::as_str)).collect();
+            format!("FRAMEGEN={v}: use {}", names.join(", "))
+        })
+    }
+
+    /// FRAMEGEN as the settings file spells it: off, or a shipped mode's
+    /// name. A dev build's other modes are not saved: off.
+    pub fn setting(mode: Option<Self>) -> &'static str {
+        mode.filter(|m| m.shipped()).map_or("off", Mode::as_str)
     }
 }
 
@@ -115,9 +131,9 @@ pub fn cycle(current: Option<Mode>, modes: &[Mode]) -> Option<Mode> {
     }
 }
 
-/// The judged modes, in `Mode::ALL`'s order: what `g` cycles through.
-pub fn judged() -> Vec<Mode> {
-    Mode::ALL.into_iter().filter(|m| m.judged()).collect()
+/// The shipped modes, in `Mode::ALL`'s order: what `g` cycles through.
+pub fn shipped() -> Vec<Mode> {
+    Mode::ALL.into_iter().filter(|m| m.shipped()).collect()
 }
 
 /// Why frame generation is refused on this GPU, if it is: it is meant for
@@ -345,8 +361,8 @@ pub fn generator(mode: Mode, device: &wgpu::Device) -> Option<Box<dyn Generator>
         Mode::Copy => Some(Box::new(OnePass::copy(device))),
         Mode::Blend => Some(Box::new(OnePass::blend(device))),
         Mode::NewOnly => None,
-        Mode::Ffx => Some(Box::new(ffx::Ffx::new(device, ffx::Quality::FAST))),
-        Mode::FfxQuality => Some(Box::new(ffx::Ffx::new(device, ffx::Quality::BEST))),
+        Mode::FfxBase => Some(Box::new(ffx::Ffx::new(device, ffx::Quality::FAST))),
+        Mode::Ffx => Some(Box::new(ffx::Ffx::new(device, ffx::Quality::BEST))),
         // The weights are embedded and checked by a test (rife.rs): a
         // failure here is a broken build, not a run-time condition.
         Mode::Rife => Some(Box::new(rife::Rife::new(device, rife::scale()).expect("the embedded RIFE weights load"))),
@@ -402,36 +418,36 @@ mod tests {
 
     #[test]
     fn g_cycles_off_then_each_mode_in_order_then_off() {
-        // Over a list passed in: main has no judged mode yet, the branches'
-        // modes are listed the same way (Mode::ALL's order).
+        // Over a list passed in (Mode::ALL's order).
         let modes = [Mode::Copy, Mode::NewOnly];
         assert_eq!(cycle(None, &modes), Some(Mode::Copy));
         assert_eq!(cycle(Some(Mode::Copy), &modes), Some(Mode::NewOnly));
         assert_eq!(cycle(Some(Mode::NewOnly), &modes), None, "after the last: off");
-        // A mode outside the list (`--framegen new-only` with only copy
-        // judged) steps to the list's first.
+        // A mode outside the list (a dev build's `--framegen blend`) steps
+        // to the list's first.
         assert_eq!(cycle(Some(Mode::NewOnly), &[Mode::Copy]), Some(Mode::Copy));
-        // Nothing judged: g stays off.
+        // Nothing listed: g stays off.
         assert_eq!(cycle(None, &[]), None);
         assert_eq!(cycle(Some(Mode::Copy), &[]), None);
+        // What ships (#84): off, ffx, rife, off.
+        let s = shipped();
+        assert_eq!(cycle(None, &s), Some(Mode::Ffx));
+        assert_eq!(cycle(Some(Mode::Ffx), &s), Some(Mode::Rife));
+        assert_eq!(cycle(Some(Mode::Rife), &s), None);
+        assert_eq!(cycle(Some(Mode::Blend), &s), Some(Mode::Ffx));
     }
 
     #[test]
-    fn g_skips_the_test_generator_and_new_frames_only() {
-        // copy is a test generator, new-only is for external layers: never
-        // judged by eye, so never in g's cycle.
+    fn what_ships_is_generators_in_mode_alls_order() {
+        // Every shipped mode runs a generator; copy (a test generator) and
+        // new-only (for external layers) never ship.
         for m in Mode::ALL {
-            if m == Mode::Copy || m == Mode::NewOnly {
-                assert!(!m.judged(), "{m:?}");
-            } else {
-                assert!(m.judged() && m.generates(), "{m:?}: a judged mode runs a generator");
-            }
+            assert!(!m.shipped() || m.generates(), "{m:?}: a shipped mode runs a generator");
         }
-        let judged = judged();
-        assert!(!judged.contains(&Mode::Copy) && !judged.contains(&Mode::NewOnly), "{judged:?}");
-        // In Mode::ALL's order.
-        let order: Vec<usize> = judged.iter().map(|m| Mode::ALL.iter().position(|a| a == m).unwrap()).collect();
-        assert!(order.windows(2).all(|w| w[0] < w[1]), "{judged:?}");
+        let s = shipped();
+        assert!(!s.contains(&Mode::Copy) && !s.contains(&Mode::NewOnly), "{s:?}");
+        let order: Vec<usize> = s.iter().map(|m| Mode::ALL.iter().position(|a| a == m).unwrap()).collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{s:?}");
     }
 
     #[test]
@@ -689,6 +705,22 @@ mod tests {
         for m in Mode::ALL {
             assert_eq!(Mode::from_flag(m.as_str()), Ok(m));
         }
-        assert!(Mode::from_flag("warp").unwrap_err().contains("copy or blend or new-only or ffx or ffx-quality or rife"));
+        assert!(Mode::from_flag("warp").unwrap_err().contains("copy or blend or new-only or ffx-base or ffx or rife"));
+    }
+
+    #[test]
+    fn framegen_names_off_and_the_shipped_modes_only() {
+        assert_eq!(shipped(), [Mode::Ffx, Mode::Rife]);
+        assert_eq!(Mode::from_setting("off"), Ok(None));
+        assert_eq!(Mode::from_setting("ffx"), Ok(Some(Mode::Ffx)));
+        assert_eq!(Mode::from_setting("rife"), Ok(Some(Mode::Rife)));
+        for dev in ["blend", "ffx-base", "copy", "new-only", "ffx-quality", ""] {
+            assert_eq!(Mode::from_setting(dev), Err(format!("FRAMEGEN={dev}: use off, ffx, rife")), "{dev:?}");
+        }
+        for m in [None, Some(Mode::Ffx), Some(Mode::Rife)] {
+            assert_eq!(Mode::from_setting(Mode::setting(m)), Ok(m), "{m:?}");
+        }
+        // A dev build's --framegen blend is not a FRAMEGEN value: w saves off.
+        assert_eq!(Mode::setting(Some(Mode::Blend)), "off");
     }
 }

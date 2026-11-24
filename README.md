@@ -226,6 +226,7 @@ legacy reads the same rows.
 | `SCALING` | `balanced` | the resize filter, where Upscaling does not enlarge the picture: `balanced` (spline36 or mitchell), `fast` (bilinear, softer) or `high-quality` (EWA Lanczos); `config` is legacy's mpv.conf, read as balanced here |
 | `UPSCALING` | `off` | enlarges the picture with sharpening on a monitor bigger than the capture: `fsr` (AMD FSR 1) or `nis` (NVIDIA Image Scaling, up to 2x); the setup wizard turns it on with a dedicated GPU |
 | `UPSCALE_TO` | `fit` | the size the picture is shown at: `fit` (as large as the window allows), or `720p` … `4320p` while it fits; **c** steps it, **w** saves it |
+| `FRAMEGEN` | `off` | frame generation for a 30 fps game, at one refresh of delay: `ffx` (FidelityFX optical flow, about 3 ms a frame on a gaming GPU) or `rife` (RIFE v4.6, about 7 ms); refused on an integrated GPU; **g** cycles it, **w** saves it |
 | `LEVELS` | `auto` | the range of the card's frames: `limited` or `full` if blacks look crushed or washed out. `auto` reads YUYV as limited and MJPEG as full |
 | `BRIGHTNESS`, `CONTRAST`, `SATURATION`, `GAMMA` | `0` | colour adjustments, -100 to 100; keys **1**–**8** change them, **w** saves them |
 | `DEBUG` | `off` | `log` or `window`; see [Debugging](#debugging-and-the-dashboard). `--debug` is `window` for one run |

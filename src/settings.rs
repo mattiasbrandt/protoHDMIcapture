@@ -519,7 +519,7 @@ mod tests {
         // settings.rows' names, in order (as `settings_with` lists them on
         // 2026-10-14). A change to the table shows up here first.
         let expected = "SOURCE CARD_SERIAL CARD_PORT DEV IGNORE_CARDS_RE SRC SINK RES FPS FMT DELAY LAT_MS BACKEND AUDIO \
-                        WINDOW WINDOW_SIZE SCALING UPSCALING UPSCALE_TO LEVELS BRIGHTNESS CONTRAST SATURATION GAMMA IPC REFRESH GST_IO_MODE DEBUG FULLSCREEN";
+                        WINDOW WINDOW_SIZE SCALING UPSCALING UPSCALE_TO FRAMEGEN LEVELS BRIGHTNESS CONTRAST SATURATION GAMMA IPC REFRESH GST_IO_MODE DEBUG FULLSCREEN";
         assert_eq!(names.join(" "), expected);
         let ipc = rows().into_iter().find(|r| r.name == "IPC").unwrap();
         assert_eq!(ipc.default, "/tmp/mpv-protohdmicapture.sock");
@@ -639,9 +639,9 @@ mod tests {
     #[test]
     fn read_file_and_with_flag() {
         // As legacy's `settings_with wizard` listed them on 2026-10-19, and
-        // UPSCALING (#85).
+        // UPSCALING (#85) and FRAMEGEN (#84).
         let wizard = "SOURCE CARD_SERIAL CARD_PORT DEV IGNORE_CARDS_RE SRC RES FPS FMT DELAY BACKEND AUDIO WINDOW WINDOW_SIZE SCALING \
-                      UPSCALING REFRESH DEBUG FULLSCREEN";
+                      UPSCALING FRAMEGEN REFRESH DEBUG FULLSCREEN";
         assert_eq!(with_flag("wizard").join(" "), wizard);
         let dir = std::env::temp_dir().join(format!("phc-read-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();

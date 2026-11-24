@@ -107,8 +107,9 @@ pub struct Options {
     /// the window is placed, so typing meant for it does not reach the
     /// viewer.
     pub refocus: Option<String>,
-    /// Frame generation's mode (framegen.rs, #66): a dev build's
-    /// `--framegen`; None, the frames as the card sends them.
+    /// Frame generation's mode at the start (framegen.rs, #66): FRAMEGEN
+    /// (#84), or a dev build's `--framegen`; None, the frames as the card
+    /// sends them.
     pub framegen: Option<Mode>,
     /// Where the frames also go: a dev build's `--record` (clip.rs, #79).
     pub tap: Option<Box<dyn crate::run::Tap>>,
@@ -1081,9 +1082,9 @@ impl App {
         }
     }
 
-    /// `g` (a dev build, #83): frame generation off, then each judged
-    /// approach, then off, live. Through the same path as a start with
-    /// `--framegen`: a refused GPU keeps it off (said), the generator is
+    /// `g` (#83, #84): frame generation off, then each shipped mode, then
+    /// off, live; `w` saves it (FRAMEGEN). Through the same path as a start
+    /// with it on: a refused GPU keeps it off (said), the generator is
     /// made on the first card frame that needs it, the last frame is
     /// converted again for the new path, and GameMode and the GPU section
     /// follow (`update_gpu`).
@@ -1108,7 +1109,7 @@ impl App {
     }
 
     fn cycle_framegen(&mut self) {
-        let mut next = framegen::cycle(self.framegen.as_ref().map(|f| f.schedule.mode()), &framegen::judged());
+        let mut next = framegen::cycle(self.framegen.as_ref().map(|f| f.schedule.mode()), &framegen::shipped());
         let refused = match (next, self.device_type, self.adapter.as_ref()) {
             (Some(mode), Some(kind), Some((_, _, name))) => framegen::refusal(mode, kind, name),
             _ => None,
@@ -1117,6 +1118,7 @@ impl App {
             next = None;
         }
         self.framegen = next.map(Framegen::new);
+        self.opts.live_changes.set_framegen(next);
         match next {
             Some(mode) => self.opts.live.framegen(mode.as_str()),
             None => self.opts.live.framegen_off(),
@@ -2179,9 +2181,8 @@ mod tests {
 
     #[test]
     fn g_switches_frame_generation_live_and_off_after_the_last() {
-        // #83: g steps through the judged modes, then off. On main none is
-        // judged (copy is a test generator), so a `--framegen copy` run's
-        // g turns it off; the branches' modes come first in their builds.
+        // #83, #84: g steps through the shipped modes, then off; from a dev
+        // build's `--framegen copy` (a test generator), to the first.
         let (mut app, _) = app_with("SCALING=balanced\n");
         app.adapter = Some((0x1002, 1, "a test GPU".into()));
         app.device_type = Some(wgpu::DeviceType::DiscreteGpu);
@@ -2190,7 +2191,7 @@ mod tests {
         app.update_gpu();
         assert!(app.gamemode.wanted());
         let mut seen = Vec::new();
-        for _ in 0..=framegen::judged().len() {
+        for _ in 0..=framegen::shipped().len() {
             app.cycle_framegen();
             let mode = app.framegen.as_ref().map(|f| f.schedule.mode());
             seen.push(mode);
@@ -2199,18 +2200,22 @@ mod tests {
             assert_eq!(app.opts.live.framegen_counts().map(|c| c.0), mode.map(Mode::as_str));
             assert_eq!(app.gamemode.wanted(), mode.is_some());
             assert!(app.reconvert);
+            // w saves it (FRAMEGEN).
+            assert_eq!(app.opts.live_changes.framegen(), mode);
             let name = mode.map_or("off", Mode::as_str);
             assert_eq!(app.overlay.current_message(Instant::now()), Some(format!("Frame generation: {name}").as_str()));
         }
-        let want: Vec<Option<Mode>> = framegen::judged().into_iter().map(Some).chain([None]).collect();
-        assert_eq!(seen, want, "judged modes in order, then off");
+        assert_eq!(seen, [Some(Mode::Ffx), Some(Mode::Rife), None], "the shipped modes in order, then off");
+        app.cycle_framegen();
+        assert_eq!(app.opts.live_changes.changes(None), ["FRAMEGEN=ffx"], "w saves what g turned on");
+        app.cycle_framegen();
+        app.cycle_framegen();
         // An integrated GPU is refused it: a warning, and it stays off.
-        if let Some(&first) = framegen::judged().first() {
-            app.device_type = Some(wgpu::DeviceType::IntegratedGpu);
-            app.cycle_framegen();
-            assert!(app.framegen.is_none(), "{first:?} refused on an integrated GPU");
-            assert!(app.overlay.current_message(Instant::now()).unwrap().starts_with("Warning: "));
-        }
+        app.device_type = Some(wgpu::DeviceType::IntegratedGpu);
+        app.cycle_framegen();
+        assert!(app.framegen.is_none(), "ffx refused on an integrated GPU");
+        assert_eq!(app.opts.live_changes.framegen(), None, "nothing runs, nothing to save");
+        assert!(app.overlay.current_message(Instant::now()).unwrap().starts_with("Warning: "));
     }
 
     #[test]

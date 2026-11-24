@@ -91,12 +91,12 @@ const USAGE: &str = concat!(
                   the clip holds the card's frames only
   --note TEXT     a note for NAME.json (\"GTA 6, standing still\")
   --replay FILE   a recorded clip instead of the card, looping
-  --framegen MODE frame generation (#66): copy (the last new frame, a
-                  refresh late), blend (the two new frames half and half,
-                  #67), new-only (duplicates not presented), ffx
-                  (FidelityFX optical flow, #68), ffx-quality (the same,
-                  more GPU time on the picture, #73) or rife (RIFE v4.6
-                  interpolation, #74)"
+  --framegen MODE frame generation for this run, over FRAMEGEN (#66):
+                  ffx or rife (FRAMEGEN's, #73, #74), or copy (the last
+                  new frame, a refresh late), blend (the two new frames
+                  half and half, #67), new-only (duplicates not presented)
+                  or ffx-base (FidelityFX optical flow at half the
+                  resolution, ffx's base, #68)"
 );
 
 /// Called first thing in main, before any thread exists.
@@ -416,6 +416,12 @@ fn score_flags(a: &Args) -> Result<Option<score::Options>, String> {
     }))
 }
 
+/// The frame generation a viewer starts with: a dev build's `--framegen`
+/// for this run (`flag`), else FRAMEGEN (#84).
+fn start_framegen(flag: Option<framegen::Mode>, live: &live_changes::LiveChanges) -> Option<framegen::Mode> {
+    flag.or(live.framegen())
+}
+
 fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
     // First run: no settings file, so the wizard, as view.sh offers it
     // (not for a measurement run, nor for the wizard's own children).
@@ -478,6 +484,7 @@ fn view(args: &[String], quit: &run::Quit, menu: bool) -> Result<(), Fatal> {
         eprintln!("note: {n}");
     }
     opts.live_changes = live_changes::LiveChanges::read(&s)?;
+    opts.framegen = start_framegen(opts.framegen, &opts.live_changes);
     let format = capture::Format::from_settings(s.get("RES"), s.get("FPS"), s.get("FMT"))?;
     // Dev builds (#64, #79): a clip recorded while the window shows the
     // feed, or a clip replayed at its own format.
@@ -770,7 +777,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, Fatal, Held, card, hold_prompt, holds_console, on_key, parse_args, version};
+    use super::{Args, Fatal, Held, Settings, card, hold_prompt, holds_console, live_changes, on_key, parse_args, start_framegen, version};
 
     #[test]
     fn the_version_is_the_crates() {
@@ -859,6 +866,22 @@ mod tests {
         }
         assert_eq!(parse(&["--every", "two"]), None);
         assert!(super::USAGE.contains("--framegen-score CLIP"));
+    }
+
+    #[test]
+    fn the_viewer_starts_with_framegen_unless_a_dev_flag_names_a_mode() {
+        use crate::framegen::Mode;
+        let live = |framegen: &'static str| {
+            let s = Settings::resolve_with(&move |k| match k {
+                "CONFIG_FILE" => Some("/nonexistent/protohdmicapture-test-config".into()),
+                "FRAMEGEN" => Some(framegen.into()),
+                _ => None,
+            });
+            live_changes::LiveChanges::read(&s).unwrap()
+        };
+        assert_eq!(start_framegen(None, &live("rife")), Some(Mode::Rife));
+        assert_eq!(start_framegen(None, &live("off")), None);
+        assert_eq!(start_framegen(Some(Mode::Blend), &live("rife")), Some(Mode::Blend), "--framegen for this run");
     }
 
     #[cfg(not(feature = "dev"))]

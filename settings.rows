@@ -41,6 +41,9 @@ UPSCALING       |off                            |enum:off,fsr,nis               
 # UPSCALE_TO: the size the picture is shown at (#85); c steps it. fit: as
 # large as the window allows.
 UPSCALE_TO      |fit                            |enum:fit,720p,1080p,1440p,2160p,2880p,4320p|protohdmicapture|save
+# FRAMEGEN: frame generation (#84): generated frames between a 30 fps
+# source's new frames; never turned on by itself. g cycles it.
+FRAMEGEN        |off                            |enum:off,ffx,rife                  |protohdmicapture|save,wizard
 LEVELS          |auto                           |enum:auto,limited,full             |mpv            |save
 BRIGHTNESS      |0                              |int:-100..100                      |mpv            |save
 CONTRAST        |0                              |int:-100..100                      |mpv            |save
