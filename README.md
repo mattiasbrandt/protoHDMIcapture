@@ -380,4 +380,6 @@ players, its menu entry and its own troubleshooting:
 ## License
 
 Either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your
-option.
+option. The code and data ported from other projects (FSR 1, NIS, and the
+frame generators' FidelityFX, afmf-linux, openfg and RIFE parts) keep
+their MIT notices: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

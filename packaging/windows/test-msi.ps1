@@ -34,7 +34,7 @@ function Msiexec([string]$what, [string]$arguments) {
 if (Test-Path $dir) { Fail "$dir exists before the install: remove the installed viewer first" }
 
 Msiexec 'the install' "/i `"$Msi`" /qn /l*v `"$Log`""
-foreach ($f in 'protohdmicapture.exe', 'LICENSE-MIT.txt', 'LICENSE-APACHE.txt') {
+foreach ($f in 'protohdmicapture.exe', 'LICENSE-MIT.txt', 'LICENSE-APACHE.txt', 'THIRD-PARTY-NOTICES.txt') {
     if (-not (Test-Path "$dir\$f")) { Fail "no $f in $dir" }
 }
 if (-not (Test-Path $shortcut)) { Fail "no Start menu shortcut at $shortcut" }

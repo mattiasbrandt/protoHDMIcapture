@@ -868,6 +868,58 @@ mod tests {
         assert!(super::USAGE.contains("--framegen-score CLIP"));
     }
 
+    /// Every copyright notice in the source (code or data ported from
+    /// another project, #84) is in THIRD-PARTY-NOTICES.md, which the
+    /// release archive and the installer ship (packaging/).
+    #[test]
+    fn every_ported_notice_ships_in_the_third_party_notices() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let notices = std::fs::read_to_string(root.join("THIRD-PARTY-NOTICES.md")).unwrap();
+        let shipped: Vec<&str> = notices.lines().filter(|l| l.starts_with("Copyright")).collect();
+        let mut dirs = vec![root.join("src")];
+        let mut found = 0;
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                // Text files only: the weights are binary.
+                let Ok(text) = std::fs::read_to_string(&path) else { continue };
+                for line in text.lines().filter(|l| l.contains("Copyright")) {
+                    // The holder, after "Copyright (c) YEAR" or "Copyright(c) YEAR".
+                    let Some(at) = line.find("Copyright") else { continue };
+                    let words: Vec<&str> = line[at..].split_whitespace().collect();
+                    let Some(year) = words.iter().position(|w| w.trim_matches(|c: char| !c.is_ascii_digit()).len() == 4) else {
+                        continue;
+                    };
+                    // Up to the first comma ("hzwer, MIT"; "Devices, Inc.").
+                    let mut holder = Vec::new();
+                    for w in &words[year + 1..] {
+                        holder.push(w.trim_end_matches(','));
+                        if w.ends_with(',') {
+                            break;
+                        }
+                    }
+                    let holder = holder.join(" ");
+                    let holder = holder.trim_end_matches('.');
+                    assert!(!holder.is_empty(), "{}: a notice with no holder: {line}", path.display());
+                    // The year with it: AMD's 2021 (FSR 1) and 2024 (the SDK) are two.
+                    let holder = format!("{} {holder}", words[year].trim_matches(|c: char| !c.is_ascii_digit()));
+                    let holder = holder.as_str();
+                    assert!(
+                        shipped.iter().any(|l| l.contains(holder)),
+                        "{}: {holder:?} has no notice in THIRD-PARTY-NOTICES.md",
+                        path.display()
+                    );
+                    found += 1;
+                }
+            }
+        }
+        assert!(found >= 7, "the source's notices were read ({found})");
+    }
+
     #[test]
     fn the_viewer_starts_with_framegen_unless_a_dev_flag_names_a_mode() {
         use crate::framegen::Mode;

@@ -43,6 +43,9 @@
       <Component>
         <File Source="$(Root)\LICENSE-APACHE" Name="LICENSE-APACHE.txt" />
       </Component>
+      <Component>
+        <File Source="$(Root)\THIRD-PARTY-NOTICES.md" Name="THIRD-PARTY-NOTICES.txt" />
+      </Component>
     </ComponentGroup>
 
     <StandardDirectory Id="ProgramMenuFolder">

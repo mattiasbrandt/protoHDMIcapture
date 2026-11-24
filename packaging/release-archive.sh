@@ -32,7 +32,7 @@ install -Dm644 "$root/packaging/protohdmicapture.desktop" "$d/share/applications
 (cd "$root/packaging/linux/icons" && find hicolor -type f) | while read -r f; do
     install -Dm644 "$root/packaging/linux/icons/$f" "$d/share/icons/$f"
 done
-install -Dm644 -t "$d/share/licenses/protohdmicapture" "$root/LICENSE-MIT" "$root/LICENSE-APACHE"
+install -Dm644 -t "$d/share/licenses/protohdmicapture" "$root/LICENSE-MIT" "$root/LICENSE-APACHE" "$root/THIRD-PARTY-NOTICES.md"
 install -Dm644 -t "$d/share/doc/protohdmicapture" "$root/README.md" "$root/packaging/INSTALL.md"
 install -Dm644 -t "$d/share/doc/protohdmicapture/capture-cards" "$root"/capture-cards/*.md
 install -Dm644 -t "$d/share/doc/protohdmicapture/sources" "$root"/sources/*.md

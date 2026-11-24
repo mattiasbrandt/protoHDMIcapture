@@ -83,4 +83,7 @@ viewer's. With one open, `d` raises it.
 
 ## License
 
-MIT OR Apache-2.0, at your option: `LICENSE-MIT`, `LICENSE-APACHE`.
+MIT OR Apache-2.0, at your option: `LICENSE-MIT`, `LICENSE-APACHE`. The code
+and data ported from other projects (FSR 1, NIS, and the frame
+generators' FidelityFX, afmf-linux, openfg and RIFE parts) keep their MIT
+notices: `THIRD-PARTY-NOTICES.md`.
