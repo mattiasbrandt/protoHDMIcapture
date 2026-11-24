@@ -22,39 +22,38 @@ Out of scope:
   (`XDG_VIDEOS_DIR` on Linux, the Videos library on Windows), under
   `protoHDMIcapture/`.
 
-## What ships (once a winner exists)
+## What ships (decided with #84, 2026-11-24)
 
-- **Frame generation** (GLOSSARY.md) is opt-in, off by default.
-  **ffx-quality and rife ship** (the user, 2026-11-24, after the live
-  session): neither is perfect (buildings and signs glitch), both are good
-  enough as an opt-in, and their stutter bursts are worked on first. It is
-  never turned on by itself, not by the wizard either. The setting's form
-  (`FRAMEGEN=off|ffx-quality|rife` or similar) is decided with #84.
+- **Frame generation** (GLOSSARY.md) is opt-in, off by default:
+  **`FRAMEGEN=off|ffx|rife`**. `ffx` is #73's generator (judged as
+  ffx-quality), `rife` is #74's; #68's plain ffx stays a dev build's
+  `--framegen ffx-base`, its base. Neither is perfect (buildings and signs
+  glitch); both are good enough as an opt-in, and their stutter bursts must
+  come within 2x of frame generation off before release (#86). It is never
+  turned on by itself, not by the wizard either.
   - It is meant for dedicated gaming GPUs. On an integrated GPU it is
-    refused at startup, with a message saying so.
-  - It is a live change: `g`, with the Tab overlay open, switches it
-    (off ↔ on, or through the shipped methods), the overlay row shows its
+    refused, at startup and on `g`, with a message saying so.
+  - It is a live change: `g` cycles off → ffx → rife → off, with the Tab
+    overlay open or closed, the overlay's Frame generation row shows its
     value, and `w` saves it.
   - Only 2x: one generated frame between two new frames. A later 4x for
-    high-refresh monitors is the reason the value names a multiplier.
+    high-refresh monitors would be a new value.
   - A generated frame only ever replaces a **duplicate frame**, and only
     while the cadence is a steady 2:2 (a 30 fps source in a 60 Hz signal).
     A 60 fps source, a menu, a frame-rate dip, a scene cut and the first
     frames all show real frames, as today. It never adds more than one
     refresh of delay.
-- **Upscaling** (the user, 2026-11-24): its own setting,
-  `UPSCALING=off|fsr|nis` (FSR 1 and NVIDIA Image Scaling; the values follow
-  the user's verdict between them), the name users know from games. It
-  upscales and sharpens when the picture is enlarged; `SCALING`
-  (balanced, fast, high-quality) stays the ordinary scaler, unrenamed. The
-  wizard turns Upscaling on when it finds a gaming GPU and a monitor that
-  enlarges the picture; its own overlay row and key (#85).
-- **The wizard and the hardware** (#84, #85): Upscaling is turned on with
-  a gaming GPU on an enlarging monitor. Frame generation is only suggested:
-  the wizard measures the shipped generators on the user's GPU, headless and
-  paced, and says which fit with room and what they cost in delay; the user
-  decides, and it stays off by default. An integrated GPU, a GPU without
-  the room, or a 60 fps source get the reason instead.
+- **Upscaling** (#85): its own setting, `UPSCALING=off|fsr|nis` (AMD FSR 1
+  and NVIDIA Image Scaling; FSR 1 won the user's look, and both stay), the
+  name users know from games. It upscales and sharpens when the picture is
+  enlarged; `SCALING` (balanced, fast, high-quality) stays the resize
+  filter, unrenamed. The method has no key; **c** steps the size the
+  picture is shown at (`UPSCALE_TO`).
+- **The wizard and the hardware** (#84, #85): its GPU enhancements step
+  turns Upscaling on (`fsr`) with a gaming GPU on an enlarging monitor.
+  Frame generation is a plain offer, with no timing run: off (recommended),
+  ffx or rife, each with its typical cost and the one refresh of delay; the
+  user decides. An integrated GPU is not offered it, with the reason.
 - **The README describes the feature** (#84): what it does and does not do,
   its delay, where it looks worse, Upscaling, GameMode's GPU opt-in, and
   what could come later (the "Later" list below and round two's findings).
