@@ -141,10 +141,11 @@ impl GpuTimer {
         }
     }
 
-    /// After the submit: start reading the timestamps back.
-    pub fn submitted(&mut self) {
+    /// After the submit: start reading the timestamps back. Whether this
+    /// frame was measured (one readback is on its way at a time).
+    pub fn submitted(&mut self) -> bool {
         if !self.armed {
-            return;
+            return false;
         }
         self.armed = false;
         self.generated = std::mem::take(&mut self.generating);
@@ -153,6 +154,7 @@ impl GpuTimer {
         self.readback.map_async(wgpu::MapMode::Read, .., move |r| {
             state.store(if r.is_ok() { MAPPED } else { FAILED }, Ordering::Release);
         });
+        true
     }
 
     /// The passes' times, once a readback has arrived. The device must have

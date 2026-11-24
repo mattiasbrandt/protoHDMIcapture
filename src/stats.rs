@@ -83,6 +83,10 @@ pub struct Stats {
     /// a frame generator's passes in the frames that ran one, each with
     /// when it was read (#82: when a pass ran slow).
     gpu_times: Vec<GpuSample>,
+    /// The frame-generation mode the measured frame was submitted in: the
+    /// one readback on its way (gputime.rs) is that frame's, and it comes
+    /// back a frame or more later, after a `g` switch maybe (#86).
+    measured: Option<&'static str>,
     /// CPU time of drawing the overlay (layout, tessellation, upload), in
     /// the frames that drew one (#53: cache it if this is costly).
     overlay: Vec<Duration>,
@@ -143,6 +147,7 @@ impl Stats {
             kernel_to_present: Vec::with_capacity(64 * 1024),
             acquire: Vec::with_capacity(64 * 1024),
             gpu_times: Vec::with_capacity(64 * 1024),
+            measured: None,
             overlay: Vec::with_capacity(64 * 1024),
             submitted: 0,
             presented: 0,
@@ -176,11 +181,19 @@ impl Stats {
         }
     }
 
-    /// One frame's pass times, read back at `at` (the monotonic clock).
+    /// A measured frame was submitted (`GpuTimer::submitted`): its times,
+    /// read back later, count in the mode it ran in.
+    pub fn gpu_submitted(&mut self) {
+        if self.verbose {
+            self.measured = self.live.framegen_counts().map(|(m, _)| m);
+        }
+    }
+
+    /// The measured frame's pass times, read back at `at` (the monotonic
+    /// clock).
     pub fn gpu(&mut self, t: crate::gputime::Times, at: Duration) {
         if self.verbose {
-            let mode = self.live.framegen_counts().map(|(m, _)| m);
-            self.gpu_times.push(GpuSample { at: at.saturating_sub(self.start), times: t, mode });
+            self.gpu_times.push(GpuSample { at: at.saturating_sub(self.start), times: t, mode: self.measured });
         }
     }
 
@@ -732,6 +745,28 @@ mod tests {
         present(&mut s, secs(4.0));
         let modes: Vec<_> = s.stretches.iter().map(|x| (x.mode, x.from, x.counts[0])).collect();
         assert_eq!(modes, [(None, secs(1.0), 0), (Some("ffx"), secs(2.0), 1), (None, secs(4.0), 2)]);
+    }
+
+    #[test]
+    fn a_sample_read_back_after_a_switch_counts_in_the_mode_it_ran_in() {
+        let live = Arc::new(Live::new());
+        let mut s = Stats::new(Duration::ZERO, true, live.clone());
+        let t =
+            |ms: f64| crate::gputime::Times { convert: Duration::from_micros(30), scale: Duration::ZERO, generate: Some(secs(ms / 1e3)) };
+        // rife submitted, read back after `g` went on to blend.
+        live.framegen("rife");
+        s.gpu_submitted();
+        live.framegen("blend");
+        s.gpu(t(11.0), secs(1.0));
+        // blend's own frame.
+        s.gpu_submitted();
+        s.gpu(t(0.02), secs(1.1));
+        // blend submitted, read back after frame generation went off.
+        s.gpu_submitted();
+        live.framegen_off();
+        s.gpu(t(0.02), secs(1.2));
+        let modes: Vec<_> = s.gpu_times.iter().map(|g| g.mode).collect();
+        assert_eq!(modes, [Some("rife"), Some("blend"), Some("blend")]);
     }
 
     #[test]

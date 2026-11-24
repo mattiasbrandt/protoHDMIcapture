@@ -1760,8 +1760,10 @@ impl App {
         }
         gfx.queue.submit(extra.into_iter().chain([encoder.finish()]));
         gfx.screenshot.submitted();
-        if let Some(t) = gfx.timer.as_mut() {
-            t.submitted();
+        if let Some(t) = gfx.timer.as_mut()
+            && t.submitted()
+        {
+            self.pacing.stats().gpu_submitted();
         }
 
         // `present` commits the surface; feedback asked for first attaches
