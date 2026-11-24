@@ -269,10 +269,11 @@ pub fn tips_lines(id: &str, profile: Option<&Profile>) -> Vec<String> {
 }
 
 /// The line under Upscaling's row (#85): what it does at the size the
-/// picture is shown at (`shown`, from the `frame`), or a suggestion; the
-/// overlay never turns it on. `running` is the Upscaling that runs (Off
-/// where it does not enlarge).
-pub fn upscaling_hint(setting: Upscaling, running: Upscaling, frame: (u32, u32), shown: (u32, u32)) -> Option<String> {
+/// picture is shown at (`shown`, from the `frame`, in the `window`), or a
+/// suggestion; the overlay never turns it on. `running` is the Upscaling
+/// that runs (Off where it does not enlarge). At 1:1 it names `c` only
+/// where the window fits a larger size (`c`'s largest step, `fit_size`).
+pub fn upscaling_hint(setting: Upscaling, running: Upscaling, frame: (u32, u32), shown: (u32, u32), window: (u32, u32)) -> Option<String> {
     let ratio = f64::from(shown.1) / f64::from(frame.1.max(1));
     let enlarged = ratio > 1.0 + 1e-6;
     let times = if (ratio - ratio.round()).abs() < 1e-6 { format!("{ratio:.0}x") } else { format!("{ratio:.2}x") };
@@ -282,7 +283,12 @@ pub fn upscaling_hint(setting: Upscaling, running: Upscaling, frame: (u32, u32),
         }
         (Upscaling::Off, _) => None,
         (_, Upscaling::Off) if enlarged => Some(format!("works up to 2x a side: the resize filter enlarges this {times}")),
-        (_, Upscaling::Off) if shown == frame => Some("does nothing here: the picture is shown pixel for pixel (c: a larger size)".into()),
+        (_, Upscaling::Off) if shown == frame && crate::scale::fit_size(frame, window).1 > frame.1 => {
+            Some("does nothing here: the picture is shown pixel for pixel (c: a larger size)".into())
+        }
+        (_, Upscaling::Off) if shown == frame => {
+            Some("does nothing here: the picture is shown pixel for pixel, and this window fits no larger size".into())
+        }
         (_, Upscaling::Off) => Some("does nothing while the picture is shrunk".into()),
         _ => Some(format!("enlarges the picture {times}")),
     }
@@ -338,7 +344,8 @@ mod tests {
     #[test]
     fn upscalings_hint_only_suggests_and_says_when_it_does_nothing() {
         let hd = (1920, 1080);
-        let hint = |set, run, shown| upscaling_hint(set, run, hd, shown);
+        let uhd = (3840, 2160);
+        let hint = |set, run, shown| upscaling_hint(set, run, hd, shown, uhd);
         // Off and enlarged: a suggestion, no switch.
         assert_eq!(
             hint(Upscaling::Off, Upscaling::Off, (3840, 2160)).as_deref(),
@@ -349,11 +356,21 @@ mod tests {
         assert_eq!(hint(Upscaling::Off, Upscaling::Off, (1280, 720)), None);
         // On and running.
         assert_eq!(hint(Upscaling::Fsr, Upscaling::Fsr, (2560, 1440)).as_deref(), Some("enlarges the picture 1.33x"));
-        // On at 1:1: it does nothing, c gives a larger size.
+        // On at 1:1 in a 4K window: it does nothing, c gives a larger size.
         assert_eq!(
             hint(Upscaling::Fsr, Upscaling::Off, hd).as_deref(),
             Some("does nothing here: the picture is shown pixel for pixel (c: a larger size)")
         );
+        // On at 1:1 where c has no larger size (scale::upscale_steps is
+        // [fit] there): no key named.
+        for window in [(1920, 1080), (2560, 1080)] {
+            assert_eq!(
+                upscaling_hint(Upscaling::Fsr, Upscaling::Off, hd, hd, window).as_deref(),
+                Some("does nothing here: the picture is shown pixel for pixel, and this window fits no larger size"),
+                "{window:?}"
+            );
+            assert_eq!(crate::scale::upscale_steps(hd, window), vec![crate::scale::UpscaleTo::Fit], "{window:?}");
+        }
         assert_eq!(hint(Upscaling::Nis, Upscaling::Off, (1280, 720)).as_deref(), Some("does nothing while the picture is shrunk"));
         // NIS past 2x a side.
         assert!(hint(Upscaling::Nis, Upscaling::Off, (4480, 2520)).unwrap().starts_with("works up to 2x"));

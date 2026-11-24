@@ -1601,7 +1601,9 @@ impl App {
                 let setting = self.opts.live_changes.upscaling();
                 let frame = (self.format.width, self.format.height);
                 let shown = self.gfx.as_ref().map(|g| (g.viewport[2], g.viewport[3]));
-                let hint = shown.and_then(|sh| overlay::upscaling_hint(setting, self.upscaling_running(), frame, sh));
+                let window = self.gfx.as_ref().map(|g| (g.config.width, g.config.height));
+                let hint =
+                    shown.zip(window).and_then(|(sh, win)| overlay::upscaling_hint(setting, self.upscaling_running(), frame, sh, win));
                 let size = shown.map_or_else(|| self.opts.live_changes.upscale_to().as_str(), |(w, h)| format!("{w}x{h}"));
                 let id = &self.overlay.tips_id;
                 let p = self.opts.live_changes.picture();
