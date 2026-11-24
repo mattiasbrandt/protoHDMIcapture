@@ -26,12 +26,18 @@ sound, and nothing else: no recording, no streaming.
   dozens of names for the price of a game, with a MacroSilicon chip inside.
   The viewer recognises the chip by its USB id, knows its quirks, and picks
   its best mode.
+- **30 fps games at 60, sharper on a big screen.** With a gaming GPU,
+  optional frame generation makes an in-between picture from the captured
+  frames alone, with no game integration, so it works with any console or
+  PC game; Upscaling enlarges and sharpens a 1080p picture for a 1440p, 4K
+  or ultrawide monitor. See [GPU enhancements](#gpu-enhancements-upscaling-and-frame-generation).
 
 It started as a way to play a PS5 in a window, so most measurements were
 taken with a PS5, the MS2130 and the MS2109. Nothing in it is PS5-specific.
 
 ## Contents
 
+- [GPU enhancements: Upscaling and frame generation](#gpu-enhancements-upscaling-and-frame-generation)
 - [Why it is fast](#why-it-is-fast)
 - [Install](#install)
 - [Quick start](#quick-start)
@@ -45,6 +51,70 @@ taken with a PS5, the MS2130 and the MS2109. Nothing in it is PS5-specific.
 - [protoHDMIcapture legacy (view.sh)](#protohdmicapture-legacy-viewsh)
 - [Development](#development)
 - [License](#license)
+
+## GPU enhancements: Upscaling and frame generation
+
+A gaming GPU can make the picture better than the capture card sends it.
+Both enhancements run on your GPU, from the captured picture alone: a
+capture card only ever sees the finished picture, never the game's own data.
+
+### Upscaling
+
+On a monitor bigger than the capture (a 1440p, 4K or ultrawide monitor),
+Upscaling enlarges the picture and sharpens it, in about 0.2 ms a frame
+at 1440p and 0.5 ms at 4K on a gaming GPU.
+
+| | |
+|---|---|
+| **Turn it on** | `UPSCALING=fsr` (AMD FSR 1) or `nis` (NVIDIA Image Scaling, up to 2x a side). The setup wizard turns on `fsr` with a dedicated GPU on a monitor that enlarges the picture |
+| **The size** | **c** steps the size the picture is shown at: 1080p → 1440p → 4K, the sizes your monitor fits, keeping the picture's shape (`UPSCALE_TO`) |
+| **When it runs** | Only while the picture is shown bigger than the capture. At 1:1 (a 1080p feed on a 1080p or 2560x1080 monitor) it has nothing to do |
+
+### Frame generation
+
+Many console games run at 30 fps. protoHDMIcapture can show them at 60:
+between two new frames from the game it makes the picture halfway. DLSS 3
+and FSR 3 get motion and depth from inside the game; protoHDMIcapture
+estimates the motion itself, from the captured pixels.
+
+| | |
+|---|---|
+| **Turn it on** | `FRAMEGEN=ffx` or `rife`, or **g** to switch it live (off → ffx → rife → off) and **w** in the overlay to save. It is never turned on by itself, not by the setup wizard either |
+| **Methods** | `ffx`: optical flow after AMD FidelityFX, about 3 ms a frame on a gaming GPU such as an RX 9070 XT. `rife`: a neural interpolator (RIFE v4.6), about 7 ms |
+| **The cost** | About one refresh of delay (17 ms at 60 Hz) on top of the usual 45 ms: the in-between picture needs the next real frame |
+| **When it runs** | Only on a steady 30 fps game in a 60 Hz signal. A 60 fps game, menus, dips and scene cuts show the game's own frames, as without it |
+| **Needs** | A dedicated gaming GPU; it is refused on an integrated one, with a message |
+
+**Where it struggles.** Without the game's own motion data, fast camera
+turns that uncover new ground, repeating patterns such as a building's
+windows, and scene changes can show smears or sparkles in the in-between
+pictures. Switch methods live with **g** and keep what looks best to you;
+with it off, every frame is the game's own.
+
+### Full GPU speed with GameMode
+
+A GPU clocks down for a light 60 Hz load, which makes both enhancements
+slower. While one is on, protoHDMIcapture asks
+[GameMode](https://github.com/FeralInteractive/gamemode) for performance
+(about 30 % faster here). Its GPU part is your opt-in in
+`/etc/gamemode.ini`: [docs/testing.md](docs/testing.md#gamemode-77).
+
+**Watching it work.** The dashboard (**d**) shows the game's own frame
+rate and cadence, how many pictures were generated or missed, and the
+GPU's load, clocks, power and temperatures while an enhancement is on.
+
+### In place, and possible later
+
+- **In place:** Upscaling with AMD FSR 1 or NVIDIA Image Scaling; frame
+  generation with ffx or rife; the setup wizard's GPU enhancements step;
+  GameMode while an enhancement runs.
+- **Possible later:** vendor paths (AMD's frame-rate conversion on
+  Windows, NVIDIA's driver optical flow, RTX Video Super Resolution);
+  learned interpolation at full resolution on faster GPUs; 4x for
+  high-refresh monitors; extrapolation, which avoids the extra delay
+  (research only); capture cards with lower latency, 1440p, 120 Hz or HDR.
+  A learned 2x upscaler was built and measured, and left out: on a current
+  gaming GPU it does not fit a 60 Hz frame.
 
 ## Why it is fast
 
@@ -67,7 +137,7 @@ why its own renderer: [ADR 0001](docs/adr/0001-rust-viewer-own-renderer.md).
 **The GPU does the picture work.** The viewer draws with wgpu, on Vulkan
 (Linux) or DirectX 12 (Windows). An uncompressed YUYV frame goes to the GPU
 as the card sent it: the conversion to RGB, the levels and colour
-adjustments, and the scaler (`SCALING`) all run as shaders, so the CPU only
+adjustments, and the scaling (Upscaling or the resize filter) all run as shaders, so the CPU only
 copies the frame. MJPEG frames (the MS2109) are decoded to YUYV on the CPU
 first, about 2 ms at 720p and 5 ms at 1080p, then take the same GPU path.
 `--stats` prints the GPU time of each frame's passes, where the driver
@@ -184,12 +254,15 @@ written before the review.
    frame rate, and checking a few frames for an all-black picture (the
    MS2109 streams black at full rate with nothing plugged in).
 5. **Audio:** the card audio input, another input, or none.
-6. **Display:** the display mode and window size, refresh matching, and
-   scaling.
-7. **Audio sync:** optional; the sound plays while you watch, and the keys
+6. **Display:** the display mode and window size, then refresh matching.
+7. **GPU enhancements:** Upscaling, turned on with a dedicated GPU on a
+   monitor that enlarges the picture; then, on a dedicated GPU, frame
+   generation offered with its cost and delay, off unless you pick it.
+   This window's monitor decides: move it to the monitor you watch on.
+8. **Audio sync:** optional; the sound plays while you watch, and the keys
    move it until it lines up.
-8. **Troubleshooting:** debug output off, a log, or a log and the dashboard.
-9. **Review:** exactly what will change, then save.
+9. **Troubleshooting:** debug output off, a log, or a log and the dashboard.
+10. **Review:** exactly what will change, then save.
 
 ## Settings
 
@@ -258,7 +331,9 @@ the viewer says so and leaves the display alone.
 **On a bigger or wider monitor.** The picture keeps its shape: it is
 scaled to the largest size that fits, and black bars fill the rest (an
 ultrawide gets them at the sides; a 1080p feed on a 2560x1080 monitor is
-shown pixel for pixel, with no scaling at all). Capture cards send colour
+shown pixel for pixel, with no scaling at all). Upscaling sharpens an
+enlarged picture, and **c** picks its size:
+[GPU enhancements](#gpu-enhancements-upscaling-and-frame-generation). Capture cards send colour
 at half the width of the picture; protoHDMIcapture fills it back in
 smoothly, so coloured edges and HUD text stay crisp.
 
