@@ -134,8 +134,9 @@ and `new-only`, which do not ship.
 _Avoid_: interpolation (one way to do it), frame enhancer, motion smoothing
 
 **Upscaling**:
-Enlarging the picture with sharpening, on the GPU, when the monitor shows
-it bigger than the capture card sends it (a 1440p, 4K or ultrawide
+Raising the picture to the monitor's higher resolution on the GPU, with
+clean edges where a plain stretch looks soft, when the monitor shows it
+bigger than the capture card sends it (a 1440p, 4K or ultrawide
 monitor): AMD FSR 1 or NVIDIA Image Scaling. At 1:1 or when shrinking it
 does nothing, and the resize filter (`SCALING`) scales.
 _Avoid_: sharp, super resolution, the resize filter (that is `SCALING`)

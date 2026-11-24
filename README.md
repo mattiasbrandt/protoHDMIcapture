@@ -21,8 +21,9 @@ streaming, no account: one small program that opens straight to the game.
 - 🎮 **Low delay.** About 45 ms from the moment a frame reaches the PC to
   the moment it is on screen at 1080p60, on our test setup. Picture and
   sound each take their own fast path, with no buffering in between.
-- ✨ **Sharper on a big monitor.** Upscaling enlarges and sharpens a 1080p
-  picture for a 1440p, 4K or ultrawide monitor, on your GPU.
+- ✨ **Full resolution on a big monitor.** Upscaling brings the 1080p
+  picture up to your 1440p, 4K or ultrawide monitor's resolution on your
+  GPU, with clean edges instead of a blurry stretch.
 - 🏎️ **30 fps games shown at 60.** Frame generation makes the in-between
   pictures on your GPU, from the picture alone, so it works with any game.
 - 🧙 **Easy setup.** A setup wizard finds your capture card, checks the
@@ -108,11 +109,12 @@ viewer.
 Two optional extras for a dedicated gaming GPU. Both work from the captured
 picture alone: a capture card never sees the game's own data.
 
-### Upscaling: sharper on a big monitor
+### Upscaling: your monitor's full resolution
 
-On a monitor bigger than the capture (1440p, 4K or ultrawide), Upscaling
-enlarges the picture and sharpens it, for about 0.2 ms of GPU work a frame
-at 1440p.
+On a monitor with a higher resolution than the capture (1440p, 4K or
+ultrawide), Upscaling raises the picture to that resolution with clean
+edges, where a plain stretch looks soft, for about 0.2 ms of GPU work a
+frame at 1440p.
 
 - **Turn it on:** the setup wizard does it for you with a gaming GPU on a
   bigger monitor. Or set `UPSCALING=fsr` (AMD FSR 1, the recommended one) or
@@ -192,7 +194,7 @@ The setup wizard and **w** write the settings file for you:
 
 The ones you are most likely to change:
 
-- `UPSCALING`: sharper enlarging on a bigger monitor (`off`, `fsr`, `nis`).
+- `UPSCALING`: raise the picture to a bigger monitor's resolution (`off`, `fsr`, `nis`).
 - `FRAMEGEN`: 30 fps games shown at 60 (`off`, `ffx`, `rife`).
 - `WINDOW`: `fullscreen`, `borderless` or `windowed`.
 - `REFRESH`: `match` switches the monitor to the game's refresh rate.
@@ -221,7 +223,7 @@ The ones you are most likely to change:
 | `WINDOW_SIZE` | `1280x720` | the window's size when windowed |
 | `REFRESH` | `keep` | `match` switches the monitor to its refresh rate nearest `FPS` while the viewer runs, and back after (Hyprland) |
 | `SCALING` | `balanced` | how the picture is resized when Upscaling is not doing it: `balanced`, `fast` (softer) or `high-quality`; `config` is legacy's, read as balanced here |
-| `UPSCALING` | `off` | sharper enlarging on a bigger monitor: `fsr` (AMD FSR 1) or `nis` (NVIDIA Image Scaling, up to 2x); the setup wizard turns it on with a dedicated GPU |
+| `UPSCALING` | `off` | raises the picture to a bigger monitor's resolution: `fsr` (AMD FSR 1) or `nis` (NVIDIA Image Scaling, up to 2x); the setup wizard turns it on with a dedicated GPU |
 | `UPSCALE_TO` | `fit` | the size the picture is shown at: `fit` (as large as the window allows), or `720p` … `4320p` while it fits; **c** steps it, **w** saves it |
 | `FRAMEGEN` | `off` | frame generation for a 30 fps game, at one frame of extra delay: `ffx` (about 3 ms a frame on a gaming GPU) or `rife` (about 7 ms); not on built-in graphics; **g** cycles it, **w** saves it |
 | `LEVELS` | `auto` | the colour range of the card's frames: `limited` or `full` if blacks look crushed or washed out. `auto` reads YUYV as limited and MJPEG as full |
