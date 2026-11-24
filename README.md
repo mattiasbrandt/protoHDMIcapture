@@ -10,274 +10,188 @@
   <a href="https://github.com/mattiasbrandt/protoHDMIcapture/actions/workflows/release.yml"><img alt="release" src="https://github.com/mattiasbrandt/protoHDMIcapture/actions/workflows/release.yml/badge.svg"></a>
 </p>
 
-Play a console, a camera or another PC on your screen through a USB capture
-card, on Linux and Windows. protoHDMIcapture shows the picture and plays the
-sound, and nothing else: no recording, no streaming.
+<p align="center"><b>Play your console on your PC monitor through a cheap USB capture card, with as little delay as possible.</b></p>
 
-- **No bloated vendor app.** No account, no streaming suite, no background
-  service. One program that opens straight to the picture.
-- **Simple and open source.** One binary, one plain-text settings file, and
-  a setup wizard that asks only what it needs. MIT or Apache-2.0, built in
-  the open.
-- **Built for low latency.** About 45 ms from a frame reaching the PC to the
-  screen at 1080p60. The GPU does the picture work, and the sound runs
-  beside the picture instead of holding it back.
-- **Made for cheap no-name capture cards.** The capture cards sold under
-  dozens of names for the price of a game, with a MacroSilicon chip inside.
-  The viewer recognises the chip by its USB id, knows its quirks, and picks
-  its best mode.
-- **30 fps games at 60, sharper on a big screen.** With a gaming GPU,
-  optional frame generation makes an in-between picture from the captured
-  frames alone, with no game integration, so it works with any console or
-  PC game; Upscaling enlarges and sharpens a 1080p picture for a 1440p, 4K
-  or ultrawide monitor. See [GPU enhancements](#gpu-enhancements-upscaling-and-frame-generation).
+protoHDMIcapture shows the picture and plays the sound from a PlayStation,
+Xbox, Switch, camera or another PC, on Linux and Windows. No recording, no
+streaming, no account: one small program that opens straight to the game.
 
-It started as a way to play a PS5 in a window, so most measurements were
-taken with a PS5, the MS2130 and the MS2109. Nothing in it is PS5-specific.
+## Why you'll like it
+
+- 🎮 **Low delay.** About 45 ms from the card to your screen at 1080p60.
+  Picture and sound each take their own fast path, with no buffering in
+  between.
+- ✨ **Sharper on a big monitor.** Upscaling enlarges and sharpens a 1080p
+  picture for a 1440p, 4K or ultrawide monitor, on your GPU.
+- 🏎️ **30 fps games shown at 60.** Frame generation makes the in-between
+  pictures on your GPU, from the picture alone, so it works with any game.
+- 🧙 **Easy setup.** A setup wizard finds your capture card, checks the
+  signal, and picks sensible settings for your card, console and monitor.
+- 💸 **Made for cheap capture cards.** The no-name cards sold for the price
+  of a game (with a MacroSilicon MS2130 or MS2109 inside) are recognised and
+  run in their best mode.
+- 🔓 **Free and open source.** No bloated vendor app, no background
+  service: one program and one plain-text settings file.
 
 ## Contents
 
-- [GPU enhancements: Upscaling and frame generation](#gpu-enhancements-upscaling-and-frame-generation)
-- [Why it is fast](#why-it-is-fast)
 - [Install](#install)
-- [Quick start](#quick-start)
-- [Keys and the overlay](#keys-and-the-overlay)
-- [The setup wizard](#the-setup-wizard)
-- [Settings](#settings)
-- [Display modes and refresh](#display-modes-and-refresh)
-- [Debugging and the dashboard](#debugging-and-the-dashboard)
-- [Capture cards and sources](#capture-cards-and-sources)
+- [First run](#first-run)
+- [Keys](#keys)
+- [GPU enhancements](#gpu-enhancements)
+- [Capture cards and consoles](#capture-cards-and-consoles)
 - [Troubleshooting](#troubleshooting)
-- [protoHDMIcapture legacy (view.sh)](#protohdmicapture-legacy-viewsh)
-- [Development](#development)
-- [License](#license)
-
-## GPU enhancements: Upscaling and frame generation
-
-A gaming GPU can make the picture better than the capture card sends it.
-Both enhancements run on your GPU, from the captured picture alone: a
-capture card only ever sees the finished picture, never the game's own data.
-
-### Upscaling
-
-On a monitor bigger than the capture (a 1440p, 4K or ultrawide monitor),
-Upscaling enlarges the picture and sharpens it, in about 0.2 ms a frame
-at 1440p and 0.5 ms at 4K on a gaming GPU.
-
-| | |
-|---|---|
-| **Turn it on** | `UPSCALING=fsr` (AMD FSR 1) or `nis` (NVIDIA Image Scaling, up to 2x a side). The setup wizard turns on `fsr` with a dedicated GPU on a monitor that enlarges the picture |
-| **The size** | **c** steps the size the picture is shown at: 1080p → 1440p → 4K, the sizes your monitor fits, keeping the picture's shape (`UPSCALE_TO`) |
-| **When it runs** | Only while the picture is shown bigger than the capture. At 1:1 (a 1080p feed on a 1080p or 2560x1080 monitor) it has nothing to do |
-
-### Frame generation
-
-Many console games run at 30 fps. protoHDMIcapture can show them at 60:
-between two new frames from the game it makes the picture halfway. DLSS 3
-and FSR 3 get motion and depth from inside the game; protoHDMIcapture
-estimates the motion itself, from the captured pixels.
-
-| | |
-|---|---|
-| **Turn it on** | `FRAMEGEN=ffx` or `rife`, or **g** to switch it live (off → ffx → rife → off) and **w** in the overlay to save. It is never turned on by itself, not by the setup wizard either |
-| **Methods** | `ffx`: optical flow after AMD FidelityFX, about 3 ms a frame on a gaming GPU such as an RX 9070 XT. `rife`: a neural interpolator (RIFE v4.6), about 7 ms |
-| **The cost** | About one refresh of delay (17 ms at 60 Hz) on top of the usual 45 ms: the in-between picture needs the next real frame |
-| **When it runs** | Only on a steady 30 fps game in a 60 Hz signal. A 60 fps game, menus, dips and scene cuts show the game's own frames, as without it |
-| **Needs** | A dedicated gaming GPU; it is refused on an integrated one, with a message |
-
-**Where it struggles.** Without the game's own motion data, fast camera
-turns that uncover new ground, repeating patterns such as a building's
-windows, and scene changes can show smears or sparkles in the in-between
-pictures. Switch methods live with **g** and keep what looks best to you;
-with it off, every frame is the game's own.
-
-### Full GPU speed with GameMode
-
-A GPU clocks down for a light 60 Hz load, which makes both enhancements
-slower. While one is on, protoHDMIcapture asks
-[GameMode](https://github.com/FeralInteractive/gamemode) for performance
-(about 30 % faster here). Its GPU part is your opt-in in
-`/etc/gamemode.ini`: [docs/testing.md](docs/testing.md#gamemode-77).
-
-**Watching it work.** The dashboard (**d**) shows the game's own frame
-rate and cadence, how many pictures were generated or missed, and the
-GPU's load, clocks, power and temperatures while an enhancement is on.
-
-### In place, and possible later
-
-- **In place:** Upscaling with AMD FSR 1 or NVIDIA Image Scaling; frame
-  generation with ffx or rife; the setup wizard's GPU enhancements step;
-  GameMode while an enhancement runs.
-- **Possible later:** vendor paths (AMD's frame-rate conversion on
-  Windows, NVIDIA's driver optical flow, RTX Video Super Resolution);
-  learned interpolation at full resolution on faster GPUs; 4x for
-  high-refresh monitors; extrapolation, which avoids the extra delay
-  (research only); capture cards with lower latency, 1440p, 120 Hz or HDR.
-  A learned 2x upscaler was built and measured, and left out: on a current
-  gaming GPU it does not fit a 60 Hz frame.
-
-## Why it is fast
-
-The usual tools (OBS, or a player with an audio track) run picture and sound
-through one pipeline, which has to reconcile two clocks that drift against
-each other and pays for that with buffering. protoHDMIcapture splits them:
-
-| | Path | Latency |
-|---|---|---|
-| Picture | the card's frames straight to the screen, no audio track, each frame shown as soon as the display can take it | about 45 ms from the frame reaching the PC to the screen |
-| Sound | a loopback from the card audio input to your output, never through the picture's path | about 10 to 20 ms, plus the audio sync |
-| Audio sync | one fixed delay on the sound, tuned once | none |
-
-Nothing has to stay in sync, so nothing needs a buffer: the sound arrives
-early and the audio sync holds it back to match. The viewer holds a frame
-for the display's next refresh only within 5 ms of it, and otherwise shows
-the newest. How it was measured: [docs/testing.md](docs/testing.md#measuring-latency);
-why its own renderer: [ADR 0001](docs/adr/0001-rust-viewer-own-renderer.md).
-
-**The GPU does the picture work.** The viewer draws with wgpu, on Vulkan
-(Linux) or DirectX 12 (Windows). An uncompressed YUYV frame goes to the GPU
-as the card sent it: the conversion to RGB, the levels and colour
-adjustments, and the scaling (Upscaling or the resize filter) all run as shaders, so the CPU only
-copies the frame. MJPEG frames (the MS2109) are decoded to YUYV on the CPU
-first, about 2 ms at 720p and 5 ms at 1080p, then take the same GPU path.
-`--stats` prints the GPU time of each frame's passes, where the driver
-reports it.
-
-The largest term is the capture card's own latency (6 to 11 frames reported
-for the MS2130), which no software reaches. For twitchy games, play off the
-card's HDMI loop-out on a real display and use the PC for the picture.
+- [Settings](#settings)
+- [More](#more)
 
 ## Install
 
-Packages are on the [GitHub releases](https://github.com/mattiasbrandt/protoHDMIcapture/releases);
-[packaging/INSTALL.md](packaging/INSTALL.md) has the details.
+Download the package for your system from the
+[releases page](https://github.com/mattiasbrandt/protoHDMIcapture/releases).
 
-| Platform | How |
+| System | How |
 |---|---|
-| Linux (glibc 2.36+: Debian 12, Ubuntu 24.04, Fedora, Arch and newer) | the release archive: `tar xf protohdmicapture-<version>-x86_64-linux.tar.gz`, then `./install.sh` in it |
-| Windows 10/11 | the release's `.msi`: per user, no administrator prompt |
+| **Linux** (Debian 12, Ubuntu 24.04, Fedora, Arch or newer) | unpack `protohdmicapture-<version>-x86_64-linux.tar.gz` and run `./install.sh` in it |
+| **Windows 10/11** | run the `.msi`; it installs for your user, with no administrator prompt |
 
-Linux needs a Wayland desktop with a Vulkan driver and PipeWire. Refresh
-matching and window placement need Hyprland; other desktops get the feed
-without them. Windows needs a DirectX 12 driver.
+> [!NOTE]
+> Linux needs a Wayland desktop, a Vulkan graphics driver and PipeWire.
+> Matching the monitor's refresh rate and placing the window need Hyprland;
+> other desktops show the picture without them. Windows needs DirectX 12.
 
-From a checkout: `cargo build --release` (Rust stable, clang,
-and the development files of PipeWire, ALSA, D-Bus, Wayland and
-libxkbcommon); the binary is `target/release/protohdmicapture`.
+More detail, and building it yourself: [packaging/INSTALL.md](packaging/INSTALL.md).
 
-## Quick start
+## First run
 
-```bash
-protohdmicapture              # the feed; with no settings file, the setup wizard first
-protohdmicapture --setup      # the setup wizard, then the feed
-protohdmicapture --settings   # each setting, its value and where it came from
-protohdmicapture --debug      # the feed, with the dashboard
-protohdmicapture --help       # every flag
-protohdmicapture --version    # the version
-```
+Start **protoHDMIcapture** from your app menu, or run `protohdmicapture`.
+The first time, the setup wizard opens in the window and walks you through:
 
-The menu entry runs `protohdmicapture --menu`: `REFRESH=match` unless the
-settings say otherwise, and a desktop notification when it fails or has no
-sound. On Windows, started from the Start menu, a fatal error keeps its
-console open until Enter.
+1. your capture card,
+2. what is plugged into it (PS5, Xbox, Switch, a PC…),
+3. the picture format and a quick signal check,
+4. the sound,
+5. fullscreen or a window, and the monitor's refresh rate,
+6. the GPU enhancements (Upscaling turned on where it helps; frame
+   generation offered, off unless you pick it),
+7. the audio sync, so the sound lines up with the picture.
 
-For measuring: `--stats` prints the latency numbers every 10 s and a
-summary, `--seconds N` ends the feed after N seconds, `--test-pattern`
-shows colour bars instead of the card, and `--monitor NAME` opens the
-window on that monitor (Hyprland).
+Nothing is saved until the last screen shows what will change. Run it again
+any time with **u** in the overlay, or `protohdmicapture --setup`.
 
-One video window and one audio loopback run at a time: a second launch
-focuses the running window, or says it is already running.
+> [!TIP]
+> **Black picture?** Turn HDCP off on the console first: nothing else
+> matters until it is. The wizard shows how for your console.
 
-## Keys and the overlay
+## Keys
 
-| Key | In the window |
+| Key | What it does |
 |---|---|
-| **Tab** | open or close the overlay |
-| **f** | cycle fullscreen → borderless → windowed |
-| **d** | open the dashboard (on another monitor, on Hyprland); with one open, raise it |
-| **s** | a screenshot to `~/Pictures/protoHDMIcapture/` |
-| **c** | the picture's size: 1080p → 1440p → 4K, the sizes your monitor fits (bars keep the shape); a short message says which |
-| **g** | frame generation: off → ffx → rife → off (`FRAMEGEN`); a short message says which |
-| **ctrl −** / **ctrl +** | audio sync 10 ms earlier / later, live |
-| **alt −** / **alt +** | audio sync 50 ms earlier / later |
-| **m**, **9** / **0** | mute; volume down / up of the loopback |
+| **Tab** | open or close the overlay: every setting with its current value |
+| **f** | fullscreen → borderless → windowed |
+| **c** | picture size: 1080p → 1440p → 4K, the sizes your monitor fits |
+| **g** | frame generation: off → ffx → rife → off |
+| **ctrl −** / **ctrl +** | sound 10 ms earlier / later (**alt** for 50 ms) |
+| **m**, **9** / **0** | mute; volume down / up |
 | **1**–**8** | contrast, brightness, gamma, saturation down / up |
+| **s** | a screenshot to `~/Pictures/protoHDMIcapture/` |
+| **d** | the dashboard: frame rates, delay, sound, GPU |
 | **q** | quit |
 
-For the first 10 seconds a bar along the bottom lists the main keys. **Tab**
-opens the overlay: a panel with the keys and the live settings, each with
-its current value, and these keys:
+With the overlay open: **w** saves what you changed, **u** runs the setup
+wizard, **t** shows the setup tips for your console, **l** switches the
+colour range (auto → limited → full), **r** resets the colour, and **Esc**
+closes it. A change you don't save with **w** lasts until you close the
+viewer.
 
-| Key | With the overlay open |
+## GPU enhancements
+
+Two optional extras for a dedicated gaming GPU. Both work from the captured
+picture alone: a capture card never sees the game's own data.
+
+### Upscaling: sharper on a big monitor
+
+On a monitor bigger than the capture (1440p, 4K or ultrawide), Upscaling
+enlarges the picture and sharpens it, for about 0.2 ms of GPU work a frame
+at 1440p.
+
+- **Turn it on:** the setup wizard does it for you with a gaming GPU on a
+  bigger monitor. Or set `UPSCALING=fsr` (AMD FSR 1, the recommended one) or
+  `nis` (NVIDIA Image Scaling).
+- **Pick the size** with **c**: 1080p → 1440p → 4K, as far as your monitor
+  goes, always keeping the picture's shape.
+- On a 1080p monitor the picture is already shown pixel for pixel, so there
+  is nothing to upscale.
+
+### Frame generation: 30 fps games at 60
+
+Many console games run at 30 fps. Frame generation makes a picture halfway
+between each two frames, so the game looks like 60 fps.
+
+| | |
 |---|---|
-| **l** | levels: auto → limited → full (the range of the card's frames) |
-| **r** | reset the colour |
-| **t** | the setup tips for the source; **←** / **→** browse the other source profiles |
-| **w** | save what changed since the feed started |
-| **u** | the setup wizard: the feed stops, and starts again with what the wizard saves. With changes not saved by **w**, a second **u** goes ahead without them |
-| **Esc**, **Tab** | close |
+| **Turn it on** | press **g**, or set `FRAMEGEN=ffx` or `rife`. It is never turned on for you |
+| **ffx** | the lighter one: about 3 ms of GPU work a frame on a gaming GPU such as an RX 9070 XT |
+| **rife** | a neural network: about 7 ms a frame |
+| **The cost** | about one frame of extra delay (17 ms), because the in-between picture needs the next real one |
+| **When it works** | on a steady 30 fps game. A 60 fps game, menus and dips show the game's own frames |
+| **Needs** | a dedicated gaming GPU; it won't run on built-in (integrated) graphics |
 
-Every change is a live change: it lasts until the viewer closes, unless
-**w** saves it. The volume is not a setting: the sound system remembers the
-loopback's level between sessions, as it does for any app. The audio sync
-keys also start the loopback again if it died.
+> [!NOTE]
+> Without the game's own motion data, fast camera turns, repeating patterns
+> (a building's windows) and scene changes can show smears or sparkles. Try
+> both methods with **g** and keep what looks best to you.
 
-**No signal.** When the capture card delivers no picture, a banner says so:
-after 5 s if none has come since the feed opened ("is the source on and
-connected?"), or 2 s after the last one (a source gone to sleep; the source
-profile says how to wake it). It goes with the first new frame. A card that
-keeps sending frames shows no banner: the MS2130 streams its own "No
-Signal" box for about a minute after the source sleeps, and the MS2109
-streams black with nothing plugged in.
+> [!TIP]
+> A GPU slows down for a light 60 fps load, which makes both enhancements
+> slower. protoHDMIcapture asks
+> [GameMode](https://github.com/FeralInteractive/gamemode) for full speed
+> while one runs; on Linux, let GameMode raise the GPU's clocks in
+> `/etc/gamemode.ini` ([how](docs/testing.md#gamemode-77)).
 
-## The setup wizard
+## Capture cards and consoles
 
-The wizard runs in the viewer's window: `protohdmicapture --setup`, or **u**
-in the overlay. Each question starts on the current value, and nothing is
-written before the review.
+| Card | Status |
+|---|---|
+| **MS2130** (USB 3, often sold as "USB3.0 Video Capture HDMI 4K") | tested: uncompressed 1080p60. Needs a USB 3 port, and is steadiest with its power cable connected. "4K" is the input and loop-out; capture is 1080p |
+| **MS2109** (USB 2 sticks) | tested: 720p60 or 1080p30 |
 
-1. **Capture card:** every video device, the one with a known chip's USB id
-   recommended. It is pinned by USB serial (`CARD_SERIAL`), by USB port
-   (`CARD_PORT`) when it reports no serial, or as a last resort by its node
-   (`DEV`, which can change on a replug). Then the card's details: the chip
-   its USB id implies, its capture card profile and support status, and the
-   USB link speed, with a warning at 480 Mbit/s (USB 2) for a chip that
-   needs USB 3. Every other device can be marked an ignored device.
-2. **Source:** what is plugged into the card (a source profile, or any HDMI
-   source).
-3. **Picture format:** the card's own modes, best first, starting on the
-   mode the source profile suggests or the closest one the card has.
-4. **Signal check:** first the source's setup tips over its live picture,
-   so a setting changed on the source shows at once; then 2 seconds of
-   capture at that mode, measuring the real
-   frame rate, and checking a few frames for an all-black picture (the
-   MS2109 streams black at full rate with nothing plugged in).
-5. **Audio:** the card audio input, another input, or none.
-6. **Display:** the display mode and window size, then refresh matching.
-7. **GPU enhancements:** Upscaling, turned on with a dedicated GPU on a
-   monitor that enlarges the picture; then, on a dedicated GPU, frame
-   generation offered with its cost and delay, off unless you pick it.
-   This window's monitor decides: move it to the monitor you watch on.
-8. **Audio sync:** optional; the sound plays while you watch, and the keys
-   move it until it lines up.
-9. **Troubleshooting:** debug output off, a log, or a log and the dashboard.
-10. **Review:** exactly what will change, then save.
+Other cards are worth trying: the wizard shows what they offer. The full
+list: [docs/capture-cards.md](docs/capture-cards.md).
+
+The console settings that give a black picture or bad sound when wrong
+(HDCP, HDR, audio format) have one page per source:
+[PlayStation 5](sources/ps5.md), [PlayStation 4](sources/ps4.md),
+[Xbox Series X/S](sources/xbox-series.md), [Nintendo Switch](sources/switch.md),
+[Nintendo Switch 2](sources/switch-2.md), [a Windows PC](sources/pc.md),
+[any HDMI source](sources/generic.md).
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| **Black picture** | turn HDCP off on the console, and check it is awake |
+| **Low frame rate, or no 1080p60** | the card is on a USB 2 port: use a USB 3 port, not a hub. The wizard's card details show the speed |
+| **The card drops out** | connect its power cable, and avoid hubs without their own power |
+| **Sound before or after the picture** | **ctrl −/+** until it lines up, then **w** to save; menu clicks make a good test. Tune again after changing the card or the monitor |
+| **Upscaling or frame generation slower than expected** | let GameMode raise the GPU's clocks ([how](docs/testing.md#gamemode-77)) |
+| **Every frame matters (fast shooters)** | the card itself adds most of the delay: play on a TV from the card's HDMI loop-out and use the PC for the picture |
+
+`--debug` opens the dashboard, and `DEBUG=log` writes a log of every
+decision. Less common problems, and the details behind all this:
+[docs/how-it-works.md](docs/how-it-works.md).
 
 ## Settings
 
-Settings come from the environment, else the settings file, else their
-default. The file is `~/.config/protohdmicapture/config` on Linux and
-`%APPDATA%\protohdmicapture\config` on Windows: one `KEY=value` per line,
-read, not executed; [config.example](config.example) documents it. The
-wizard writes it, and so does **w** in the overlay. `--settings` shows every
-value, where it came from, and whether it is valid; a value out of bounds
-stops the run with a message naming it.
-
-[`settings.rows`](settings.rows) holds one row per setting; protoHDMIcapture
-legacy reads the same rows.
+The setup wizard and **w** write the settings file for you:
+`~/.config/protohdmicapture/config` on Linux,
+`%APPDATA%\protohdmicapture\config` on Windows. One `KEY=value` per line;
+[config.example](config.example) explains each one, and
+`protohdmicapture --settings` shows every value and where it came from.
 
 ### The settings worth knowing
+
+<details>
+<summary>Every setting (click to open)</summary>
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -292,169 +206,39 @@ legacy reads the same rows.
 | `FPS` | `60` | capture frame rate; also what `REFRESH=match` matches |
 | `FMT` | `yuyv422` | capture format: `yuyv422` (uncompressed) or `mjpeg`. `nv12` and `rawvideo` are legacy only |
 | `DELAY` | `0.05` | the audio sync in seconds, 0 to 1; **ctrl/alt −/+** tune it live, **w** saves it |
-| `LAT_MS` | `10` | the audio loopback's buffer in ms; raise it if the sound crackles |
+| `LAT_MS` | `10` | the sound's buffer in ms; raise it if the sound crackles |
 | `AUDIO` | `loopback` | `loopback`, or `none` for no sound; `mpv` is legacy only |
-| `WINDOW` | `fullscreen` | `fullscreen`, `borderless` or `windowed` (see below); **f** cycles it |
+| `WINDOW` | `fullscreen` | `fullscreen` (the lowest delay), `borderless` (the desktop's bar stays visible) or `windowed`; **f** cycles it |
 | `WINDOW_SIZE` | `1280x720` | the window's size when windowed |
-| `REFRESH` | `keep` | `match` switches the monitor to its refresh nearest `FPS` for the session and restores it after (Hyprland) |
-| `SCALING` | `balanced` | the resize filter, where Upscaling does not enlarge the picture: `balanced` (spline36 or mitchell), `fast` (bilinear, softer) or `high-quality` (EWA Lanczos); `config` is legacy's mpv.conf, read as balanced here |
-| `UPSCALING` | `off` | enlarges the picture with sharpening on a monitor bigger than the capture: `fsr` (AMD FSR 1) or `nis` (NVIDIA Image Scaling, up to 2x); the setup wizard turns it on with a dedicated GPU |
+| `REFRESH` | `keep` | `match` switches the monitor to its refresh rate nearest `FPS` while the viewer runs, and back after (Hyprland) |
+| `SCALING` | `balanced` | how the picture is resized when Upscaling is not doing it: `balanced`, `fast` (softer) or `high-quality`; `config` is legacy's, read as balanced here |
+| `UPSCALING` | `off` | sharper enlarging on a bigger monitor: `fsr` (AMD FSR 1) or `nis` (NVIDIA Image Scaling, up to 2x); the setup wizard turns it on with a dedicated GPU |
 | `UPSCALE_TO` | `fit` | the size the picture is shown at: `fit` (as large as the window allows), or `720p` … `4320p` while it fits; **c** steps it, **w** saves it |
-| `FRAMEGEN` | `off` | frame generation for a 30 fps game, at one refresh of delay: `ffx` (FidelityFX optical flow, about 3 ms a frame on a gaming GPU) or `rife` (RIFE v4.6, about 7 ms); refused on an integrated GPU; **g** cycles it, **w** saves it |
-| `LEVELS` | `auto` | the range of the card's frames: `limited` or `full` if blacks look crushed or washed out. `auto` reads YUYV as limited and MJPEG as full |
+| `FRAMEGEN` | `off` | frame generation for a 30 fps game, at one frame of extra delay: `ffx` (about 3 ms a frame on a gaming GPU) or `rife` (about 7 ms); not on built-in graphics; **g** cycles it, **w** saves it |
+| `LEVELS` | `auto` | the colour range of the card's frames: `limited` or `full` if blacks look crushed or washed out. `auto` reads YUYV as limited and MJPEG as full |
 | `BRIGHTNESS`, `CONTRAST`, `SATURATION`, `GAMMA` | `0` | colour adjustments, -100 to 100; keys **1**–**8** change them, **w** saves them |
-| `DEBUG` | `off` | `log` or `window`; see [Debugging](#debugging-and-the-dashboard). `--debug` is `window` for one run |
+| `DEBUG` | `off` | `log`, or `window` for the log and the dashboard; `--debug` is `window` for one run |
 | `BACKEND` | `mpv` | legacy's player: `mpv`, or `gst` and `ffplay` for comparisons; protoHDMIcapture refuses the last two |
 | `IPC` | `/tmp/mpv-protohdmicapture.sock` | legacy only: mpv's IPC socket |
 | `GST_IO_MODE` | `mmap` | legacy's gst only: `mmap` or `dmabuf` |
 | `FULLSCREEN` | — | deprecated: `yes` is `WINDOW=fullscreen`, `no` is `WINDOW=windowed` |
 
-## Display modes and refresh
+</details>
 
-`WINDOW` works like a game's display setting:
+## More
 
-| `WINDOW` | What you get | Latency |
-|---|---|---|
-| `fullscreen` (default) | covers the monitor it opens on | lowest: direct scanout where the desktop allows it |
-| `borderless` | maximized with no border; the desktop's bar stays visible | composited |
-| `windowed` | a window of `WINDOW_SIZE`, centred | composited |
-
-**Refresh matching.** A 60 fps source on a 100 Hz monitor lands 1.67
-refreshes apart, so frames are held for one or two refreshes in turn:
-judder no player can fix, unless the monitor runs variable refresh.
-`REFRESH=match` switches the focused monitor (or `--monitor`'s) to its mode
-nearest `FPS` at the same resolution, and puts it back when the feed ends.
-Resolution, position, scale and transform are kept, so a multi-monitor
-layout stays as it was. It works on Hyprland; elsewhere, and on Windows,
-the viewer says so and leaves the display alone.
-
-**On a bigger or wider monitor.** The picture keeps its shape: it is
-scaled to the largest size that fits, and black bars fill the rest (an
-ultrawide gets them at the sides; a 1080p feed on a 2560x1080 monitor is
-shown pixel for pixel, with no scaling at all). Upscaling sharpens an
-enlarged picture, and **c** picks its size:
-[GPU enhancements](#gpu-enhancements-upscaling-and-frame-generation). Capture cards send colour
-at half the width of the picture; protoHDMIcapture fills it back in
-smoothly, so coloured edges and HUD text stay crisp.
-
-**On Hyprland**, blur, shadows and animations cost GPU time on a live feed
-for nothing. A window rule for the title `protoHDMIcapture` turns them off;
-with a Lua config (as Omarchy has) that is a `window` rule with `no_blur`,
-`no_shadow` and `no_anim`. Hyprland in Lua rejects `hyprctl keyword`
-silently: use `hyprctl eval`.
-
-## Debugging and the dashboard
-
-`DEBUG=log` records every decision (each setting and where it came from,
-the card found, the audio link, refresh and window placement), the format
-the card was opened at, and a perf line every 5 s, to the terminal and
-to `debug.log` in the run directory (`$XDG_RUNTIME_DIR/protohdmicapture/`;
-on Windows `%LOCALAPPDATA%\protohdmicapture\`).
-
-`DEBUG=window`, or `--debug` for one run, adds the dashboard in its own
-terminal: frame rates (the card's, and the source's own, told from its
-duplicate frames, with its cadence and cadence breaks), drops, repeated
-refreshes, latency, CPU, the audio sync, underruns, the monitors and
-recent events, every second.
-`protohdmicapture --dashboard` attaches one to a running viewer, and **d**
-opens it from the window. Closing it never touches the feed.
-
-## Capture cards and sources
-
-**Capture cards.** [docs/capture-cards.md](docs/capture-cards.md) is the
-support table: which chips have been tested, probed or only reported, and
-their best modes. Each chip's capture card profile in
-[capture-cards/](capture-cards/) holds its USB ids and quirks. In short:
-
-- **MS2130** (USB 3, often sold as "USB3.0 Video Capture HDMI 4K"): tested.
-  Uncompressed YUYV at 1080p60, so no decode step; it needs a 5 Gbit/s
-  port and is steadiest with its DC5V power connected. "4K" is the input
-  and loop-out; capture is 1080p.
-- **MS2109** (USB 2 sticks): tested. MJPEG at 720p60 or 1080p30, decoded
-  on the CPU.
-
-A card that is not in the table is worth trying: the wizard shows what it
-offers, and the support status grows with reports.
-
-**Sources.** The settings on the source itself (HDCP, audio format, HDR,
-resolution) that give a black picture or bad sound when wrong live in one
-source profile each in [sources/](sources/): [PlayStation 5](sources/ps5.md)
-(tested), [PlayStation 4](sources/ps4.md), [Xbox Series X/S](sources/xbox-series.md),
-[Nintendo Switch](sources/switch.md), [Nintendo Switch 2](sources/switch-2.md),
-[a Windows PC](sources/pc.md) and [any HDMI source](sources/generic.md).
-**HDCP off first**: nothing else matters until it is.
-
-## Troubleshooting
-
-- **Black picture.** HDCP on the source is the usual cause; then whether
-  the source is awake. A frame count proves frames, not a picture:
-  `v4l2-ctl -d /dev/videoN --stream-mmap --stream-count=60 --stream-to=/dev/null`.
-- **Low frame rate or no uncompressed mode.** The card is on a USB 2 port:
-  the wizard's card details show the link speed. Use a USB 3 port, not a
-  hub.
-- **The card resets or drops off the bus.** Power: connect its DC5V input,
-  and keep it off bus-powered hubs.
-- **An MS2130 sends only broken frames.** It can get stuck; unplug both its
-  USB cable and its DC5V power, then plug them back
-  ([capture-cards/ms2130.md](capture-cards/ms2130.md)).
-- **Hiss in the sound.** Some cards mix their 3.5 mm mic jack into the
-  captured sound.
-- **The sound comes before or after the picture.** Tune the audio sync with
-  **ctrl −/+** and save it with **w**; console menu clicks make a good test.
-  Re-tune after changing the capture card or the display.
-- **Frame generation or an upscaler takes longer than expected.** The GPU
-  clocks down for a 60 Hz load. protoHDMIcapture asks GameMode for
-  performance while one is on; for the GPU part GameMode needs your opt-in
-  in `/etc/gamemode.ini` (its `[gpu]` section is ignored in
-  `~/.config/gamemode.ini`). How to set it and check it:
-  [docs/testing.md](docs/testing.md#gamemode-77).
-- **Not in the `video` group?** The desktop session gets access to
-  `/dev/video*` anyway (logind), but a system service does not.
-
-How long a frame really takes, glass to glass: film the card's loop-out
-display and the viewer side by side at 240 fps and count the frames
-between them.
-
-## protoHDMIcapture legacy (view.sh)
-
-The original edition, bash around mpv and `pw-loopback`, Linux only, run
-from this checkout's `legacy/`. It reads the same settings file, so it plays
-the same setup. It is kept best effort: nothing checks it beyond lint, and
-it may lag behind or break
-([ADR 0002](docs/adr/0002-legacy-kept-best-effort.md)). How to run it, its
-players, its menu entry and its own troubleshooting:
-[legacy/README.md](legacy/README.md).
-
-## Development
-
-| Path | What it is |
-|---|---|
-| `Cargo.toml`, `build.rs`, `src/`, `tests/`, `vendor/` | protoHDMIcapture, the Rust program |
-| `settings.rows` | the settings table: names, defaults, ranges, flags |
-| `capture-cards/`, `sources/` | capture card profiles and source profiles, read by protoHDMIcapture and legacy |
-| `legacy/` | protoHDMIcapture legacy: `view.sh`, `launch.sh`, `lib/`, `desktop/`, its harnesses |
-| `packaging/` | the Linux release archive, the Windows installer, the icons |
-| `tools/` | `check`, the hardware-free harnesses, the lost-frame simulation, fixtures |
-| `docs/` | testing, the run directory, the capture card table, ADRs, research |
-| `assets/brand/` | the logo and the social preview |
-
-- `tools/check` runs every check: lint, syntax, consistency between code
-  and docs, protoHDMIcapture's formatting, build, tests and clippy (for Windows too,
-  with the `x86_64-pc-windows-msvc` target), and the harnesses in
-  `tools/harness/`; legacy gets lint and syntax only. CI runs it
-  on every push; `git config core.hooksPath .githooks` runs it before each
-  commit, and checks each commit subject.
-- [CONTRIBUTING.md](CONTRIBUTING.md): Conventional Commits, semantic
-  versioning, and the automatic releases.
-- [docs/testing.md](docs/testing.md) lists the traps that fake failures in
-  a run against a real card; [docs/run-dir.md](docs/run-dir.md) is the
-  contract for the session files.
-- [GLOSSARY.md](GLOSSARY.md) names the project's terms;
-  [CODING_STANDARDS.md](CODING_STANDARDS.md) is the review checklist.
+- **How it works, in detail:** [docs/how-it-works.md](docs/how-it-works.md):
+  why the delay is low, each wizard step, the dashboard and the log, display
+  details, and less common problems.
+- **protoHDMIcapture legacy:** the original bash + mpv version, Linux only,
+  kept best effort; it reads the same settings file: [legacy/README.md](legacy/README.md).
+- **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md); testing on real
+  hardware: [docs/testing.md](docs/testing.md).
 
 ## License
 
-Either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your
-option. The code and data ported from other projects (FSR 1, NIS, and the
-frame generators' FidelityFX, afmf-linux, openfg and RIFE parts) keep
-their MIT notices: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+MIT or Apache-2.0, at your option ([MIT](LICENSE-MIT),
+[Apache-2.0](LICENSE-APACHE)). The code and data ported from other projects
+(FSR 1, NIS, and the frame generators' FidelityFX, afmf-linux, openfg and
+RIFE parts) keep their MIT notices:
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
