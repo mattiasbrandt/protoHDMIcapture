@@ -326,7 +326,9 @@ protoHDMIcapture does not record.
   behind for longer loses frames from the clip, never from the window:
   counted, and left as gaps in the clip. A failed write (a full disk) ends
   the recording with a warning; the window goes on, and the run exits
-  with the error. To check it on the card, compare `--stats`'
+  with the error. The clip keeps the frames written before it (cut back
+  to the last whole one) and gets its `.json`, whose `write_error` says
+  why, so `--replay` and `--framegen-score` still take it. To check it on the card, compare `--stats`'
   kernel → presented against a plain run's.
 - **The report** at the end gives the frames written, the capture gaps,
   any frames not written, the length, the mean luma per second, and the

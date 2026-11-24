@@ -128,42 +128,113 @@ pub enum Record {
     Gap { from: u32, to: u32, lost: u32 },
 }
 
+/// The file a `Writer` writes: a `File`, or a test's stand-in that runs
+/// out of space.
+pub trait ClipFile: Write + Send {
+    /// The bytes that reached the file.
+    fn len(&self) -> io::Result<u64>;
+    fn set_len(&self, len: u64) -> io::Result<()>;
+    fn sync_all(&self) -> io::Result<()>;
+}
+
+impl ClipFile for File {
+    fn len(&self) -> io::Result<u64> {
+        self.metadata().map(|m| m.len())
+    }
+
+    fn set_len(&self, len: u64) -> io::Result<()> {
+        File::set_len(self, len)
+    }
+
+    fn sync_all(&self) -> io::Result<()> {
+        File::sync_all(self)
+    }
+}
+
 /// A clip being written.
-pub struct Writer {
-    out: BufWriter<File>,
+pub struct Writer<F: ClipFile = File> {
+    /// None once `cut`.
+    out: Option<BufWriter<F>>,
     header: Header,
+    /// Where each whole record handed to `out` ends, with the frames up to
+    /// and including it: where `cut` may end the clip.
+    ends: Vec<(u64, u64)>,
 }
 
 impl Writer {
     pub fn create(path: &Path, header: Header) -> io::Result<Self> {
         // Never over an earlier clip.
         let file = File::options().write(true).create_new(true).open(path)?;
-        let mut out = BufWriter::with_capacity(8 << 20, file);
+        Writer::on(file, header, 8 << 20)
+    }
+}
+
+impl<F: ClipFile> Writer<F> {
+    /// The header into `file`, buffered by `capacity` bytes.
+    fn on(file: F, header: Header, capacity: usize) -> io::Result<Self> {
+        let mut out = BufWriter::with_capacity(capacity, file);
         header.write(&mut out)?;
-        Ok(Self { out, header })
+        Ok(Self { out: Some(out), header, ends: Vec::new() })
+    }
+
+    fn out(&mut self) -> io::Result<&mut BufWriter<F>> {
+        self.out.as_mut().ok_or_else(|| io::Error::other("the clip was cut after a failed write"))
+    }
+
+    /// A whole record handed to the buffer: `len` bytes, a frame or not.
+    fn ended(&mut self, len: u64, frame: bool) {
+        let (at, frames) = self.ends.last().copied().unwrap_or((self.header.len(), 0));
+        self.ends.push((at + len, frames + u64::from(frame)));
     }
 
     pub fn frame(&mut self, captured: Duration, dequeued: Duration, data: &[u8]) -> io::Result<()> {
         if data.len() != self.header.frame_size() {
             return Err(io::Error::other(format!("a frame of {} bytes in a clip of {} byte frames", data.len(), self.header.frame_size())));
         }
-        self.out.write_all(&[FRAME])?;
-        self.out.write_all(&(captured.as_nanos() as u64).to_le_bytes())?;
-        self.out.write_all(&(dequeued.as_nanos() as u64).to_le_bytes())?;
-        self.out.write_all(data)
-    }
-
-    pub fn gap(&mut self, from: u32, to: u32, lost: u32) -> io::Result<()> {
-        self.out.write_all(&[GAP])?;
-        for n in [from, to, lost] {
-            self.out.write_all(&n.to_le_bytes())?;
-        }
+        let out = self.out()?;
+        out.write_all(&[FRAME])?;
+        out.write_all(&(captured.as_nanos() as u64).to_le_bytes())?;
+        out.write_all(&(dequeued.as_nanos() as u64).to_le_bytes())?;
+        out.write_all(data)?;
+        self.ended(FRAME_OVERHEAD + data.len() as u64, true);
         Ok(())
     }
 
-    pub fn finish(mut self) -> io::Result<()> {
-        self.out.flush()?;
-        self.out.get_ref().sync_all()
+    pub fn gap(&mut self, from: u32, to: u32, lost: u32) -> io::Result<()> {
+        let out = self.out()?;
+        out.write_all(&[GAP])?;
+        for n in [from, to, lost] {
+            out.write_all(&n.to_le_bytes())?;
+        }
+        self.ended(1 + 3 * 4, false);
+        Ok(())
+    }
+
+    /// Everything written made durable.
+    pub fn finish(&mut self) -> io::Result<()> {
+        let out = self.out()?;
+        out.flush()?;
+        out.get_ref().sync_all()
+    }
+
+    /// After a failed write: the clip cut back to the last whole record
+    /// that reached the file, so a `Reader` reads it to its end (a record
+    /// cut short is refused, and the rest of the clip with it). What was
+    /// still buffered is dropped. The frames the clip keeps; a file whose
+    /// header never reached it is emptied (no frame).
+    fn cut(&mut self) -> io::Result<u64> {
+        let out = self.out.take().ok_or_else(|| io::Error::other("the clip was cut already"))?;
+        let (file, _unwritten) = out.into_parts();
+        let len = file.len()?;
+        let whole = self.ends.partition_point(|&(end, _)| end <= len);
+        let (at, frames) = match whole {
+            0 if len < self.header.len() => (0, 0),
+            0 => (self.header.len(), 0),
+            n => self.ends[n - 1],
+        };
+        file.set_len(at)?;
+        file.sync_all()?;
+        Ok(frames)
     }
 }
 
@@ -284,18 +355,16 @@ struct Luma {
 }
 
 impl Luma {
-    /// Adds a frame; its mean luma.
-    fn add(&mut self, captured: Duration, yuyv: &[u8]) -> f64 {
+    /// Adds a frame's mean luma.
+    fn add(&mut self, captured: Duration, mean: f64) {
         let first = *self.first.get_or_insert(captured);
         let second = captured.saturating_sub(first).as_secs() as usize;
         if self.seconds.len() <= second {
             self.seconds.resize(second + 1, (0.0, 0));
         }
-        let mean = mean_luma(yuyv);
         let slot = &mut self.seconds[second];
         slot.0 += mean;
         slot.1 += 1;
-        mean
     }
 
     /// One mean per second, rounded; "-" for a second with no frame.
@@ -346,6 +415,24 @@ pub struct Recorded {
     pub new: u64,
     /// Each frame, in clip order.
     pub per_frame: Vec<FrameNote>,
+    /// The write that ended the recording early (a full disk): the clip
+    /// was cut back to its last whole record, and the rest describes that.
+    pub failed: Option<String>,
+}
+
+impl Recorded {
+    /// After a failed write: the frames the clip kept, and only them.
+    fn cut_to(&mut self, frames: u64, e: &io::Error) {
+        self.per_frame.truncate(frames as usize);
+        self.frames = self.per_frame.len() as u64;
+        self.new = self.per_frame.iter().filter(|f| f.kind == Kind::New).count() as u64;
+        let mut luma = Luma::default();
+        for f in &self.per_frame {
+            luma.add(f.captured, f.luma);
+        }
+        self.luma = luma.line();
+        self.failed = Some(e.to_string());
+    }
 }
 
 /// What the metadata says about a recording besides its frames: filled by
@@ -418,6 +505,9 @@ pub fn metadata(about: &About, recorded: &str, seconds: u64, header: Header, r: 
             "behind": r.behind,
             "length_s": r.length.as_secs_f64(),
         },
+        // A failed write (a full disk) ended it early; the clip holds the
+        // frames above.
+        "write_error": r.failed,
         "frames": frames,
     })
 }
@@ -474,10 +564,14 @@ const QUEUE: Duration = Duration::from_secs(2);
 pub trait Sink: Send {
     fn frame(&mut self, captured: Duration, dequeued: Duration, data: &[u8]) -> io::Result<()>;
     fn gap(&mut self, from: u32, to: u32, lost: u32) -> io::Result<()>;
-    fn finish(self: Box<Self>) -> io::Result<()>;
+    /// The records written made durable.
+    fn finish(&mut self) -> io::Result<()>;
+    /// After a failed write: the records kept to the last whole one
+    /// written; how many of them are frames.
+    fn cut(&mut self) -> io::Result<u64>;
 }
 
-impl Sink for Writer {
+impl<F: ClipFile> Sink for Writer<F> {
     fn frame(&mut self, captured: Duration, dequeued: Duration, data: &[u8]) -> io::Result<()> {
         Writer::frame(self, captured, dequeued, data)
     }
@@ -486,8 +580,12 @@ impl Sink for Writer {
         Writer::gap(self, from, to, lost)
     }
 
-    fn finish(self: Box<Self>) -> io::Result<()> {
-        Writer::finish(*self)
+    fn finish(&mut self) -> io::Result<()> {
+        Writer::finish(self)
+    }
+
+    fn cut(&mut self) -> io::Result<u64> {
+        Writer::cut(self)
     }
 }
 
@@ -504,8 +602,9 @@ enum Message {
 /// and the run of such frames written as a gap record so a replay shows
 /// it. The writer thread writes, and measures what it wrote (mean luma,
 /// the duplicate-frame detector): the metadata's per-frame entries are the
-/// written frames. A failed write ends the writer; the capture side then
-/// queues nothing more, and `finish` returns the error.
+/// written frames. A failed write ends the writer and cuts the clip back to
+/// its last whole record on disk; the capture side then queues nothing
+/// more, and `finish` says what failed (`Recorded::failed`).
 pub struct Recorder {
     free: mpsc::Receiver<Vec<u8>>,
     /// None once the writer has stopped (a failed write) or `finish` ran.
@@ -544,7 +643,8 @@ impl Recorder {
                                 done.behind += 1;
                             }
                             done.frames += 1;
-                            let mean = luma.add(captured, &data);
+                            let mean = mean_luma(&data);
+                            luma.add(captured, mean);
                             let (kind, scores) = detector.classify_scored(&data);
                             if kind == Kind::New {
                                 done.new += 1;
@@ -560,11 +660,14 @@ impl Recorder {
                     if let Err(e) = wrote {
                         // The viewer goes on; the recording has ended.
                         eprintln!("warning: the clip's writer stopped: {e}; nothing more is recorded");
-                        return Err(e);
+                        return cut(&mut *sink, done, &e);
                     }
                 }
                 done.luma = luma.line();
-                sink.finish()?;
+                if let Err(e) = sink.finish() {
+                    eprintln!("warning: the clip's last records: {e}");
+                    return cut(&mut *sink, done, &e);
+                }
                 Ok(done)
             })
             .map_err(|e| format!("the clip's writer thread: {e}"))?;
@@ -631,7 +734,12 @@ impl Recorder {
         let mut done = writer.join().map_err(|_| "the clip's writer thread panicked".to_string())?.map_err(|e| e.to_string())?;
         done.gaps = self.gaps;
         done.skipped = self.skipped;
-        done.length = self.first.map_or(Duration::ZERO, |f| self.last.saturating_sub(f));
+        done.length = match (&done.failed, done.per_frame.first(), done.per_frame.last()) {
+            // Cut short: the frames the clip kept.
+            (Some(_), Some(first), Some(last)) => last.captured.saturating_sub(first.captured),
+            (Some(_), _, _) => Duration::ZERO,
+            (None, _, _) => self.first.map_or(Duration::ZERO, |f| self.last.saturating_sub(f)),
+        };
         Ok(done)
     }
 }
@@ -646,6 +754,16 @@ impl Drop for Recorder {
             eprintln!("warning: the clip's writer thread panicked");
         }
     }
+}
+
+/// The writer thread's end after the failed write `e`: the clip cut back to
+/// its last whole record, and `done` to the frames it kept; an error only
+/// where the cut failed too.
+fn cut(sink: &mut dyn Sink, mut done: Recorded, e: &io::Error) -> io::Result<Recorded> {
+    let frames =
+        sink.cut().map_err(|c| io::Error::other(format!("{e}; cutting the clip back to its last whole record failed too: {c}")))?;
+    done.cut_to(frames, e);
+    Ok(done)
 }
 
 /// The buffers a recording queues in: about `QUEUE` of frames.
@@ -701,10 +819,20 @@ impl Recording {
     }
 
     /// The recording's end: the writer joined, then the metadata and the
-    /// report; a clip with no frame removed.
+    /// report; a clip with no frame removed. A failed write still gets
+    /// them, for the frames the clip kept, and is the recording's error.
     fn conclude(&mut self) {
         let Some(recorder) = self.recorder.take() else { return };
-        let outcome = recorder.finish().and_then(|r| self.report(&r));
+        let outcome = recorder.finish().and_then(|r| {
+            self.report(&r)?;
+            match &r.failed {
+                Some(e) if r.frames == 0 => Err(format!("the clip's writer stopped: {e}; no frame reached the clip")),
+                Some(e) => {
+                    Err(format!("the clip's writer stopped: {e}; {} keeps the {} frames written before it", self.path.display(), r.frames))
+                }
+                None => Ok(()),
+            }
+        });
         if let Err(e) = &outcome {
             eprintln!("error: recording: {e}");
         }
@@ -726,7 +854,8 @@ impl Recording {
         let json = metadata(&self.about, &now_local(), self.seconds, Header::of(self.format), r);
         let text = serde_json::to_string_pretty(&json).map_err(|e| format!("{}: {e}", meta.display()))?;
         fs::write(&meta, text + "\n").map_err(|e| format!("{}: {e}", meta.display()))?;
-        eprintln!("recorded {} frames, {} capture gaps, {:.1} s into {}", r.frames, r.gaps, r.length.as_secs_f64(), path.display());
+        let short = if r.failed.is_some() { " (cut short by a failed write)" } else { "" };
+        eprintln!("recorded {} frames, {} capture gaps, {:.1} s into {}{short}", r.frames, r.gaps, r.length.as_secs_f64(), path.display());
         if r.skipped > 0 {
             eprintln!("warning: {} frames not written: the disk fell behind (gaps in the clip; the window showed them)", r.skipped);
         }
@@ -1088,8 +1217,12 @@ mod tests {
             Ok(())
         }
 
-        fn finish(self: Box<Self>) -> io::Result<()> {
+        fn finish(&mut self) -> io::Result<()> {
             Ok(())
+        }
+
+        fn cut(&mut self) -> io::Result<u64> {
+            Ok(self.records.lock().unwrap().iter().filter(|r| matches!(r, Record::Frame { .. })).count() as u64)
         }
     }
 
@@ -1190,8 +1323,12 @@ mod tests {
         fn gap(&mut self, _: u32, _: u32, _: u32) -> io::Result<()> {
             Ok(())
         }
-        fn finish(self: Box<Self>) -> io::Result<()> {
+        fn finish(&mut self) -> io::Result<()> {
             Ok(())
+        }
+        fn cut(&mut self) -> io::Result<u64> {
+            // The first frame was written, the second failed.
+            Ok(1)
         }
     }
 
@@ -1205,7 +1342,115 @@ mod tests {
         }
         assert!(started.elapsed() < ms(500), "the capture side waited: {:?}", started.elapsed());
         assert!(rec.work.is_none(), "nothing is queued after the writer stopped");
-        assert_eq!(rec.finish(), Err("no space left on device".into()));
+        let r = rec.finish().unwrap();
+        assert_eq!(r.failed.as_deref(), Some("no space left on device"));
+        assert_eq!((r.frames, r.per_frame.len()), (1, 1), "the frames the clip kept, not the one that failed: {r:?}");
+    }
+
+    /// A clip file with `room` bytes left: a write past it writes what
+    /// fits, then fails as a full disk does.
+    struct Full {
+        file: File,
+        room: u64,
+    }
+
+    impl Write for Full {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.room == 0 {
+                return Err(io::Error::new(io::ErrorKind::StorageFull, "No space left on device"));
+            }
+            let n = buf.len().min(self.room as usize);
+            let n = self.file.write(&buf[..n])?;
+            self.room -= n as u64;
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.file.flush()
+        }
+    }
+
+    impl ClipFile for Full {
+        fn len(&self) -> io::Result<u64> {
+            ClipFile::len(&self.file)
+        }
+        fn set_len(&self, len: u64) -> io::Result<()> {
+            self.file.set_len(len)
+        }
+        fn sync_all(&self) -> io::Result<()> {
+            self.file.sync_all()
+        }
+    }
+
+    /// A writer into `path` that runs out of space after `room` bytes,
+    /// buffered by `capacity`.
+    fn full(path: &Path, header: Header, room: u64, capacity: usize) -> Writer<Full> {
+        let file = File::options().write(true).create_new(true).open(path).unwrap();
+        Writer::on(Full { file, room }, header, capacity).unwrap()
+    }
+
+    #[test]
+    fn a_full_disk_leaves_a_clip_cut_at_its_last_whole_record() {
+        let d = dir();
+        let header = Header::of(FORMAT);
+        let record = FRAME_OVERHEAD + FORMAT.frame_size() as u64;
+        // Mid-record (a buffer smaller than a frame writes each straight
+        // through), at the end's flush (a buffer that holds them all), and
+        // before the header reached the file.
+        for (name, room, capacity, kept) in
+            [("mid", header.len() + 2 * record + 5, 8, 2), ("flush", header.len() + 3 * record + 1, 1 << 20, 3), ("header", 4, 1 << 20, 0)]
+        {
+            let path = d.join(format!("{name}.clip"));
+            let mut w = full(&path, header, room, capacity);
+            let wrote: Result<(), io::Error> =
+                (0..5u8).try_for_each(|i| w.frame(ms(u64::from(i)), ms(u64::from(i)), &frame(i))).and_then(|()| w.finish());
+            assert!(wrote.is_err(), "{name}: the disk ran out");
+            assert_eq!(w.cut().unwrap(), kept, "{name}");
+            if kept == 0 {
+                assert_eq!(fs::metadata(&path).unwrap().len(), 0, "{name}: no header, nothing kept");
+                continue;
+            }
+            let (_, back) = read_all(&path);
+            let numbers: Vec<u8> =
+                back.iter().map(|r| if let Record::Frame { data, .. } = r { data[0] } else { panic!("{r:?}") }).collect();
+            assert_eq!(numbers, (0..kept as u8).collect::<Vec<_>>(), "{name}: read to its last whole frame");
+        }
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn a_recording_cut_by_a_full_disk_keeps_its_clip_its_metadata_and_its_error() {
+        let d = dir();
+        let path = d.join("full.clip");
+        let header = Header::of(FORMAT);
+        let record = FRAME_OVERHEAD + FORMAT.frame_size() as u64;
+        let writer = full(&path, header, header.len() + 3 * record + 7, 8);
+        let recording = Recording {
+            recorder: Some(Recorder::start(FORMAT, Box::new(writer), 64).unwrap()),
+            path: path.clone(),
+            seconds: 1,
+            format: FORMAT,
+            about: About::default(),
+            card: Arc::default(),
+            result: Arc::default(),
+        };
+        let result = recording.result.clone();
+        let mut tap: Box<dyn crate::run::Tap> = Box::new(recording);
+        for i in 0..8u8 {
+            tap.frame(&frame(16 + 10 * i), ms(10 * u64::from(i)), ms(10 * u64::from(i) + 3));
+        }
+        tap.end();
+        let e = result.lock().unwrap().clone().unwrap().unwrap_err();
+        assert!(e.contains("No space left on device") && e.contains("keeps the 3 frames"), "the run ends with the error: {e}");
+        // The clip reads to its end: --replay and --framegen-score use it.
+        let (_, back) = read_all(&path);
+        assert_eq!(back.iter().filter(|r| matches!(r, Record::Frame { .. })).count(), 3, "{back:?}");
+        let json: serde_json::Value = serde_json::from_str(&fs::read_to_string(d.join("full.json")).unwrap()).unwrap();
+        assert_eq!(json["totals"]["frames"], 3);
+        assert_eq!(json["frames"].as_array().unwrap().len(), 3);
+        assert_eq!(json["totals"]["length_s"], 0.02);
+        assert!(json["write_error"].as_str().unwrap().contains("No space left on device"), "{json}");
+        fs::remove_dir_all(d).unwrap();
     }
 
     /// A recording through the run's tap, in `d`, and its result's slot.
