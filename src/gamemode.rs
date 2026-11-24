@@ -7,6 +7,11 @@
 //! - **Only while an enhancement is on:** registered when one turns on,
 //!   unregistered when it turns off and when the window closes (`Drop`). A
 //!   plain run never registers and starts no thread.
+//! - **A call with no answer is undone too:** a `RegisterGame` that timed
+//!   out may still have registered us (the daemon registers before its GPU
+//!   optimisation, then answers), so it is unregistered like an accepted
+//!   one; an `UnregisterGame` with no answer is tried once more, at the next
+//!   off or when the window closes (`UNREGISTER_TRIES`).
 //! - **Over D-Bus, as libgamemode does:** `RegisterGame(pid)`,
 //!   `UnregisterGame(pid)` and `QueryStatus(pid)` on the session bus's
 //!   `com.feralinteractive.GameMode`. The calls run on their own thread:
@@ -86,18 +91,35 @@ impl Client for Box<dyn Client> {
     }
 }
 
+/// `UnregisterGame` calls an unanswered one gets, the first included:
+/// bounded, so the window's close never loops on a daemon that hangs.
+const UNREGISTER_TRIES: u32 = 2;
+
+/// What the daemon may hold of us: what an off has to undo.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Held {
+    /// Nothing: never registered, refused, or unregistered.
+    Nothing,
+    /// Registered: the daemon accepted.
+    Registered,
+    /// Maybe: a `RegisterGame` that got no answer (a timeout).
+    Maybe,
+}
+
 /// The decision, without a thread: what to call for what is wanted.
 pub struct Requests<C: Client> {
     client: C,
     pid: i32,
-    registered: bool,
+    held: Held,
+    /// `UnregisterGame` calls the current hold has had with no answer.
+    unanswered: u32,
     /// The status the last call left.
     last: Status,
 }
 
 impl<C: Client> Requests<C> {
     pub fn new(client: C, pid: i32) -> Self {
-        Self { client, pid, registered: false, last: Status::Off }
+        Self { client, pid, held: Held::Nothing, unanswered: 0, last: Status::Off }
     }
 
     /// Registers for `on`, unregisters for off; the status after it, None
@@ -114,26 +136,20 @@ impl<C: Client> Requests<C> {
     }
 
     fn call(&mut self, on: bool) -> Option<Status> {
-        match (on, self.registered) {
-            (true, false) => Some(self.register()),
-            (false, true) => {
-                self.registered = false;
-                Some(match self.client.unregister(self.pid) {
-                    Ok(0) => Status::Off,
-                    Ok(r) => Status::Failed(format!("UnregisterGame answered {r}")),
-                    Err(CallError::Absent(why) | CallError::Failed(why)) => Status::Failed(format!("UnregisterGame: {why}")),
-                })
-            }
+        match (on, self.held) {
+            (true, Held::Nothing) => Some(self.register()),
+            (false, Held::Registered | Held::Maybe) => Some(self.unregister()),
             _ => None,
         }
     }
 
     fn register(&mut self) -> Status {
+        self.unanswered = 0;
         match self.client.register(self.pid) {
             // libgamemode's answers: 0 accepted, -2 rejected (the
             // daemon's whitelist or blacklist), anything else failed.
             Ok(0) => {
-                self.registered = true;
+                self.held = Held::Registered;
                 match self.client.query(self.pid) {
                     Ok(2) => Status::Active,
                     Ok(q) => Status::Registered(q),
@@ -143,7 +159,37 @@ impl<C: Client> Requests<C> {
             Ok(-2) => Status::Failed("GameMode rejected protoHDMIcapture (its gamemode.ini's whitelist or blacklist)".into()),
             Ok(r) => Status::Failed(format!("RegisterGame answered {r}")),
             Err(CallError::Absent(why)) => Status::Unavailable(why),
-            Err(CallError::Failed(why)) => Status::Failed(format!("RegisterGame: {why}")),
+            // No answer: the daemon may have registered us all the same.
+            Err(CallError::Failed(why)) => {
+                self.held = Held::Maybe;
+                Status::Failed(format!("RegisterGame: {why} (maybe registered: unregistered when it turns off)"))
+            }
+        }
+    }
+
+    fn unregister(&mut self) -> Status {
+        let maybe = self.held == Held::Maybe;
+        match self.client.unregister(self.pid) {
+            // Answered: the daemon holds nothing of us now. A maybe that
+            // never registered answers "not registered" (-1): off, too.
+            Ok(r) => {
+                self.held = Held::Nothing;
+                if r == 0 || maybe { Status::Off } else { Status::Failed(format!("UnregisterGame answered {r}")) }
+            }
+            // The daemon is gone, and its registrations with it.
+            Err(CallError::Absent(why)) => {
+                self.held = Held::Nothing;
+                Status::Failed(format!("UnregisterGame: {why}"))
+            }
+            Err(CallError::Failed(why)) => {
+                self.unanswered += 1;
+                if self.unanswered < UNREGISTER_TRIES {
+                    Status::Failed(format!("UnregisterGame: {why} (tried again at the next off or when the window closes)"))
+                } else {
+                    self.held = Held::Nothing;
+                    Status::Failed(format!("UnregisterGame: {why}; GameMode may hold protoHDMIcapture until it exits"))
+                }
+            }
         }
     }
 }
@@ -374,12 +420,18 @@ mod tests {
     struct Fake {
         calls: Arc<Mutex<Vec<String>>>,
         register: Result<i32, CallError>,
+        /// UnregisterGame's answers in turn; Ok(0) once they run out.
+        unregister: Arc<Mutex<std::collections::VecDeque<Result<i32, CallError>>>>,
         query: i32,
     }
 
     impl Fake {
         fn new(register: Result<i32, CallError>, query: i32) -> Self {
-            Self { calls: Arc::default(), register, query }
+            Self { calls: Arc::default(), register, unregister: Arc::default(), query }
+        }
+        fn unregister_answers(self, answers: impl IntoIterator<Item = Result<i32, CallError>>) -> Self {
+            self.unregister.lock().unwrap().extend(answers);
+            self
         }
         fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
@@ -393,7 +445,7 @@ mod tests {
         }
         fn unregister(&mut self, pid: i32) -> Result<i32, CallError> {
             self.calls.lock().unwrap().push(format!("UnregisterGame({pid})"));
-            Ok(0)
+            self.unregister.lock().unwrap().pop_front().unwrap_or(Ok(0))
         }
         fn query(&mut self, pid: i32) -> Result<i32, CallError> {
             self.calls.lock().unwrap().push(format!("QueryStatus({pid})"));
@@ -436,17 +488,63 @@ mod tests {
             assert_eq!(r.apply(false), None);
             assert_eq!(fake.calls(), ["RegisterGame(7)"]);
         }
-        // A call that failed (a timeout): a warning, nothing registered.
-        let fake = Fake::new(Err(CallError::Failed("timed out".into())), 0);
-        let mut r = Requests::new(fake.clone(), 7);
-        assert_eq!(r.apply(true), Some(Status::Failed("RegisterGame: timed out".into())));
-        assert_eq!(r.apply(false), None);
         // Registered, but not active for this process: shown as such, and
         // still unregistered.
         let fake = Fake::new(Ok(0), 1);
         let mut r = Requests::new(fake.clone(), 7);
         assert_eq!(r.apply(true), Some(Status::Registered(1)));
         assert_eq!(r.apply(false), Some(Status::Off));
+    }
+
+    #[test]
+    fn a_registration_that_timed_out_is_unregistered_all_the_same() {
+        // The daemon registers before its GPU optimisation and answers after
+        // it: a timeout may leave us registered.
+        let fake = Fake::new(Err(CallError::Failed("timed out".into())), 0);
+        let mut r = Requests::new(fake.clone(), 7);
+        assert_eq!(
+            r.apply(true),
+            Some(Status::Failed("RegisterGame: timed out (maybe registered: unregistered when it turns off)".into()))
+        );
+        // Still on: not asked again while it may hold us.
+        assert_eq!(r.apply(true), None);
+        assert_eq!(r.apply(false), Some(Status::Off));
+        assert_eq!(fake.calls(), ["RegisterGame(7)", "UnregisterGame(7)"]);
+        // It never registered after all: the daemon's "not registered" (-1)
+        // is off, not a failure.
+        let fake = Fake::new(Err(CallError::Failed("timed out".into())), 0).unregister_answers([Ok(-1)]);
+        let mut r = Requests::new(fake.clone(), 7);
+        r.apply(true);
+        assert_eq!(r.apply(false), Some(Status::Off));
+        assert_eq!(r.apply(false), None);
+    }
+
+    #[test]
+    fn an_unregister_with_no_answer_is_tried_once_more() {
+        let timed_out = || Err(CallError::Failed("timed out".into()));
+        let fake = Fake::new(Ok(0), 2).unregister_answers([timed_out()]);
+        let mut r = Requests::new(fake.clone(), 7);
+        r.apply(true);
+        assert_eq!(
+            r.apply(false),
+            Some(Status::Failed("UnregisterGame: timed out (tried again at the next off or when the window closes)".into()))
+        );
+        // The next off (the window closing): tried again, and answered.
+        assert_eq!(r.apply(false), Some(Status::Off));
+        assert_eq!(fake.calls(), ["RegisterGame(7)", "QueryStatus(7)", "UnregisterGame(7)", "UnregisterGame(7)"]);
+        // Two with no answer: given up, said, nothing more called.
+        let fake = Fake::new(Ok(0), 2).unregister_answers([timed_out(), timed_out()]);
+        let mut r = Requests::new(fake.clone(), 7);
+        r.apply(true);
+        r.apply(false);
+        assert_eq!(
+            r.apply(false),
+            Some(Status::Failed("UnregisterGame: timed out; GameMode may hold protoHDMIcapture until it exits".into()))
+        );
+        assert_eq!(r.apply(false), None);
+        assert_eq!(fake.calls().iter().filter(|c| c.starts_with("UnregisterGame")).count(), UNREGISTER_TRIES as usize);
+        // A later registration starts its own tries.
+        assert_eq!(r.apply(true), Some(Status::Active));
     }
 
     // process-global: the fake a worker thread's `MakeClient` (a plain fn) reads
@@ -477,6 +575,37 @@ mod tests {
         // The window closes with it on: unregistered before the drop returns.
         drop(g);
         assert_eq!(fake.calls(), [format!("RegisterGame({pid})"), format!("QueryStatus({pid})"), format!("UnregisterGame({pid})")]);
+    }
+
+    // process-global: this test's own fake (tests run in parallel)
+    static RETRY_FAKE: Mutex<Option<Fake>> = Mutex::new(None);
+
+    fn retry_fake() -> Box<dyn Client> {
+        Box::new(RETRY_FAKE.lock().unwrap().clone().expect("the test set its fake"))
+    }
+
+    #[test]
+    fn an_off_that_got_no_answer_is_undone_when_the_window_closes() {
+        let fake = Fake::new(Ok(0), 2).unregister_answers([Err(CallError::Failed("timed out".into()))]);
+        *RETRY_FAKE.lock().unwrap() = Some(fake.clone());
+        let pid = std::process::id() as i32;
+        let mut g = GameMode::with(retry_fake, false);
+        g.set(true);
+        let status = g.status();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while *status.lock().unwrap() != Status::Active {
+            assert!(std::time::Instant::now() < deadline, "still {:?}", status.lock().unwrap());
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // Off: the unregister gets no answer.
+        g.set(false);
+        while !fake.calls().iter().any(|c| c.starts_with("UnregisterGame")) {
+            assert!(std::time::Instant::now() < deadline, "calls: {:?}", fake.calls());
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        drop(g);
+        let unregisters = fake.calls().iter().filter(|c| **c == format!("UnregisterGame({pid})")).count();
+        assert_eq!(unregisters, 2, "calls: {:?}", fake.calls());
     }
 
     /// Against the running gamemoded (`cargo test -- --ignored gamemode`):
