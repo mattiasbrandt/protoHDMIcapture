@@ -149,7 +149,7 @@ between each two frames, so the game looks like 60 fps.
 | **ffx** | the lighter one: about 3 ms of GPU work a frame on a gaming GPU such as an RX 9070 XT |
 | **rife** | a neural network: about 7 ms a frame |
 | **The cost** | about one frame of extra delay (17 ms), because the in-between picture needs the next real one |
-| **When it works** | on a steady 30 fps game. A 60 fps game, menus and dips show the game's own frames |
+| **When it works** | on a steady 30 fps game. A 60 fps game, menus and dips show the game's own frames. Smoothest on a monitor running at exactly 60 Hz, or with VRR (FreeSync); at 59.94 or 59.97 Hz a short hitch can show now and then |
 | **Needs** | a dedicated gaming GPU; it won't run on built-in (integrated) graphics |
 
 > [!NOTE]
