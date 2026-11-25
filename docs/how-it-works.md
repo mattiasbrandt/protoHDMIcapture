@@ -12,9 +12,17 @@ each other and pays for that with buffering. protoHDMIcapture splits them:
 
 | | Path | Latency |
 |---|---|---|
-| Picture | the card's frames straight to the screen, no audio track, each frame shown as soon as the display can take it | about 45 ms from the frame reaching the PC to the screen |
+| Picture | the card's frames straight to the screen, no audio track, each frame shown as soon as the display can take it | about 45 ms (below) |
 | Sound | a loopback from the card audio input to your output, never through the picture's path | about 10 to 20 ms, plus the audio sync |
 | Audio sync | one fixed delay on the sound, tuned once | none |
+
+**The picture's 45 ms**, exactly: a median of 44.9 ms (p99 53.7 ms) from
+the kernel's timestamp on the first USB packet of a card frame to the
+moment the compositor reports that frame shown (Wayland's presentation
+time). Measured with an MS2130 at 1080p60 on Linux, on the reference
+setup. It leaves out the capture
+card's own delay before that first packet, and the monitor's own
+processing after the compositor.
 
 Nothing has to stay in sync, so nothing needs a buffer: the sound arrives
 early and the audio sync holds it back to match. The viewer holds a frame
