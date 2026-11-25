@@ -23,11 +23,10 @@ and Windows. It does that one job: no recording, no streaming, no account.
 
 - 🪶 **Small and simple.** One program and one plain-text settings file.
   No vendor app, no background service: it opens straight to the picture.
-- 🎮 **Low delay.** Each frame from the card goes straight to the screen,
-  and `--stats` shows how long protoHDMIcapture's own part takes on your
-  PC. Picture and sound each take their own fast path, with no buffering
-  in between.
-  <!-- TODO(#84): dequeue→presented from the next --stats run -->
+- 🎮 **Low delay.** About 25 ms from the moment protoHDMIcapture takes a
+  frame from the card to the moment it is on screen (1080p60 on our test
+  setup; `--stats` shows yours). Picture and sound each take their own
+  fast path, with no buffering in between.
   [Where the delay is](docs/how-it-works.md#why-it-is-fast).
 - 🧙 **Easy setup.** A setup wizard finds your capture card, checks the
   signal, and picks sensible settings for your card, source and monitor.
