@@ -10,29 +10,36 @@
   <a href="https://github.com/mattiasbrandt/protoHDMIcapture/actions/workflows/release.yml"><img alt="release" src="https://github.com/mattiasbrandt/protoHDMIcapture/actions/workflows/release.yml/badge.svg"></a>
 </p>
 
-<p align="center"><b>Play your console on your PC monitor through a cheap USB capture card, with as little delay as possible.</b></p>
+<p align="center">
+  <b>A lightweight, open-source capture card viewer. Low delay, nothing else in the way.</b><br>
+  Upscaling and frame generation when you want them.
+</p>
 
-protoHDMIcapture shows the picture and plays the sound from a PlayStation,
-Xbox, Switch, camera or another PC, on Linux and Windows. No recording, no
-streaming, no account: one small program that opens straight to the game.
+protoHDMIcapture shows the picture and plays the sound from anything with
+HDMI (a console, a camera, another PC) through a USB capture card, on Linux
+and Windows. It does that one job: no recording, no streaming, no account.
 
 ## Why you'll like it
 
+- 🪶 **Small and simple.** One program and one plain-text settings file.
+  No vendor app, no background service: it opens straight to the picture.
 - 🎮 **Low delay.** About 45 ms from the moment a frame reaches the PC to
   the moment it is on screen at 1080p60, on our test setup. Picture and
   sound each take their own fast path, with no buffering in between.
+- 🧙 **Easy setup.** A setup wizard finds your capture card, checks the
+  signal, and picks sensible settings for your card, source and monitor.
+- 💸 **Made for cheap capture cards.** The no-name cards sold for the price
+  of a game (with a MacroSilicon MS2130 or MS2109 inside) are recognised and
+  run in their best mode.
+- 🔓 **Free and open source.** Read it, change it, share it.
+
+**Extras for a gaming GPU, when you want them:**
+
 - ✨ **Full resolution on a big monitor.** Upscaling brings the 1080p
   picture up to your 1440p, 4K or ultrawide monitor's resolution on your
   GPU, with clean edges instead of a blurry stretch.
 - 🏎️ **30 fps games shown at 60.** Frame generation makes the in-between
   pictures on your GPU, from the picture alone, so it works with any game.
-- 🧙 **Easy setup.** A setup wizard finds your capture card, checks the
-  signal, and picks sensible settings for your card, console and monitor.
-- 💸 **Made for cheap capture cards.** The no-name cards sold for the price
-  of a game (with a MacroSilicon MS2130 or MS2109 inside) are recognised and
-  run in their best mode.
-- 🔓 **Free and open source.** No bloated vendor app, no background
-  service: one program and one plain-text settings file.
 
 ## Contents
 
