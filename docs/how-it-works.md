@@ -31,6 +31,10 @@ decoded to YUYV on the CPU first, about 2 ms at 720p and 5 ms at 1080p,
 then take the same GPU path. `--stats` prints the GPU time of each frame's
 passes, where the driver reports it.
 
+<p align="center">
+  <img src="media/delay-path.svg" width="720" alt="An HDMI source sends its picture to the capture card, the card over USB to the PC, and protoHDMIcapture to the monitor. The card's own processing is the largest delay, protoHDMIcapture's part is as short as possible, and the monitor adds its own. The card's HDMI loop-out to a TV adds no delay.">
+</p>
+
 The largest term is the capture card's own latency (6 to 11 frames reported
 for the MS2130), which no software reaches. For twitchy games, play off the
 card's HDMI loop-out on a real display and use the PC for the picture.

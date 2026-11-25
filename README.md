@@ -129,6 +129,10 @@ frame at 1440p.
 Many console games run at 30 fps. Frame generation makes a picture halfway
 between each two frames, so the game looks like 60 fps.
 
+<p align="center">
+  <img src="docs/media/frame-generation.svg" width="720" alt="Two rows over the same stretch of time. A 30 fps game shows 4 pictures; with frame generation there are 8, the game's 4 and one made by your graphics card between each pair.">
+</p>
+
 | | |
 |---|---|
 | **Turn it on** | press **g**, or set `FRAMEGEN=ffx` or `rife`. It is never turned on for you |
