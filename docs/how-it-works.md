@@ -24,6 +24,11 @@ setup. It leaves out the capture
 card's own delay before that first packet, and the monitor's own
 processing after the compositor.
 
+**The README's 25 ms** is protoHDMIcapture's own part: from taking a
+frame from the card (dequeue) to the compositor reporting it shown, a
+median of 24.8 ms (p99 28.3 ms) in a 2-minute release-build run, MS2130 at
+1080p60 on a 60.000 Hz monitor, frame generation off (2026-11-25, #86).
+
 Nothing has to stay in sync, so nothing needs a buffer: the sound arrives
 early and the audio sync holds it back to match. The viewer holds a frame
 for the display's next refresh only within 5 ms of it, and otherwise shows
