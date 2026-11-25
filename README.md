@@ -47,7 +47,7 @@ and Windows. It does that one job: no recording, no streaming, no account.
 - [First run](#first-run)
 - [Keys](#keys)
 - [GPU enhancements](#gpu-enhancements)
-- [Capture cards and consoles](#capture-cards-and-consoles)
+- [Works with](#works-with)
 - [Troubleshooting](#troubleshooting)
 - [Settings](#settings)
 - [More](#more)
@@ -161,17 +161,27 @@ between each two frames, so the game looks like 60 fps.
 > while one runs; on Linux, let GameMode raise the GPU's clocks in
 > `/etc/gamemode.ini` ([how](docs/testing.md#gamemode-77)).
 
-## Capture cards and consoles
+## Works with
 
-| Card | Status |
+**Tested** means it ran end to end on a real setup; **untested** means it
+should work but nobody has reported it yet. Tried something untested?
+[Help test it](#help-test-it).
+
+| | Status |
 |---|---|
-| **MS2130** (USB 3, often sold as "USB3.0 Video Capture HDMI 4K") | tested: uncompressed 1080p60. Needs a USB 3 port, and is steadiest with its power cable connected. "4K" is the input and loop-out; capture is 1080p |
-| **MS2109** (USB 2 sticks) | tested: 720p60 or 1080p30 |
+| **MS2130** card (USB 3, often sold as "USB3.0 Video Capture HDMI 4K") | **Tested** on the developer's PC: uncompressed 1080p60. Needs a USB 3 port, and is steadiest with its power cable connected. "4K" is the input and loop-out; capture is 1080p |
+| **MS2109** card (USB 2 sticks) | **Tested** on the developer's PC: 720p60; 1080p30 measured too |
+| Other cards | Untested: the wizard shows what they offer. [Every card seen so far](docs/capture-cards.md) |
+| **PlayStation 5** | **Tested** on the developer's PC |
+| PlayStation 4, Xbox Series X/S, Switch, Switch 2, a PC, other HDMI sources | Untested: their setup tips come from the makers' own docs |
+| **Linux** with Hyprland (Wayland) | **Tested** on the developer's PC |
+| Linux, other Wayland desktops | Untested: the picture should show; matching the refresh rate and placing the window need Hyprland |
+| **Windows 11** | **Tested** on a laptop with the MS2130 ([#19](https://github.com/mattiasbrandt/protoHDMIcapture/issues/19)). A desktop PC is untested ([#50](https://github.com/mattiasbrandt/protoHDMIcapture/issues/50)) |
+| **AMD** graphics (RX 9070 XT) | **Tested** on the developer's PC, Upscaling and frame generation included |
+| **Built-in** graphics (Intel UHD 620) | **Tested** on the Windows laptop for the picture ([#19](https://github.com/mattiasbrandt/protoHDMIcapture/issues/19)); frame generation doesn't run on built-in graphics |
+| NVIDIA graphics | Untested: prepared, waiting for a tester ([#87](https://github.com/mattiasbrandt/protoHDMIcapture/issues/87)) |
 
-Other cards are worth trying: the wizard shows what they offer. The full
-list: [docs/capture-cards.md](docs/capture-cards.md).
-
-The console settings that give a black picture or bad sound when wrong
+The source settings that give a black picture or bad sound when wrong
 (HDCP, HDR, audio format) have one page per source:
 [PlayStation 5](sources/ps5.md), [PlayStation 4](sources/ps4.md),
 [Xbox Series X/S](sources/xbox-series.md), [Nintendo Switch](sources/switch.md),
