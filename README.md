@@ -49,6 +49,7 @@ and Windows. It does that one job: no recording, no streaming, no account.
 - [GPU enhancements](#gpu-enhancements)
 - [Works with](#works-with)
 - [Troubleshooting](#troubleshooting)
+- [Help test it](#help-test-it)
 - [Settings](#settings)
 - [More](#more)
 
@@ -202,6 +203,29 @@ The source settings that give a black picture or bad sound when wrong
 `--debug` opens the dashboard, and `DEBUG=log` writes a log of every
 decision. Less common problems, and the details behind all this:
 [docs/how-it-works.md](docs/how-it-works.md).
+
+## Help test it
+
+protoHDMIcapture has run on only a few setups, so a report from yours helps,
+even "it didn't start".
+[Open an issue](https://github.com/mattiasbrandt/protoHDMIcapture/issues/new) with:
+
+- your capture card (the setup wizard's card page shows its USB id),
+- what is plugged into it (PS5, Switch, a PC…),
+- your GPU, your monitor and its refresh rate,
+- Linux and which desktop, or Windows,
+- what happened, and what you expected.
+
+Paste the output of these two as well:
+
+```bash
+protohdmicapture --settings             # every setting and where it came from
+protohdmicapture --stats --seconds 60   # a minute of delay numbers; the summary names the GPU
+```
+
+For a problem that comes and goes, run with `DEBUG=log` and attach
+`debug.log` from `$XDG_RUNTIME_DIR/protohdmicapture/` (Windows:
+`%LOCALAPPDATA%\protohdmicapture\`).
 
 ## Settings
 
