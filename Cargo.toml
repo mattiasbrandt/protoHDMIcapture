@@ -30,7 +30,7 @@ zune-jpeg = "0.5.15"
 [target.'cfg(target_os = "linux")'.dependencies]
 cpal = { version = "0.18", features = ["pipewire", "realtime-dbus"] }
 # GameMode's D-Bus calls (#77): the dbus cpal's realtime-dbus already brings.
-dbus = "0.6.5"
+dbus = "0.9.12"
 linuxvideo = "=0.3.5"
 pipewire = "0.10"
 wayland-backend = { version = "0.3", features = ["client_system"] }
